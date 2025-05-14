@@ -154,6 +154,9 @@ try:
             print("Failed to grab frame.")
             break
 
+        # Rotate the camera image upside down
+        frame = cv2.flip(frame, -1)
+
         h, w = frame.shape[:2]
 
         # --- Obstacle Detection ---
