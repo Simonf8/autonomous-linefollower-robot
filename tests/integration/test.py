@@ -6,7 +6,7 @@ import sys
 
 # ─── GPIO & MOTOR SETUP ───────────────────────────────────────
 IN1, IN2 = 21, 20   # Left motor pins
-IN3, IN4 = 19, 16   # Right motor pins
+IN3, IN4 = 19, 26   # Right motor pins
 PWM_FREQ    = 500  # PWM frequency in Hz
 SPEED        = 60  # Default forward speed (%)
 TURN_SPEED   = 70  # Speed for turning maneuvers (%)
