@@ -1,4 +1,3 @@
-```python
 import cv2
 import numpy as np
 import RPi.GPIO as GPIO
@@ -190,6 +189,21 @@ try:
             forward(SPEED)
             state = None
             time.sleep(0.2)
+        # can be delted If no obstacle and not in a maneuver, check line-following
+        elif state is None:
+            # Check if we are on the line
+            cx, roi_line, mask_line = detect_line(frame)
+            if cx is None:
+                # Lost line: go forward
+                forward(SPEED)
+            else:
+                lw = roi_line.shape[1]
+                if cx < 0.4 * lw:
+                    turn_left(SPEED)
+                elif cx > 0.6 * lw:
+                    turn_right(SPEED)
+                else:
+                    forward(SPEED)
 
         else:
             # Line-following default behavior
@@ -226,4 +240,3 @@ finally:
     if cap: cap.release()
     cv2.destroyAllWindows()
     print("Shutdown complete")
-```
