@@ -26,8 +26,8 @@ import gc
 # -----------------------------------------------------------------------------
 
 # WiFi Configuration
-WIFI_SSID = "YOUR_WIFI_SSID"        # Replace with your WiFi SSID
-WIFI_PASSWORD = "YOUR_WIFI_PASSWORD" # Replace with your WiFi password
+WIFI_SSID = "CJ"        # Replace with your WiFi SSID
+WIFI_PASSWORD = "4533simon" # Replace with your WiFi password
 SERVER_PORT = 1234
 
 # Motor Driver Pins (L298N Configuration)

@@ -1,0 +1,65 @@
+vision:
+  cam_width: 320
+  cam_height: 240
+  cam_fps: 20
+  cam_index: 1
+  median_filter_size: 5
+  gaussian_blur_size: 7
+  black_threshold: 80
+  adaptive_block_size: 11
+  adaptive_c: 5
+  canny_low: 50
+  canny_high: 150
+  hough_threshold: 25
+  hough_min_line_length: 20
+  hough_max_line_gap: 15
+  grid_rows: 6
+  grid_cols: 8
+  min_black_pixels_ratio: 0.15
+  roi_zones:
+    - height_ratio: 0.25
+      top_offset: 0.70
+      weight: 3.0
+    - height_ratio: 0.20
+      top_offset: 0.50
+      weight: 2.0
+    - height_ratio: 0.15
+      top_offset: 0.35
+      weight: 1.0
+
+control:
+  pid_kp: 1.2
+  pid_ki: 0.05
+  pid_kd: 0.35
+  pid_integral_max: 0.8
+  enable_adaptive_pid: true
+  pid_kp_range: [0.8, 2.0]
+  pid_adaptation_rate: 0.1
+  steering_deadzone: 0.08
+  max_steering_rate: 0.5
+  search_timeout: 40
+  search_oscillation_amplitude: 0.3
+  speed_zones:
+    PERFECT:
+      threshold: 0.05
+      speed: FAST
+    GOOD:
+      threshold: 0.15
+      speed: NORMAL
+    MODERATE:
+      threshold: 0.30
+      speed: SLOW
+    LARGE:
+      threshold: 0.50
+      speed: SLOW
+
+system:
+  esp32_ip: "192.168.53.117"
+  esp32_port: 1234
+  flask_port: 5000
+  log_level: "INFO"
+  enable_data_logging: true
+  log_file_path: "robot_data.log"
+  enable_threading: true
+  frame_skip_ratio: 0.0
+  max_processing_time: 0.1 
