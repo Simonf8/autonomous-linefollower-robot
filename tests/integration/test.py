@@ -72,6 +72,8 @@ lines_detected, robot_status, fps_current, confidence_score = 0, "Initializing",
 search_memory = deque(maxlen=50)
 esp_comm = None
 line_history = deque(maxlen=10)  # For temporal consistency
+# Maintain short history of offsets for smoothing
+offset_history = deque(maxlen=5)
 
 # -----------------------------------------------------------------------------
 # --- Logging Setup ---
@@ -573,7 +575,14 @@ def main():
             # Changed to INFO for better visibility of this crucial debug line without setting global DEBUG
             logger.info(f"Detection: Off={final_offset:.2f if final_offset else None}, Ang={final_angle:.1f if final_angle else None}, Segs={len(detected_line_segments if detected_line_segments else [])}, Conf={confidence:.2f}")
 
-            current_line_offset=final_offset if final_offset is not None else 0.0
+            # Smooth offset using short history to reduce jitter
+            if final_offset is not None:
+                offset_history.append(final_offset)
+            if offset_history:
+                smoothed_offset = float(np.mean(offset_history))
+            else:
+                smoothed_offset = 0.0
+            current_line_offset = smoothed_offset
             current_line_angle=final_angle if final_angle is not None else 0.0
             lines_detected=len(detected_line_segments) if detected_line_segments else 0
             confidence_score = confidence
@@ -582,10 +591,10 @@ def main():
             if final_offset is not None and confidence > 0.15: 
                 logger.info("Decision: FOLLOW line") # Changed to INFO for visibility
                 robot_status = f"Follow (C:{confidence:.2f})"
-                search_counter=0; search_memory.append(final_offset); last_known_offset=final_offset
-                steering_error = -final_offset
+                search_counter=0; search_memory.append(smoothed_offset); last_known_offset=smoothed_offset
+                steering_error = -smoothed_offset
                 current_steering = pid_controller.calculate(steering_error)
-                abs_offset = abs(final_offset)
+                abs_offset = abs(smoothed_offset)
 
                 if confidence > 0.6 and abs_offset < OFFSET_THRESHOLDS['PERFECT']:
                     current_speed_cmd = SPEEDS['FAST']
@@ -606,8 +615,8 @@ def main():
             elif final_offset is not None and confidence > 0.05: 
                 logger.info("Decision: WEAK SIGNAL") # Changed to INFO
                 robot_status = f"Weak Sig (C:{confidence:.2f})"
-                search_counter=0; last_known_offset=final_offset
-                steering_error = -final_offset * 0.7
+                search_counter=0; last_known_offset=smoothed_offset
+                steering_error = -smoothed_offset * 0.7
                 current_steering = pid_controller.calculate(steering_error)
                 current_speed_cmd = SPEEDS['SLOW']
                 if USE_NORMAL_INSTEAD_OF_STALLING_SLOW: current_speed_cmd = SPEEDS['NORMAL']
@@ -630,7 +639,7 @@ def main():
             if esp_comm: esp_comm.send_command(current_speed_cmd, current_turn_cmd)
 
             # --- Visuals & Update ---
-            draw_line_overlays(display_frame, ROI_ZONES, detected_line_segments, final_offset, confidence)
+            draw_line_overlays(display_frame, ROI_ZONES, detected_line_segments, smoothed_offset if final_offset is not None else None, confidence)
             draw_car_arrow(display_frame); draw_status_panel(display_frame)
             if processed_frame is not None and processed_frame.ndim==2:
                 dbg_frm_clr=cv2.cvtColor(processed_frame,cv2.COLOR_GRAY2BGR); dbg_sml=cv2.resize(dbg_frm_clr,(CAM_W//4,CAM_H//4))
