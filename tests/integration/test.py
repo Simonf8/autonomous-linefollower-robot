@@ -74,6 +74,9 @@ esp_comm = None
 line_history = deque(maxlen=10)  # For temporal consistency
 # Maintain short history of offsets for smoothing
 offset_history = deque(maxlen=5)
+# Exponential smoothing factor for offsets
+OFFSET_ALPHA = 0.3
+smoothed_offset = 0.0
 
 # -----------------------------------------------------------------------------
 # --- Logging Setup ---
@@ -505,7 +508,62 @@ def draw_status_panel(display_frame):
     cv2.putText(display_frame,f"FPS: {fps_current:.1f}",(10,y),cv2.FONT_HERSHEY_SIMPLEX,0.4,(255,255,255),1)
 
 app = Flask(__name__)
-HTML_TEMPLATE = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>🤖 Black Line Follower Dashboard</title><style>:root{--bg-color:#1a1c20;--card-bg:#25282e;--text-color:#e0e0e0;--primary-accent:#00ffff;--secondary-accent:#ff6b35;--success-green:#4caf50;--warning-yellow:#ffeb3b;--error-red:#f44336;--border-color:#3a3f47}body{margin:0;font-family:'Roboto',Arial,sans-serif;background-color:var(--bg-color);color:var(--text-color);display:flex;flex-direction:column;align-items:center;padding:10px;font-size:14px}.container{display:grid;grid-template-columns:2fr 1fr;gap:20px;width:100%;max-width:1200px}header{grid-column:1 / -1;text-align:center;margin-bottom:10px}header h1{font-size:2em;color:var(--primary-accent);margin:0}#esp-status{font-weight:700;padding:5px 10px;border-radius:5px;display:inline-block;margin-top:5px}.card{background-color:var(--card-bg);border-radius:8px;padding:15px;box-shadow:0 2px 10px rgba(0,0,0,.2);border:1px solid var(--border-color)}.video-feed{width:100%;height:auto;border-radius:6px;display:block;background-color:#000}.status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.status-item{padding:10px;border-radius:6px;background-color:#2c3038}.status-item h3{margin:0 0 5px;font-size:.9em;color:var(--primary-accent);text-transform:uppercase}.status-item .value{font-size:1.5em;font-weight:700;color:var(--text-color)}.status-item .unit{font-size:.8em;color:#aaa;margin-left:5px}.connected{color:var(--success-green);background-color:rgba(76,175,80,.1);border:1px solid var(--success-green)}.disconnected{color:var(--error-red);background-color:rgba(244,67,54,.1);border:1px solid var(--error-red)}.progress-bar-container{width:100%;height:8px;background-color:#3a3f47;border-radius:4px;overflow:hidden;margin-top:5px}.progress-bar-fill{height:100%;background-color:var(--success-green);width:0%;transition:width .2s ease-in-out}@media (max-width:768px){.container{grid-template-columns:1fr}header h1{font-size:1.5em}.status-item .value{font-size:1.2em}}</style></head><body><header><h1>Line Follower Control</h1><div id="esp-status" class="disconnected">ESP32: Connecting...</div></header><div class="container"><div class="card video-container"><img src="{{ url_for('video_feed') }}" class="video-feed" alt="Camera Feed"></div><div class="card status-grid"><div class="status-item"><h3>Robot Status</h3><span class="value" id="robot-status">N/A</span></div><div class="status-item"><h3>Lines Found</h3><span class="value" id="lines-detected">0</span></div><div class="status-item"><h3>Confidence</h3><span class="value" id="confidence">0.00</span><div class="progress-bar-container"><div class="progress-bar-fill" id="confidence-bar"></div></div></div><div class="status-item"><h3>Offset</h3><span class="value" id="line-offset">0.000</span></div><div class="status-item"><h3>Steering</h3><span class="value" id="steering">0.000</span></div><div class="status-item"><h3>Speed Cmd</h3><span class="value" id="speed-cmd">N/A</span></div><div class="status-item"><h3>Turn Cmd</h3><span class="value" id="turn-cmd">N/A</span></div><div class="status-item"><h3>FPS</h3><span class="value" id="fps">0.0</span></div></div></div><script>const speedMap={'F':'FAST','N':'NORMAL','S':'SLOW','T':'TURN','H':'STOP'},turnMap={'FORWARD':'FWD','LEFT':'LEFT','RIGHT':'RIGHT'};function updateStatus(){fetch('/status').then(e=>e.json()).then(e=>{document.getElementById('robot-status').textContent=e.robot_status||'N/A';document.getElementById('lines-detected').textContent=e.lines_detected||0;const t=e.confidence||0;document.getElementById('confidence').textContent=t.toFixed(2),document.getElementById('confidence-bar').style.width=100*t+'%';document.getElementById('line-offset').textContent=(e.line_offset||0).toFixed(3);document.getElementById('steering').textContent=(e.steering||0).toFixed(3);document.getElementById('speed-cmd').textContent=speedMap[e.speed_cmd]||e.speed_cmd||'N/A';document.getElementById('turn-cmd').textContent=turnMap[e.turn_cmd]||e.turn_cmd||'N/A';document.getElementById('fps').textContent=(e.fps||0).toFixed(1);const n=document.getElementById('esp-status');e.robot_status&&e.robot_status.toLowerCase().includes('error')?(n.className='disconnected',n.textContent='ESP32: Error/Disconnected'):e.esp_connected?(n.className='connected',n.textContent='ESP32: Connected'):(n.className='disconnected',n.textContent='ESP32: Disconnected')}).catch(e=>console.error('Error fetching status:',e))}setInterval(updateStatus,300),updateStatus();</script></body></html>"""
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+  <meta charset='UTF-8'>
+  <title>🚗 Line Follower Dashboard</title>
+  <style>
+    body{background:#222;color:#ddd;font-family:Arial;text-align:center;margin:0;padding:0;}
+    header{padding:10px;}
+    .video-container{display:inline-block;position:relative;margin-top:10px;border:4px solid #444;border-radius:8px;}
+    .status-grid{display:flex;justify-content:center;gap:15px;margin-top:10px;flex-wrap:wrap;}
+    .status-item{background:#333;padding:8px 12px;border-radius:8px;min-width:80px}
+    #dir-arrow{font-size:48px;color:#0f0;margin-top:6px;transition:transform .3s ease}
+    .connected{color:#4caf50}.disconnected{color:#f44336}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🚗 Line Follower Dashboard</h1>
+    <div id='esp-status' class='disconnected'>ESP32: Connecting...</div>
+  </header>
+  <div class='video-container'>
+    <img src='{{ url_for('video_feed') }}' id='video-feed' width='640' height='480' alt='Camera Feed'>
+    <div id='dir-arrow'>↑</div>
+  </div>
+  <div class='status-grid'>
+    <div class='status-item'>St: <span id='robot-status'>N/A</span></div>
+    <div class='status-item'>Lines: <span id='lines-detected'>0</span></div>
+    <div class='status-item'>Offset: <span id='line-offset'>0</span></div>
+    <div class='status-item'>Steer: <span id='steering'>0</span></div>
+    <div class='status-item'>Conf: <span id='confidence'>0</span></div>
+    <div class='status-item'>FPS: <span id='fps'>0</span></div>
+  </div>
+  <script>
+    const turnMap={'FORWARD':0,'LEFT':-90,'RIGHT':90};
+    function updateStatus(){
+      fetch('/status').then(r=>r.json()).then(s=>{
+        document.getElementById('robot-status').textContent=s.robot_status||'N/A';
+        document.getElementById('lines-detected').textContent=s.lines_detected||0;
+        document.getElementById('line-offset').textContent=(s.line_offset||0).toFixed(3);
+        document.getElementById('steering').textContent=(s.steering||0).toFixed(3);
+        document.getElementById('confidence').textContent=(s.confidence||0).toFixed(2);
+        document.getElementById('fps').textContent=(s.fps||0).toFixed(1);
+        const arrow=document.getElementById('dir-arrow');
+        const deg=turnMap[s.turn_cmd]||0;arrow.style.transform=`rotate(${deg}deg)`;
+        arrow.textContent=deg===0?'↑':(deg<0?'↰':'↱');
+        const esp=document.getElementById('esp-status');
+        if(s.esp_connected){esp.textContent='ESP32: Connected';esp.className='connected';}
+        else{esp.textContent='ESP32: Disconnected';esp.className='disconnected';}
+      }).catch(e=>console.error('Status fetch err:',e));
+    }
+    setInterval(updateStatus,300);updateStatus();
+  </script>
+</body>
+</html>
+"""
 @app.route('/')
 def index(): return render_template_string(HTML_TEMPLATE)
 @app.route('/video_feed')
@@ -533,7 +591,7 @@ def run_flask():
 def main():
     global CAM_W, CAM_H, output_frame_flask, frame_lock, current_line_angle, current_line_offset, current_steering
     global current_speed_cmd, current_turn_cmd, lines_detected, robot_status, fps_current, confidence_score
-    global search_memory, esp_comm
+    global search_memory, esp_comm, smoothed_offset
 
     logger.info("🚀 Starting Line Following Robot...")
     robot_status = "Init Cam"
@@ -575,13 +633,16 @@ def main():
             # Changed to INFO for better visibility of this crucial debug line without setting global DEBUG
             logger.info(f"Detection: Off={final_offset:.2f if final_offset else None}, Ang={final_angle:.1f if final_angle else None}, Segs={len(detected_line_segments if detected_line_segments else [])}, Conf={confidence:.2f}")
 
-            # Smooth offset using short history to reduce jitter
+            # Smooth offset using short history and exponential filter
             if final_offset is not None:
                 offset_history.append(final_offset)
-            if offset_history:
-                smoothed_offset = float(np.mean(offset_history))
-            else:
-                smoothed_offset = 0.0
+                global smoothed_offset
+                if len(offset_history) == 1:
+                    smoothed_offset = final_offset
+                else:
+                    smoothed_offset = (1-OFFSET_ALPHA)*smoothed_offset + OFFSET_ALPHA*final_offset
+            elif offset_history:
+                smoothed_offset = (1-OFFSET_ALPHA)*smoothed_offset
             current_line_offset = smoothed_offset
             current_line_angle=final_angle if final_angle is not None else 0.0
             lines_detected=len(detected_line_segments) if detected_line_segments else 0
