@@ -17,17 +17,29 @@ from flask import Flask, Response, render_template_string, jsonify
 ESP32_IP = '192.168.53.117'  # Change this to your ESP32's IP address
 ESP32_PORT = 1234
 CAMERA_WIDTH, CAMERA_HEIGHT = 320, 240
-CAMERA_FPS = 15
+CAMERA_FPS = 5
 
 # Image processing parameters
 BLACK_THRESHOLD = 60  # Higher values detect darker lines
 BLUR_SIZE = 5
 MIN_CONTOUR_AREA = 100  # Minimum area to be considered a line
 
+# Multi-zone detection parameters
+ZONE_BOTTOM_HEIGHT = 0.25   # Bottom 25% for primary line following
+ZONE_MIDDLE_HEIGHT = 0.25   # Middle 25% for corner prediction
+ZONE_TOP_HEIGHT = 0.30      # Top 30% for object detection
+
 # Corner detection parameters
 CORNER_DETECTION_ENABLED = True
 CORNER_CONFIDENCE_BOOST = 1.2
 CORNER_CIRCULARITY_THRESHOLD = 0.4  # Lower values indicate corners
+CORNER_PREDICTION_THRESHOLD = 0.3   # Confidence needed for corner warning
+
+# Object detection parameters
+OBJECT_DETECTION_ENABLED = True
+OBJECT_SIZE_THRESHOLD = 800   # Minimum contour area to be considered an object
+OBJECT_WIDTH_THRESHOLD = 0.15  # Object width relative to frame width to trigger avoidance
+OBJECT_AVOIDANCE_DISTANCE = 5  # How many frames to remember object position
 
 # Simple PID controller values
 KP = 0.6  # Proportional gain
@@ -36,12 +48,21 @@ KD = 0.1   # Derivative gain
 MAX_INTEGRAL = 5.0  # Prevent integral windup
 
 # Commands for ESP32
-COMMANDS = {'FORWARD': 'FORWARD', 'LEFT': 'LEFT', 'RIGHT': 'RIGHT', 'STOP': 'STOP'}
+COMMANDS = {'FORWARD': 'FORWARD', 'LEFT': 'LEFT', 'RIGHT': 'RIGHT', 'STOP': 'STOP', 
+           'AVOID_LEFT': 'AVOID_LEFT', 'AVOID_RIGHT': 'AVOID_RIGHT'}
 SPEED = 'SLOW'  # Default speed
 
 # Steering parameters
 STEERING_DEADZONE = 0.1  # Ignore small errors
 MAX_STEERING = 1.0  # Maximum steering value
+
+# Object avoidance state
+object_detected = False
+object_position = 0.0  # -1.0 (left) to 1.0 (right)
+object_avoidance_counter = 0
+avoidance_side = None  # 'left' or 'right'
+corner_warning = False
+corner_prediction_frames = 0
 
 # -----------------------------------------------------------------------------
 # --- Global Variables ---
@@ -61,7 +82,9 @@ robot_stats = {
     'uptime': 0,
     'total_frames': 0,
     'lost_frames': 0,
-    'corner_count': 0
+    'corner_count': 0,
+    'objects_detected': 0,
+    'avoidance_maneuvers': 0
 }
 
 # -----------------------------------------------------------------------------
@@ -192,114 +215,232 @@ class ESP32Connection:
             logger.info("Disconnected from ESP32")
 
 # -----------------------------------------------------------------------------
-# --- Image Processing ---
+# --- Enhanced Multi-Zone Image Processing ---
 # -----------------------------------------------------------------------------
-def detect_line_in_roi(roi):
-    """Helper function to detect line in a specific ROI"""
+def detect_line_in_roi(roi, zone_name="unknown"):
+    """Helper function to detect line in a specific ROI with zone-specific parameters"""
     if roi.size == 0:
-        return None, 0.0
+        return None, 0.0, None
         
     # Find contours in the ROI
     contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     if not contours:
-        return None, 0.0
+        return None, 0.0, None
     
-    # Find the largest contour (most likely the line)
-    largest_contour = max(contours, key=cv2.contourArea)
+    # Filter contours based on zone
+    valid_contours = []
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if zone_name == "bottom" and area >= MIN_CONTOUR_AREA:
+            valid_contours.append(contour)
+        elif zone_name == "middle" and area >= MIN_CONTOUR_AREA * 0.7:  # Slightly smaller threshold for middle
+            valid_contours.append(contour)
+        elif zone_name == "top" and area >= OBJECT_SIZE_THRESHOLD:  # Much larger threshold for objects
+            valid_contours.append(contour)
     
-    # Check if contour is large enough to be a line
+    if not valid_contours:
+        return None, 0.0, None
+    
+    # Find the largest contour
+    largest_contour = max(valid_contours, key=cv2.contourArea)
     area = cv2.contourArea(largest_contour)
-    if area < MIN_CONTOUR_AREA:  # Minimum area threshold
-        return None, 0.0
     
     # Get the center of the contour
     M = cv2.moments(largest_contour)
     if M["m00"] == 0:
-        return None, 0.0
+        return None, 0.0, None
     
-    # Calculate x-position of line center
+    # Calculate x-position of detection center
     cx = int(M["m10"] / M["m00"])
     
-    # Calculate confidence based on contour area
+    # Calculate confidence based on contour area and zone
     height, width = roi.shape
-    confidence = min(area / (width * height * 0.1), 1.0)
+    base_confidence = min(area / (width * height * 0.1), 1.0)
     
-    # Check if contour might be a corner by looking at its shape
-    # Calculate circularity - corners tend to be less circular
-    perimeter = cv2.arcLength(largest_contour, True)
-    if perimeter > 0:
-        circularity = 4 * np.pi * area / (perimeter * perimeter)
-        
-        # Low circularity might indicate a corner
-        if circularity < CORNER_CIRCULARITY_THRESHOLD:
-            # Increase confidence for potential corners
-            confidence *= CORNER_CONFIDENCE_BOOST
+    # Zone-specific confidence adjustments
+    if zone_name == "top":
+        # For object detection, check if it's significant enough to avoid
+        bounding_rect = cv2.boundingRect(largest_contour)
+        object_width_ratio = bounding_rect[2] / width
+        if object_width_ratio > OBJECT_WIDTH_THRESHOLD:
+            base_confidence *= 1.5  # Boost confidence for significant objects
+    elif zone_name == "middle":
+        # For corner prediction, analyze shape
+        perimeter = cv2.arcLength(largest_contour, True)
+        if perimeter > 0:
+            circularity = 4 * np.pi * area / (perimeter * perimeter)
+            if circularity < CORNER_CIRCULARITY_THRESHOLD:
+                base_confidence *= CORNER_CONFIDENCE_BOOST
     
-    return cx, confidence
+    return cx, base_confidence, largest_contour
 
-def process_image(frame):
-    """Detect black line in image and return line position, handling corners better"""
-    # Convert to grayscale
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+def detect_objects_in_zone(binary_roi, width):
+    """Detect objects specifically in the top zone that might block the path"""
+    contours, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Apply Gaussian blur to reduce noise
+    objects = []
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < OBJECT_SIZE_THRESHOLD:
+            continue
+            
+        # Get bounding rectangle
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # Check if object is significant enough to avoid
+        width_ratio = w / width
+        if width_ratio > OBJECT_WIDTH_THRESHOLD:
+            # Calculate object center position (-1.0 to 1.0)
+            center_x = x + w/2
+            relative_pos = (center_x - width/2) / (width/2)
+            
+            objects.append({
+                'position': relative_pos,
+                'width_ratio': width_ratio,
+                'area': area,
+                'contour': contour,
+                'bbox': (x, y, w, h)
+            })
+    
+    return objects
+
+def process_image_multi_zone(frame):
+    """Enhanced image processing with multi-zone detection"""
+    global corner_warning, corner_prediction_frames, object_detected, object_position
+    
+    # Convert to grayscale and blur
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (BLUR_SIZE, BLUR_SIZE), 0)
     
-    # Threshold the image to identify black regions
+    # Create binary image for line detection
     _, binary = cv2.threshold(blurred, BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
     
-    # Create multiple ROIs to better detect corners
+    # Create inverted binary for object detection (objects are usually lighter than lines)
+    _, binary_inverted = cv2.threshold(blurred, BLACK_THRESHOLD + 30, 255, cv2.THRESH_BINARY)
+    
     height, width = binary.shape
     
-    # Bottom ROI (closest to robot) - Primary detection area
-    bottom_height = int(height * 0.3)
-    bottom_roi = binary[height - bottom_height:height, :]
+    # Define zones
+    bottom_start = int(height * (1 - ZONE_BOTTOM_HEIGHT))
+    middle_start = int(height * (1 - ZONE_BOTTOM_HEIGHT - ZONE_MIDDLE_HEIGHT))
+    top_start = int(height * (1 - ZONE_BOTTOM_HEIGHT - ZONE_MIDDLE_HEIGHT - ZONE_TOP_HEIGHT))
     
-    # Middle ROI (for corner detection) - Look ahead to see upcoming turns
-    middle_height = int(height * 0.2)
-    middle_roi = binary[height - bottom_height - middle_height:height - bottom_height, :]
+    # Extract ROIs for each zone
+    bottom_roi = binary[bottom_start:height, :]
+    middle_roi = binary[middle_start:bottom_start, :]
+    top_roi = binary_inverted[top_start:middle_start, :]  # Use inverted for object detection
     
-    # Process bottom ROI first (where the line should be)
-    bottom_x, bottom_confidence = detect_line_in_roi(bottom_roi)
+    # Process each zone
+    # 1. Bottom zone - Primary line following
+    bottom_x, bottom_confidence, bottom_contour = detect_line_in_roi(bottom_roi, "bottom")
     
-    # If bottom confidence is high, use it directly
-    if bottom_confidence > 0.5:
-        return bottom_x, bottom_roi, bottom_confidence
-        
-    # Process middle ROI to detect upcoming corners
-    middle_x, middle_confidence = detect_line_in_roi(middle_roi)
+    # 2. Middle zone - Corner prediction
+    middle_x, middle_confidence, middle_contour = detect_line_in_roi(middle_roi, "middle")
     
-    # Corner detection logic
-    if bottom_confidence > 0.2 and middle_confidence > 0.2:
-        # Both ROIs have some line - could be a corner
-        # Calculate how much the line shifts - indicates a corner
+    # 3. Top zone - Object detection
+    detected_objects = detect_objects_in_zone(top_roi, width)
+    
+    # Update corner warning
+    if middle_confidence > CORNER_PREDICTION_THRESHOLD:
         if bottom_x is not None and middle_x is not None:
-            # Calculate shift which could indicate a corner
             shift = abs(middle_x - bottom_x)
-            
-            if shift > width * 0.1:  # Significant shift indicates corner
-                logger.debug(f"Corner detected! Shift: {shift}")
-                robot_stats['corner_count'] += 1
-
-                # Use a weighted average favoring the bottom ROI
-                weighted_x = int((bottom_x * 0.7) + (middle_x * 0.3))
-                weighted_confidence = max(bottom_confidence, middle_confidence)
-                return weighted_x, bottom_roi, weighted_confidence
-    
-    # If no clear corner, prioritize bottom ROI
-    if bottom_confidence > 0.2:
-        return bottom_x, bottom_roi, bottom_confidence
-    elif middle_confidence > 0.3:  # Higher threshold for middle section
-        return middle_x, middle_roi, middle_confidence * 0.8  # Slightly reduce confidence
+            if shift > width * 0.15:  # Significant shift indicates upcoming corner
+                corner_warning = True
+                corner_prediction_frames += 1
+            else:
+                corner_prediction_frames = max(0, corner_prediction_frames - 1)
+        else:
+            corner_prediction_frames = max(0, corner_prediction_frames - 1)
     else:
-        return None, None, 0.0
+        corner_prediction_frames = max(0, corner_prediction_frames - 1)
+    
+    if corner_prediction_frames <= 0:
+        corner_warning = False
+    
+    # Update object detection
+    if detected_objects:
+        # Find the most significant object (largest and most centered)
+        main_object = max(detected_objects, key=lambda obj: obj['area'] * (1 - abs(obj['position'])))
+        object_detected = True
+        object_position = main_object['position']
+        robot_stats['objects_detected'] += 1
+    else:
+        object_detected = False
+        object_position = 0.0
+    
+    # Determine primary line position
+    line_x = None
+    confidence = 0.0
+    primary_roi = None
+    
+    if bottom_confidence > 0.3:
+        # Strong bottom detection - use it
+        line_x = bottom_x
+        confidence = bottom_confidence
+        primary_roi = bottom_roi
+    elif middle_confidence > 0.4 and corner_warning:
+        # Corner prediction mode - use middle detection
+        line_x = middle_x
+        confidence = middle_confidence * 0.8  # Reduce confidence for prediction
+        primary_roi = middle_roi
+    elif bottom_confidence > 0.1:
+        # Weak bottom detection - still usable
+        line_x = bottom_x
+        confidence = bottom_confidence
+        primary_roi = bottom_roi
+    
+    return {
+        'line_x': line_x,
+        'confidence': confidence,
+        'primary_roi': primary_roi,
+        'bottom_detection': (bottom_x, bottom_confidence),
+        'middle_detection': (middle_x, middle_confidence),
+        'detected_objects': detected_objects,
+        'zones': {
+            'bottom': (bottom_start, height),
+            'middle': (middle_start, bottom_start),
+            'top': (top_start, middle_start)
+        }
+    }
 
 # -----------------------------------------------------------------------------
-# --- Movement Control ---
+# --- Enhanced Movement Control with Object Avoidance ---
 # -----------------------------------------------------------------------------
-def get_turn_command(steering):
-    """Convert steering value to turn command with improved corner handling"""
+def get_turn_command_with_avoidance(steering, avoid_objects=False, avoidance_direction=None):
+    """Convert steering value to turn command with object avoidance"""
+    global object_avoidance_counter, avoidance_side
+    
+    # Object avoidance takes priority
+    if avoid_objects and object_detected:
+        object_avoidance_counter = OBJECT_AVOIDANCE_DISTANCE
+        
+        # Determine avoidance direction based on object position
+        if object_position < -0.2:  # Object on left side
+            avoidance_side = 'right'
+            robot_stats['avoidance_maneuvers'] += 1
+            return COMMANDS['AVOID_RIGHT']
+        elif object_position > 0.2:  # Object on right side
+            avoidance_side = 'left'
+            robot_stats['avoidance_maneuvers'] += 1
+            return COMMANDS['AVOID_LEFT']
+        else:  # Object in center - choose based on line position or default
+            if steering > 0:  # Line suggests going left, so avoid right
+                avoidance_side = 'right'
+                return COMMANDS['AVOID_RIGHT']
+            else:  # Line suggests going right, so avoid left
+                avoidance_side = 'left'
+                return COMMANDS['AVOID_LEFT']
+    
+    # Continue avoidance maneuver for a few frames
+    if object_avoidance_counter > 0:
+        object_avoidance_counter -= 1
+        if avoidance_side == 'left':
+            return COMMANDS['AVOID_LEFT']
+        elif avoidance_side == 'right':
+            return COMMANDS['AVOID_RIGHT']
+    
+    # Normal steering behavior
     # Apply deadzone to avoid oscillation
     if abs(steering) < STEERING_DEADZONE:
         return COMMANDS['FORWARD']
@@ -318,42 +459,141 @@ def get_turn_command(steering):
         return COMMANDS['LEFT']
 
 # -----------------------------------------------------------------------------
-# --- Visualization ---
+# --- Enhanced Visualization ---
 # -----------------------------------------------------------------------------
-def draw_debug_info(frame, line_x=None, roi=None, confidence=0.0):
-    """Draw debug information on frame"""
+def draw_debug_info(frame, detection_data):
+    """Draw comprehensive debug information including all zones and detections"""
     height, width = frame.shape[:2]
     
-    # Draw ROI rectangles for both bottom and middle sections
-    bottom_height = int(height * 0.3)
-    middle_height = int(height * 0.2)
+    if detection_data is None:
+        return
     
-    # Bottom ROI (main detection area)
-    bottom_top = height - bottom_height
-    cv2.rectangle(frame, (0, bottom_top), (width, height), (0, 255, 255), 2)
-    cv2.putText(frame, "Bottom ROI", (5, bottom_top + 15), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+    zones = detection_data.get('zones', {})
+    detected_objects = detection_data.get('detected_objects', [])
+    bottom_detection = detection_data.get('bottom_detection', (None, 0))
+    middle_detection = detection_data.get('middle_detection', (None, 0))
+    line_x = detection_data.get('line_x')
     
-    # Middle ROI (corner detection)
-    middle_top = bottom_top - middle_height
-    cv2.rectangle(frame, (0, middle_top), (width, bottom_top), (0, 200, 255), 2)
-    cv2.putText(frame, "Corner ROI", (5, middle_top + 15), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1)
+    # Draw zone boundaries
+    if 'bottom' in zones:
+        bottom_start, bottom_end = zones['bottom']
+        cv2.rectangle(frame, (0, bottom_start), (width, bottom_end), (0, 255, 255), 2)
+        cv2.putText(frame, "BOTTOM: Line Following", (5, bottom_start + 15), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+    
+    if 'middle' in zones:
+        middle_start, middle_end = zones['middle']
+        cv2.rectangle(frame, (0, middle_start), (width, middle_end), (0, 255, 128), 2)
+        cv2.putText(frame, "MIDDLE: Corner Prediction", (5, middle_start + 15), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 128), 1)
+    
+    if 'top' in zones:
+        top_start, top_end = zones['top']
+        cv2.rectangle(frame, (0, top_start), (width, top_end), (128, 255, 0), 2)
+        cv2.putText(frame, "TOP: Object Detection", (5, top_start + 15), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 255, 0), 1)
     
     # Draw center line
     center_x = width // 2
     cv2.line(frame, (center_x, 0), (center_x, height), (200, 200, 200), 1)
     
-    # Draw detected line position
-    if line_x is not None:
-        # Draw circle at detected line position
-        line_y = bottom_top + bottom_height // 2
-        cv2.circle(frame, (line_x, line_y), 10, (0, 0, 255), -1)
-        cv2.line(frame, (center_x, line_y), (line_x, line_y), (255, 0, 255), 2)
+    # Draw detected objects
+    for obj in detected_objects:
+        bbox = obj['bbox']
+        x, y, w, h = bbox
+        # Adjust y coordinate for top zone
+        y_adjusted = zones.get('top', (0, 0))[0] + y
         
-        # Draw offset line
+        # Draw bounding box
+        cv2.rectangle(frame, (x, y_adjusted), (x + w, y_adjusted + h), (0, 0, 255), 2)
+        cv2.putText(frame, f"OBJECT", (x, y_adjusted - 5), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        
+        # Draw warning indicator
+        cv2.putText(frame, "⚠️ OBSTACLE DETECTED", (width//2 - 100, 50),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+    
+    # Draw corner warning
+    if corner_warning:
+        cv2.putText(frame, "🔄 CORNER AHEAD", (width//2 - 80, 80),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
+    # Draw line detections
+    if bottom_detection[0] is not None:
+        bottom_x, bottom_conf = bottom_detection
+        bottom_y = zones.get('bottom', (height-50, height))[0] + 25
+        cv2.circle(frame, (bottom_x, bottom_y), 8, (0, 255, 255), -1)
+        cv2.putText(frame, f"B:{bottom_conf:.2f}", (bottom_x - 20, bottom_y - 15),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+    
+    if middle_detection[0] is not None:
+        middle_x, middle_conf = middle_detection
+        middle_y = zones.get('middle', (height//2, height//2))[0] + 15
+        cv2.circle(frame, (middle_x, middle_y), 6, (0, 255, 128), -1)
+        cv2.putText(frame, f"M:{middle_conf:.2f}", (middle_x - 20, middle_y - 15),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 128), 1)
+    
+    # Draw primary line detection
+    if line_x is not None:
+        primary_y = zones.get('bottom', (height-50, height))[0] + 25
+        cv2.circle(frame, (line_x, primary_y), 12, (255, 0, 255), 3)
+        cv2.line(frame, (center_x, primary_y), (line_x, primary_y), (255, 0, 255), 3)
+        
+        # Draw offset information
         offset_text = f"Offset: {line_offset:.2f}"
-        cv2.putText(frame, offset_text, (line_x - 40, line_y - 15),
+        cv2.putText(frame, offset_text, (line_x - 40, primary_y - 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+    
+    # Draw status information
+    status_color = (0, 255, 0) if line_detected else (0, 0, 255)
+    info_lines = [
+        f"Status: {robot_status}",
+        f"Offset: {line_offset:.2f}",
+        f"Confidence: {confidence:.2f}",
+        f"Command: {turn_command}",
+        f"FPS: {current_fps:.1f}",
+        f"Objects: {len(detected_objects)}"
+    ]
+    
+    for i, line in enumerate(info_lines):
+        y_pos = 20 + (i * 20)
+        cv2.putText(frame, line, (10, y_pos), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color if i == 0 else (255, 255, 255), 1)
+    
+    # Draw avoidance status
+    if object_avoidance_counter > 0:
+        cv2.putText(frame, f"AVOIDING {avoidance_side.upper()}", (width//2 - 80, 110),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+    
+    # Draw direction arrow with enhanced colors for avoidance
+    arrow_y = height - 30
+    arrow_color = (0, 255, 0)  # Green for forward
+    arrow_text = "FORWARD"
+    
+    if turn_command == COMMANDS['LEFT']:
+        arrow_color = (0, 255, 255)  # Yellow for left
+        arrow_text = "LEFT"
+    elif turn_command == COMMANDS['RIGHT']:
+        arrow_color = (255, 255, 0)  # Cyan for right
+        arrow_text = "RIGHT"
+    elif turn_command == COMMANDS['AVOID_LEFT']:
+        arrow_color = (255, 0, 255)  # Magenta for avoid left
+        arrow_text = "AVOID LEFT"
+    elif turn_command == COMMANDS['AVOID_RIGHT']:
+        arrow_color = (255, 0, 255)  # Magenta for avoid right
+        arrow_text = "AVOID RIGHT"
+    elif turn_command == COMMANDS['STOP']:
+        arrow_color = (0, 0, 255)  # Red for stop
+        arrow_text = "STOP"
+    
+    cv2.putText(frame, arrow_text, (width // 2 - 50, arrow_y), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.6, arrow_color, 2)
+    
+    # Draw offset line
+    if line_x is not None and 'zones' in detection_data:
+        bottom_y = detection_data['zones'].get('bottom', (height-50, height))[0] + 25
+        offset_text = f"Offset: {line_offset:.2f}"
+        cv2.putText(frame, offset_text, (line_x - 40, bottom_y - 15),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
     
     # Draw status information
@@ -770,7 +1010,11 @@ def api_status():
         'esp_connected': esp_connected,
         'uptime': uptime,
         'total_frames': robot_stats.get('total_frames', 0),
-        'corner_count': robot_stats.get('corner_count', 0)
+        'corner_count': robot_stats.get('corner_count', 0),
+        'objects_detected': robot_stats.get('objects_detected', 0),
+        'avoidance_maneuvers': robot_stats.get('avoidance_maneuvers', 0),
+        'corner_warning': corner_warning,
+        'object_detected': object_detected
     })
 
 # Legacy endpoint for backward compatibility
@@ -883,9 +1127,11 @@ def main():
             frame_count += 1
             robot_stats['total_frames'] = frame_count
             
-            # Process image to find line
-            line_x, roi, detection_confidence = process_image(frame)
-            confidence = detection_confidence
+            # Process image with multi-zone detection
+            detection_data = process_image_multi_zone(frame)
+            line_x = detection_data['line_x']
+            confidence = detection_data['confidence']
+            detected_objects = detection_data['detected_objects']
             
             # Create a copy for visualization
             display_frame = frame.copy()
@@ -912,7 +1158,7 @@ def main():
                 # Remember this offset as last known good position
                 last_known_good_offset = line_offset
                 
-                # Check for corner
+                # Check for corner (enhanced with prediction)
                 if abs(line_offset) > 0.4 and confidence > 0.3:
                     corner_detected_count += 1
                     
@@ -925,11 +1171,18 @@ def main():
                             line_offset *= 1.5  # Increase turning response
                     else:
                         robot_status = f"⚠️ Corner detected ({corner_detected_count})"
+                elif corner_warning:
+                    robot_status = f"🔮 Corner predicted ahead"
                 else:
                     if corner_detected_count > 0:
                         corner_detected_count -= 1
                     else:
                         corner_detected_count = 0
+                        
+                    # Enhanced status with object detection
+                    if detected_objects:
+                        robot_status = f"⚠️ Object detected - avoiding (C:{confidence:.2f})"
+                    else:
                         robot_status = f"✅ Following line (C:{confidence:.2f})"
                 
                 # Calculate steering using PID controller
@@ -946,8 +1199,10 @@ def main():
                 else:
                     avg_steering = steering_value
                 
-                # Convert steering to command
-                turn_command = get_turn_command(avg_steering)
+                # Convert steering to command with object avoidance
+                turn_command = get_turn_command_with_avoidance(avg_steering, 
+                                                             avoid_objects=OBJECT_DETECTION_ENABLED,
+                                                             avoidance_direction=avoidance_side)
                 
                 logger.debug(f"Line at x={line_x}, offset={line_offset:.2f}, steering={steering_value:.2f}")
                 
@@ -998,8 +1253,8 @@ def main():
                 if not success and frame_count % 30 == 0:  # Log occasionally
                     logger.warning("📡 ESP32 communication failed")
             
-            # Draw debug information
-            draw_debug_info(display_frame, line_x, roi, confidence)
+            # Draw enhanced debug information
+            draw_debug_info(display_frame, detection_data)
             
             # Update output frame for web interface
             with frame_lock:
@@ -1011,10 +1266,12 @@ def main():
                 fps_history.append(1.0 / processing_time)
                 current_fps = sum(fps_history) / len(fps_history)
             
-            # Log status periodically
+            # Log status periodically with enhanced info
             if frame_count % 60 == 0:  # Every 2 seconds at 30fps
                 logger.info(f"📊 Status: {robot_status} | FPS: {current_fps:.1f} | "
-                           f"Command: {turn_command} | ESP32: {'✅' if esp_connected else '❌'}")
+                           f"Command: {turn_command} | ESP32: {'✅' if esp_connected else '❌'} | "
+                           f"Objects: {len(detected_objects) if 'detected_objects' in locals() else 0} | "
+                           f"Corner Warning: {'⚠️' if corner_warning else '✅'}")
             
             # Small delay to prevent overwhelming the system
             time.sleep(0.01)
