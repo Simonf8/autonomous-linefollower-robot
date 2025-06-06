@@ -23,16 +23,6 @@ BLACK_THRESHOLD = 60  # Higher values detect darker lines
 BLUR_SIZE = 5
 MIN_CONTOUR_AREA = 100  # Minimum area to be considered a line
 
-# Object avoidance parameters
-OBSTACLE_DETECTION_ENABLED = True
-OBSTACLE_MIN_AREA = 800  # Minimum area for obstacle detection
-OBSTACLE_MAX_AREA = 8000  # Maximum area (avoid detecting whole image)
-OBSTACLE_DISTANCE_THRESHOLD = 0.6  # How close before we avoid (0.0-1.0)
-AVOIDANCE_TURN_DURATION = 1.5  # Seconds to turn during avoidance
-AVOIDANCE_FORWARD_DURATION = 2.0  # Seconds to move forward during avoidance
-OBSTACLE_COLOR_LOWER = np.array([0, 0, 0])  # Lower HSV for obstacles (black/dark)
-OBSTACLE_COLOR_UPPER = np.array([180, 255, 100])  # Upper HSV for obstacles
-
 # Corner detection parameters
 CORNER_DETECTION_ENABLED = True
 CORNER_CONFIDENCE_BOOST = 1.2
@@ -45,7 +35,7 @@ KD = 0.1   # Derivative gain
 MAX_INTEGRAL = 5.0  # Prevent integral windup
 
 # Commands for ESP32
-COMMANDS = {'FORWARD': 'FORWARD', 'LEFT': 'LEFT', 'RIGHT': 'RIGHT', 'STOP': 'STOP', 'BACKWARD': 'BACKWARD'}
+COMMANDS = {'FORWARD': 'FORWARD', 'LEFT': 'LEFT', 'RIGHT': 'RIGHT', 'STOP': 'STOP'}
 SPEED = 'SLOW'  # Default speed
 
 # Steering parameters
@@ -65,16 +55,6 @@ line_detected = False
 current_fps = 0.0
 confidence = 0.0
 esp_connection = None
-offset_history = deque(maxlen=5)
-steering_history = deque(maxlen=3)
-
-# Object avoidance variables
-obstacle_detected = False
-obstacle_position = None
-avoidance_state = "NONE"  # NONE, AVOIDING_LEFT, AVOIDING_RIGHT, MOVING_FORWARD, RETURNING
-avoidance_start_time = 0
-last_line_position = 0.0
-obstacles_detected = []
 
 # -----------------------------------------------------------------------------
 # --- Logging Setup ---
@@ -195,6 +175,50 @@ class ESP32Connection:
 # -----------------------------------------------------------------------------
 # --- Image Processing ---
 # -----------------------------------------------------------------------------
+def detect_line_in_roi(roi):
+    """Helper function to detect line in a specific ROI"""
+    if roi.size == 0:
+        return None, 0.0
+        
+    # Find contours in the ROI
+    contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        return None, 0.0
+    
+    # Find the largest contour (most likely the line)
+    largest_contour = max(contours, key=cv2.contourArea)
+    
+    # Check if contour is large enough to be a line
+    area = cv2.contourArea(largest_contour)
+    if area < MIN_CONTOUR_AREA:  # Minimum area threshold
+        return None, 0.0
+    
+    # Get the center of the contour
+    M = cv2.moments(largest_contour)
+    if M["m00"] == 0:
+        return None, 0.0
+    
+    # Calculate x-position of line center
+    cx = int(M["m10"] / M["m00"])
+    
+    # Calculate confidence based on contour area
+    height, width = roi.shape
+    confidence = min(area / (width * height * 0.1), 1.0)
+    
+    # Check if contour might be a corner by looking at its shape
+    # Calculate circularity - corners tend to be less circular
+    perimeter = cv2.arcLength(largest_contour, True)
+    if perimeter > 0:
+        circularity = 4 * np.pi * area / (perimeter * perimeter)
+        
+        # Low circularity might indicate a corner
+        if circularity < CORNER_CIRCULARITY_THRESHOLD:
+            # Increase confidence for potential corners
+            confidence *= CORNER_CONFIDENCE_BOOST
+    
+    return cx, confidence
+
 def process_image(frame):
     """Detect black line in image and return line position, handling corners better"""
     # Convert to grayscale
@@ -230,20 +254,18 @@ def process_image(frame):
     # Corner detection logic
     if bottom_confidence > 0.2 and middle_confidence > 0.2:
         # Both ROIs have some line - could be a corner
-        # Calculate the shift between line positions
+        # Calculate how much the line shifts - indicates a corner
         if bottom_x is not None and middle_x is not None:
-            middle_x_adj = middle_x  # Middle x value in original image coordinates
+            # Calculate shift which could indicate a corner
+            shift = abs(middle_x - bottom_x)
             
-            # Calculate how much the line shifts - indicates a corner
-            shift = middle_x_adj - bottom_x
-            
-            if abs(shift) > width * 0.1:  # Significant shift indicates corner
+            if shift > width * 0.1:  # Significant shift indicates corner
                 logger.debug(f"🔄 Corner detected! Shift: {shift}")
                 
                 # Use a weighted average favoring the bottom ROI
-                weighted_x = (bottom_x * 0.7) + (middle_x_adj * 0.3)
+                weighted_x = int((bottom_x * 0.7) + (middle_x * 0.3))
                 weighted_confidence = max(bottom_confidence, middle_confidence)
-                return int(weighted_x), bottom_roi, weighted_confidence
+                return weighted_x, bottom_roi, weighted_confidence
     
     # If no clear corner, prioritize bottom ROI
     if bottom_confidence > 0.2:
@@ -253,186 +275,24 @@ def process_image(frame):
     else:
         return None, None, 0.0
 
-def detect_line_in_roi(roi):
-    """Helper function to detect line in a specific ROI"""
-    if roi.size == 0:
-        return None, 0.0
-        
-    # Find contours in the ROI
-    contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if not contours:
-        return None, 0.0
-    
-    # Find the largest contour (most likely the line)
-    largest_contour = max(contours, key=cv2.contourArea)
-    
-    # Check if contour is large enough to be a line
-    area = cv2.contourArea(largest_contour)
-    if area < 100:  # Minimum area threshold
-        return None, 0.0
-    
-    # Get the center of the contour
-    M = cv2.moments(largest_contour)
-    if M["m00"] == 0:
-        return None, 0.0
-    
-    # Calculate x-position of line center
-    cx = int(M["m10"] / M["m00"])
-    
-    # Calculate confidence based on contour area
-    height, width = roi.shape
-    confidence = min(area / (width * height * 0.1), 1.0)
-    
-    # Check if contour might be a corner by looking at its shape
-    # Calculate circularity - corners tend to be less circular
-    perimeter = cv2.arcLength(largest_contour, True)
-    if perimeter > 0:
-        circularity = 4 * np.pi * area / (perimeter * perimeter)
-        
-        # Low circularity might indicate a corner
-        if circularity < 0.4:
-            # Increase confidence for potential corners
-            confidence *= 1.2
-    
-    return cx, confidence
-
-# -----------------------------------------------------------------------------
-# --- Object Detection and Avoidance ---
-# -----------------------------------------------------------------------------
-def detect_obstacle(frame):
-    """Detect obstacles in the frame using multiple methods"""
-    global obstacles_detected
-    
-    height, width = frame.shape[:2]
-    obstacles_detected = []
-    
-    # Convert to HSV for better color detection
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    
-    # Create mask for dark objects (potential obstacles)
-    mask = cv2.inRange(hsv, OBSTACLE_COLOR_LOWER, OBSTACLE_COLOR_UPPER)
-    
-    # Apply morphological operations to clean up the mask
-    kernel = np.ones((5,5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    
-    # Find contours of potential obstacles
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Check each contour
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        
-        # Filter by area (avoid line and noise)
-        if OBSTACLE_MIN_AREA < area < OBSTACLE_MAX_AREA:
-            # Get bounding box
-            x, y, w, h = cv2.boundingRect(contour)
-            
-            # Calculate obstacle position
-            obstacle_center_x = x + w // 2
-            obstacle_center_y = y + h // 2
-            
-            # Calculate distance based on position in frame (rough estimate)
-            # Objects lower in frame are closer
-            distance_factor = 1.0 - (obstacle_center_y / height)
-            
-            # Calculate relative position (-1.0 to 1.0)
-            relative_x = (obstacle_center_x - width // 2) / (width // 2)
-            
-            obstacle_info = {
-                'x': obstacle_center_x,
-                'y': obstacle_center_y,
-                'relative_x': relative_x,
-                'distance_factor': distance_factor,
-                'area': area,
-                'bbox': (x, y, w, h)
-            }
-            
-            obstacles_detected.append(obstacle_info)
-    
-    # Find the closest significant obstacle
-    if obstacles_detected:
-        # Sort by distance (closer objects first)
-        obstacles_detected.sort(key=lambda obs: obs['distance_factor'], reverse=True)
-        
-        closest_obstacle = obstacles_detected[0]
-        
-        # Check if obstacle is close enough to require avoidance
-        if closest_obstacle['distance_factor'] > OBSTACLE_DISTANCE_THRESHOLD:
-            return True, closest_obstacle
-    
-    return False, None
-
-def handle_obstacle(obstacle_info):
-    """Handle obstacle avoidance behavior"""
-    global avoidance_state, avoidance_start_time, turn_command, robot_status, last_line_position
-    
-    current_time = time.time()
-    
-    if avoidance_state == "NONE":
-        # Start avoidance maneuver
-        last_line_position = line_offset  # Remember where we were
-        
-        # Decide which direction to avoid based on obstacle position
-        if obstacle_info['relative_x'] < 0:
-            # Obstacle on left, avoid right
-            avoidance_state = "AVOIDING_RIGHT"
-            turn_command = COMMANDS['RIGHT']
-            robot_status = "🚧 Avoiding obstacle - turning right"
-        else:
-            # Obstacle on right, avoid left
-            avoidance_state = "AVOIDING_LEFT"
-            turn_command = COMMANDS['LEFT']
-            robot_status = "🚧 Avoiding obstacle - turning left"
-        
-        avoidance_start_time = current_time
-        logger.info(f"🚧 Obstacle detected! Starting avoidance: {avoidance_state}")
-        
-    elif avoidance_state in ["AVOIDING_LEFT", "AVOIDING_RIGHT"]:
-        # Continue turning for specified duration
-        if current_time - avoidance_start_time > AVOIDANCE_TURN_DURATION:
-            avoidance_state = "MOVING_FORWARD"
-            turn_command = COMMANDS['FORWARD']
-            robot_status = "🚧 Moving forward around obstacle"
-            avoidance_start_time = current_time
-            
-    elif avoidance_state == "MOVING_FORWARD":
-        # Move forward for specified duration
-        if current_time - avoidance_start_time > AVOIDANCE_FORWARD_DURATION:
-            avoidance_state = "RETURNING"
-            
-            # Turn back towards the line
-            if "LEFT" in avoidance_state or last_line_position < 0:
-                turn_command = COMMANDS['RIGHT']
-                robot_status = "🚧 Returning to line - turning right"
-            else:
-                turn_command = COMMANDS['LEFT']
-                robot_status = "🚧 Returning to line - turning left"
-            
-            avoidance_start_time = current_time
-            
-    elif avoidance_state == "RETURNING":
-        # Try to return to line for specified duration
-        if current_time - avoidance_start_time > AVOIDANCE_TURN_DURATION:
-            # End avoidance maneuver
-            avoidance_state = "NONE"
-            robot_status = "🚧 Avoidance complete - searching for line"
-            logger.info("✅ Obstacle avoidance complete")
-
-def is_avoiding_obstacle():
-    """Check if currently in obstacle avoidance mode"""
-    return avoidance_state != "NONE"
-
 # -----------------------------------------------------------------------------
 # --- Movement Control ---
 # -----------------------------------------------------------------------------
 def get_turn_command(steering):
-    """Convert steering value to turn command"""
-    if abs(steering) < 0.1:  # Small deadzone
+    """Convert steering value to turn command with improved corner handling"""
+    # Apply deadzone to avoid oscillation
+    if abs(steering) < STEERING_DEADZONE:
         return COMMANDS['FORWARD']
-    elif steering < 0:  # Negative steering turns right
+    
+    # For sharper turns (might be corners), use more aggressive turning
+    if abs(steering) > 0.7:
+        if steering < 0:  # Negative steering turns right
+            return COMMANDS['RIGHT']
+        else:  # Positive steering turns left
+            return COMMANDS['LEFT']
+    
+    # Normal steering behavior
+    if steering < 0:  # Negative steering turns right
         return COMMANDS['RIGHT']
     else:  # Positive steering turns left
         return COMMANDS['LEFT']
@@ -476,29 +336,6 @@ def draw_debug_info(frame, line_x=None, roi=None, confidence=0.0):
         cv2.putText(frame, offset_text, (line_x - 40, line_y - 15),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
     
-    # Draw detected obstacles
-    if OBSTACLE_DETECTION_ENABLED and obstacles_detected:
-        for i, obstacle in enumerate(obstacles_detected):
-            x, y, w, h = obstacle['bbox']
-            
-            # Draw bounding box - red for closest obstacle, orange for others
-            color = (0, 0, 255) if i == 0 else (0, 165, 255)
-            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-            
-            # Draw obstacle center
-            center_x_obs = obstacle['x']
-            center_y_obs = obstacle['y']
-            cv2.circle(frame, (center_x_obs, center_y_obs), 5, color, -1)
-            
-            # Draw distance indicator
-            distance_text = f"Dist: {obstacle['distance_factor']:.2f}"
-            cv2.putText(frame, distance_text, (x, y - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-            
-            # Draw direction arrow from robot to obstacle
-            robot_center = (width // 2, height - 20)
-            cv2.arrowedLine(frame, robot_center, (center_x_obs, center_y_obs), color, 2)
-    
     # Draw status information
     status_color = (0, 255, 0) if line_detected else (0, 0, 255)
     cv2.putText(frame, f"Status: {robot_status}", (10, 20), 
@@ -512,25 +349,10 @@ def draw_debug_info(frame, line_x=None, roi=None, confidence=0.0):
     cv2.putText(frame, f"FPS: {current_fps:.1f}", (10, 100), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     
-    # Draw avoidance status
-    if avoidance_state != "NONE":
-        cv2.putText(frame, f"Avoidance: {avoidance_state}", (10, 120),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-        
-        # Draw obstacle count
-        obstacle_count = len(obstacles_detected) if obstacles_detected else 0
-        cv2.putText(frame, f"Obstacles: {obstacle_count}", (10, 140),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 165, 0), 1)
-    
     # Draw corner detection indicator
     if "corner" in robot_status.lower():
         cv2.putText(frame, "CORNER DETECTED", (width//2 - 80, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    
-    # Draw obstacle warning
-    if obstacle_detected:
-        cv2.putText(frame, "OBSTACLE DETECTED!", (width//2 - 100, 50),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
     
     # Draw direction arrow
     arrow_y = height - 30
@@ -546,9 +368,6 @@ def draw_debug_info(frame, line_x=None, roi=None, confidence=0.0):
     elif turn_command == COMMANDS['STOP']:
         arrow_color = (0, 0, 255)  # Red for stop
         arrow_text = "STOP"
-    elif turn_command == COMMANDS['BACKWARD']:
-        arrow_color = (128, 0, 128)  # Purple for backward
-        arrow_text = "BACKWARD"
     
     cv2.putText(frame, arrow_text, (width // 2 - 30, arrow_y), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, arrow_color, 2)
@@ -613,11 +432,7 @@ def status():
         'command': turn_command,
         'offset': line_offset,
         'fps': current_fps,
-        'confidence': confidence,
-        'obstacle_detected': obstacle_detected,
-        'obstacles_count': len(obstacles_detected) if obstacles_detected else 0,
-        'avoidance_state': avoidance_state,
-        'line_detected': line_detected
+        'confidence': confidence
     }
 
 def generate_frames():
@@ -646,44 +461,55 @@ def run_flask_server():
 # --- Main Application ---
 # -----------------------------------------------------------------------------
 def main():
-    global output_frame, frame_lock, line_offset, steering_value, turn_command
-    global robot_status, line_detected, current_fps, confidence, esp_connection
-    global offset_history, steering_history, obstacle_detected, obstacle_position, avoidance_state, avoidance_start_time, last_line_position, obstacles_detected
+    global output_frame, line_offset, steering_value, turn_command, robot_status
+    global line_detected, current_fps, confidence, esp_connection
     
-    logger.info("🚀 Starting Enhanced Line Follower Robot with Obstacle Avoidance")
+    logger.info("🚀 Starting Simple Line Follower Robot")
+    robot_status = "Starting camera"
     
     # Initialize camera
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        logger.error("❌ Cannot open camera")
+        logger.error("❌ Failed to open camera")
         return
     
+    # Set camera properties
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
     cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
     
-    logger.info(f"📷 Camera initialized: {CAMERA_WIDTH}x{CAMERA_HEIGHT}")
+    # Get actual camera resolution
+    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    logger.info(f"📷 Camera initialized: {actual_width}x{actual_height}")
     
     # Initialize PID controller
     pid = SimplePID(KP, KI, KD, MAX_INTEGRAL)
     
     # Connect to ESP32
+    robot_status = "Connecting to ESP32"
     esp_connection = ESP32Connection(ESP32_IP, ESP32_PORT)
     
-    # Start Flask server in separate thread
+    # Start web interface in a separate thread
     flask_thread = threading.Thread(target=run_flask_server, daemon=True)
     flask_thread.start()
     
-    logger.info("🤖 Robot ready! Starting intelligent navigation...")
-    
-    # Performance tracking
-    fps_history = deque(maxlen=30)
+    # FPS calculation
+    fps_history = deque(maxlen=10)
     search_counter = 0
+    
+    # History for smoothing
+    offset_history = deque(maxlen=3)
+    steering_history = deque(maxlen=2)
     last_known_good_offset = 0.0
     corner_detected_count = 0
     
+    logger.info("🤖 Robot ready! Starting line detection...")
+    robot_status = "Ready"
+    
     try:
         while True:
+            # Measure processing time for FPS calculation
             start_time = time.time()
             
             # Capture frame from camera
@@ -694,150 +520,119 @@ def main():
                 time.sleep(0.1)
                 continue
             
-            # Detect obstacles first (higher priority)
-            if OBSTACLE_DETECTION_ENABLED:
-                obstacle_detected, obstacle_position = detect_obstacle(frame)
-                
-                # Handle obstacle avoidance if detected
-                if obstacle_detected:
-                    handle_obstacle(obstacle_position)
-                    
-                    # Skip line following while avoiding obstacles
-                    if is_avoiding_obstacle():
-                        # Create display frame
-                        display_frame = frame.copy()
-                        draw_debug_info(display_frame, None, None, 0.0)
-                        
-                        # Update output frame for web interface
-                        with frame_lock:
-                            output_frame = display_frame.copy()
-                        
-                        # Send command to ESP32
-                        if esp_connection:
-                            esp_connection.send_command(turn_command)
-                        
-                        # Calculate FPS and continue
-                        processing_time = time.time() - start_time
-                        fps_history.append(1.0 / max(processing_time, 0.001))
-                        current_fps = sum(fps_history) / len(fps_history)
-                        
-                        continue
+            # Process image to find line
+            line_x, roi, detection_confidence = process_image(frame)
+            confidence = detection_confidence
             
-            # Process image to find line (only if not avoiding obstacles)
-            if not is_avoiding_obstacle():
-                line_x, roi, detection_confidence = process_image(frame)
-                confidence = detection_confidence
+            # Create a copy for visualization
+            display_frame = frame.copy()
+            
+            # Update line following logic
+            if line_x is not None and confidence > 0.2:
+                # Line detected
+                line_detected = True
+                search_counter = 0
                 
-                # Update line following logic
-                if line_x is not None and confidence > 0.2:
-                    # Line detected
-                    line_detected = True
-                    search_counter = 0
+                # Calculate line position relative to center (-1.0 to 1.0)
+                center_x = frame.shape[1] / 2
+                raw_offset = (line_x - center_x) / center_x
+                
+                # Add to history for smoothing
+                offset_history.append(raw_offset)
+                
+                # Use average of recent offsets for stability
+                if len(offset_history) > 0:
+                    line_offset = sum(offset_history) / len(offset_history)
+                else:
+                    line_offset = raw_offset
+                
+                # Remember this offset as last known good position
+                last_known_good_offset = line_offset
+                
+                # Check for corner
+                if abs(line_offset) > 0.4 and confidence > 0.3:
+                    corner_detected_count += 1
                     
-                    # Calculate line position relative to center (-1.0 to 1.0)
-                    center_x = frame.shape[1] / 2
-                    raw_offset = (line_x - center_x) / center_x
-                    
-                    # Add to history for smoothing
-                    offset_history.append(raw_offset)
-                    
-                    # Use average of recent offsets for stability
-                    if len(offset_history) > 0:
-                        line_offset = sum(offset_history) / len(offset_history)
-                    else:
-                        line_offset = raw_offset
-                    
-                    # Remember this offset as last known good position
-                    last_known_good_offset = line_offset
-                    
-                    # Check for corner
-                    if "corner" in robot_status.lower():
-                        corner_detected_count += 1
+                    # Adjust status based on corner detection duration
+                    if corner_detected_count > 5:
+                        robot_status = f"Taking corner ({corner_detected_count})"
                         
-                        # Adjust status based on corner detection duration
-                        if corner_detected_count > 5:
-                            robot_status = f"Taking corner ({corner_detected_count})"
-                            
-                            # For sharp corners, exaggerate the steering to make tighter turns
-                            if abs(line_offset) > 0.4:
-                                line_offset *= 1.5  # Increase turning response
-                        else:
-                            robot_status = f"Corner detected ({corner_detected_count})"
+                        # For sharp corners, exaggerate the steering to make tighter turns
+                        if abs(line_offset) > 0.5:
+                            line_offset *= 1.5  # Increase turning response
+                    else:
+                        robot_status = f"Corner detected ({corner_detected_count})"
+                else:
+                    if corner_detected_count > 0:
+                        corner_detected_count -= 1
                     else:
                         corner_detected_count = 0
                         robot_status = f"Following line (C:{confidence:.2f})"
-                    
-                    # Calculate steering using PID controller
-                    # Negative offset means line is to the left, so invert for steering
-                    steering_error = -line_offset
-                    steering_value = pid.calculate(steering_error)
-                    
-                    # Add to steering history
-                    steering_history.append(steering_value)
-                    
-                    # Use average of recent steering values for smoother response
-                    if len(steering_history) > 0:
-                        avg_steering = sum(steering_history) / len(steering_history)
-                    else:
-                        avg_steering = steering_value
-                    
-                    # Convert steering to command
-                    turn_command = get_turn_command(avg_steering)
-                    
-                    logger.debug(f"🎯 Line at x={line_x}, offset={line_offset:.2f}, steering={steering_value:.2f}")
-                    
+                
+                # Calculate steering using PID controller
+                # Negative offset means line is to the left, so invert for steering
+                steering_error = -line_offset
+                steering_value = pid.calculate(steering_error)
+                
+                # Add to steering history
+                steering_history.append(steering_value)
+                
+                # Use average of recent steering values for smoother response
+                if len(steering_history) > 0:
+                    avg_steering = sum(steering_history) / len(steering_history)
                 else:
-                    # Line not detected - search mode
-                    line_detected = False
-                    search_counter += 1
-                    corner_detected_count = 0
-                    
-                    if search_counter < 5:
-                        # Keep last command briefly (helps with short line gaps)
-                        robot_status = "Searching for line (brief)"
-                    elif search_counter < 15:
-                        # Try turning based on last known position
-                        if last_known_good_offset < 0:
-                            turn_command = COMMANDS['RIGHT']
-                            robot_status = "Searching right (last seen left)"
-                        else:
-                            turn_command = COMMANDS['LEFT']
-                            robot_status = "Searching left (last seen right)"
-                    elif search_counter < 30:
-                        # Switch direction
-                        if turn_command == COMMANDS['LEFT']:
-                            turn_command = COMMANDS['RIGHT']
-                        else:
-                            turn_command = COMMANDS['LEFT']
-                        robot_status = f"Searching opposite ({search_counter})"
-                    elif search_counter < 45:
-                        # Try moving forward a bit
-                        turn_command = COMMANDS['FORWARD']
-                        robot_status = "Moving forward to find line"
-                    else:
-                        # Stop and reset if line completely lost
-                        turn_command = COMMANDS['STOP']
-                        robot_status = "Line lost - stopped"
-                        
-                        # Reset search after a pause
-                        if search_counter > 60:
-                            search_counter = 0
-                            last_known_good_offset = 0.0
-                            pid.reset()
-                            offset_history.clear()
-                            steering_history.clear()
+                    avg_steering = steering_value
+                
+                # Convert steering to command
+                turn_command = get_turn_command(avg_steering)
+                
+                logger.debug(f"🎯 Line at x={line_x}, offset={line_offset:.2f}, steering={steering_value:.2f}")
+                
             else:
-                # Currently avoiding obstacle - use placeholder values
-                line_x = None
-                roi = None
-                confidence = 0.0
+                # Line not detected - search mode
+                line_detected = False
+                search_counter += 1
+                
+                if search_counter < 5:
+                    # Keep last command briefly (helps with short line gaps)
+                    robot_status = "Searching for line (brief)"
+                elif search_counter < 15:
+                    # Try turning based on last known position
+                    if last_known_good_offset < 0:
+                        turn_command = COMMANDS['RIGHT']
+                        robot_status = "Searching right (last seen left)"
+                    else:
+                        turn_command = COMMANDS['LEFT']
+                        robot_status = "Searching left (last seen right)"
+                elif search_counter < 30:
+                    # Switch direction
+                    if turn_command == COMMANDS['LEFT']:
+                        turn_command = COMMANDS['RIGHT']
+                    else:
+                        turn_command = COMMANDS['LEFT']
+                    robot_status = f"Searching opposite ({search_counter})"
+                elif search_counter < 45:
+                    # Try moving forward a bit
+                    turn_command = COMMANDS['FORWARD']
+                    robot_status = "Moving forward to find line"
+                else:
+                    # Stop and reset if line completely lost
+                    turn_command = COMMANDS['STOP']
+                    robot_status = "Line lost - stopped"
+                    
+                    # Reset search after a pause
+                    if search_counter > 60:
+                        search_counter = 0
+                        last_known_good_offset = 0.0
+                        pid.reset()
+                        offset_history.clear()
+                        steering_history.clear()
             
             # Send command to ESP32
             if esp_connection:
                 esp_connection.send_command(turn_command)
             
-            # Create display frame and draw debug information
-            display_frame = frame.copy()
+            # Draw debug information
             draw_debug_info(display_frame, line_x, roi, confidence)
             
             # Update output frame for web interface
@@ -851,10 +646,8 @@ def main():
             
             # Log status periodically
             if len(fps_history) % 30 == 0:
-                obstacle_info = f" | Obstacles: {len(obstacles_detected) if obstacles_detected else 0}" if OBSTACLE_DETECTION_ENABLED else ""
-                avoidance_info = f" | Avoiding: {avoidance_state}" if avoidance_state != "NONE" else ""
-                logger.info(f"📊 Status: {robot_status} | FPS: {current_fps:.1f} | Command: {turn_command}{obstacle_info}{avoidance_info}")
-                
+                logger.info(f"📊 Status: {robot_status} | FPS: {current_fps:.1f} | Command: {turn_command}")
+            
     except KeyboardInterrupt:
         logger.info("🛑 Stopping robot (Ctrl+C pressed)")
     except Exception as e:
@@ -868,7 +661,7 @@ def main():
         if 'cap' in locals() and cap.isOpened():
             cap.release()
         
-        logger.info("✅ Enhanced robot stopped")
+        logger.info("✅ Robot stopped")
 
 if __name__ == "__main__":
     main()
