@@ -60,7 +60,7 @@ esp_connection = None
 # --- Logging Setup ---
 # -----------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, 
-                   format='🤖 [%(asctime)s] %(levelname)s: %(message)s', 
+                   format='[%(asctime)s] %(levelname)s: %(message)s', 
                    datefmt='%H:%M:%S')
 logger = logging.getLogger("SimpleLineFollower")
 
@@ -134,10 +134,10 @@ class ESP32Connection:
         try:
             self.socket = socket.create_connection((self.ip, self.port), timeout=2)
             self.socket.settimeout(0.2)
-            logger.info(f"✅ Connected to ESP32 at {self.ip}:{self.port}")
+            logger.info(f"Connected to ESP32 at {self.ip}:{self.port}")
             return True
         except Exception as e:
-            logger.error(f"❌ Failed to connect to ESP32: {e}")
+            logger.error(f"Failed to connect to ESP32: {e}")
             self.socket = None
             return False
     
@@ -157,7 +157,7 @@ class ESP32Connection:
             
             return True
         except Exception as e:
-            logger.error(f"❌ Error sending command to ESP32: {e}")
+            logger.error(f"Error sending command to ESP32: {e}")
             self.socket = None
             return False
     
@@ -170,7 +170,7 @@ class ESP32Connection:
             except:
                 pass
             self.socket = None
-            logger.info("🔌 Disconnected from ESP32")
+            logger.info("Disconnected from ESP32")
 
 # -----------------------------------------------------------------------------
 # --- Image Processing ---
@@ -260,8 +260,8 @@ def process_image(frame):
             shift = abs(middle_x - bottom_x)
             
             if shift > width * 0.1:  # Significant shift indicates corner
-                logger.debug(f"🔄 Corner detected! Shift: {shift}")
-                
+                logger.debug(f"Corner detected! Shift: {shift}")
+
                 # Use a weighted average favoring the bottom ROI
                 weighted_x = int((bottom_x * 0.7) + (middle_x * 0.3))
                 weighted_confidence = max(bottom_confidence, middle_confidence)
@@ -454,7 +454,7 @@ def generate_frames():
         time.sleep(1/30)  # Limit to 30 FPS for web streaming
 
 def run_flask_server():
-    logger.info("🌐 Starting web server on http://0.0.0.0:5000")
+    logger.info("Starting web server on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True)
 
 # -----------------------------------------------------------------------------
@@ -470,7 +470,7 @@ def main():
     # Initialize camera
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        logger.error("❌ Failed to open camera")
+        logger.error("Failed to open camera")
         return
     
     # Set camera properties
@@ -481,7 +481,7 @@ def main():
     # Get actual camera resolution
     actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    logger.info(f"📷 Camera initialized: {actual_width}x{actual_height}")
+    logger.info(f"Camera initialized: {actual_width}x{actual_height}")
     
     # Initialize PID controller
     pid = SimplePID(KP, KI, KD, MAX_INTEGRAL)
@@ -504,7 +504,7 @@ def main():
     last_known_good_offset = 0.0
     corner_detected_count = 0
     
-    logger.info("🤖 Robot ready! Starting line detection...")
+    logger.info("Robot ready! Starting line detection...")
     robot_status = "Ready"
     
     try:
@@ -515,7 +515,7 @@ def main():
             # Capture frame from camera
             ret, frame = cap.read()
             if not ret:
-                logger.warning("⚠️ Failed to capture frame")
+                logger.warning("Failed to capture frame")
                 robot_status = "Camera error"
                 time.sleep(0.1)
                 continue
@@ -586,7 +586,7 @@ def main():
                 # Convert steering to command
                 turn_command = get_turn_command(avg_steering)
                 
-                logger.debug(f"🎯 Line at x={line_x}, offset={line_offset:.2f}, steering={steering_value:.2f}")
+                logger.debug(f"Line at x={line_x}, offset={line_offset:.2f}, steering={steering_value:.2f}")
                 
             else:
                 # Line not detected - search mode
@@ -646,12 +646,12 @@ def main():
             
             # Log status periodically
             if len(fps_history) % 30 == 0:
-                logger.info(f"📊 Status: {robot_status} | FPS: {current_fps:.1f} | Command: {turn_command}")
+                logger.info(f"Status: {robot_status} | FPS: {current_fps:.1f} | Command: {turn_command}")
             
     except KeyboardInterrupt:
-        logger.info("🛑 Stopping robot (Ctrl+C pressed)")
+        logger.info("Stopping robot (Ctrl+C pressed)")
     except Exception as e:
-        logger.error(f"❌ Error: {e}", exc_info=True)
+        logger.error(f"Error: {e}", exc_info=True)
     finally:
         # Clean up
         if esp_connection:
@@ -661,7 +661,7 @@ def main():
         if 'cap' in locals() and cap.isOpened():
             cap.release()
         
-        logger.info("✅ Robot stopped")
+        logger.info("Robot stopped")
 
 if __name__ == "__main__":
     main()
