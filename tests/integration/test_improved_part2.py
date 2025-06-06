@@ -1,565 +1,1045 @@
-# Part 2 of improved test.py - PID Controller, Communication, and Main App
+#!/usr/bin/env python3
+
+import cv2
+import numpy as np
+import socket
+import time
+import logging
+import threading
+import json
+from collections import deque
+from flask import Flask, Response, render_template_string, jsonify
 
 # -----------------------------------------------------------------------------
-# --- ADAPTIVE PID CONTROLLER ---
+# --- CONFIGURATION FOR BLACK LINE FOLLOWING ---
 # -----------------------------------------------------------------------------
+# ESP32 Configuration - UPDATE THIS TO MATCH YOUR ESP32's IP
+ESP32_IP = '192.168.53.117'  # Change this to your ESP32's IP address
+ESP32_PORT = 1234
+CAMERA_WIDTH, CAMERA_HEIGHT = 320, 240
+CAMERA_FPS = 15
 
-class AdaptivePIDController:
-    """Enhanced PID controller with adaptive parameters and advanced filtering"""
-    
-    def __init__(self, config):
-        self.config = config
-        self.kp = config.pid_kp
-        self.ki = config.pid_ki
-        self.kd = config.pid_kd
-        self.integral_max = config.pid_integral_max
-        
-        # State variables
-        self.prev_error = 0.0
+# Image processing parameters
+BLACK_THRESHOLD = 60  # Higher values detect darker lines
+BLUR_SIZE = 5
+MIN_CONTOUR_AREA = 100  # Minimum area to be considered a line
+
+# Corner detection parameters
+CORNER_DETECTION_ENABLED = True
+CORNER_CONFIDENCE_BOOST = 1.2
+CORNER_CIRCULARITY_THRESHOLD = 0.4  # Lower values indicate corners
+
+# Simple PID controller values
+KP = 0.6  # Proportional gain
+KI = 0.02  # Integral gain 
+KD = 0.1   # Derivative gain
+MAX_INTEGRAL = 5.0  # Prevent integral windup
+
+# Commands for ESP32
+COMMANDS = {'FORWARD': 'FORWARD', 'LEFT': 'LEFT', 'RIGHT': 'RIGHT', 'STOP': 'STOP'}
+SPEED = 'SLOW'  # Default speed
+
+# Steering parameters
+STEERING_DEADZONE = 0.1  # Ignore small errors
+MAX_STEERING = 1.0  # Maximum steering value
+
+# -----------------------------------------------------------------------------
+# --- Global Variables ---
+# -----------------------------------------------------------------------------
+output_frame = None
+frame_lock = threading.Lock()
+line_offset = 0.0
+steering_value = 0.0
+turn_command = COMMANDS['STOP']
+robot_status = "Initializing"
+line_detected = False
+current_fps = 0.0
+confidence = 0.0
+esp_connection = None
+esp_connected = False
+robot_stats = {
+    'uptime': 0,
+    'total_frames': 0,
+    'lost_frames': 0,
+    'corner_count': 0
+}
+
+# -----------------------------------------------------------------------------
+# --- Logging Setup ---
+# -----------------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO, 
+                   format='[%(asctime)s] %(levelname)s: %(message)s', 
+                   datefmt='%H:%M:%S')
+logger = logging.getLogger("SimpleLineFollower")
+
+# -----------------------------------------------------------------------------
+# --- PID Controller ---
+# -----------------------------------------------------------------------------
+class SimplePID:
+    def __init__(self, kp, ki, kd, max_integral=5.0):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.max_integral = max_integral
+        self.previous_error = 0.0
         self.integral = 0.0
         self.last_time = time.time()
         
-        # Enhanced filtering
-        self.error_history = deque(maxlen=15)
-        self.derivative_history = deque(maxlen=5)
-        self.output_history = deque(maxlen=10)
-        
-        # Adaptive parameters
-        self.performance_metric = deque(maxlen=50)
-        self.last_adaptation_time = time.time()
-        
-        # Anti-windup
-        self.integral_active = True
-        
-        # Derivative filtering (low-pass filter)
-        self.derivative_filter_alpha = 0.1
-        self.filtered_derivative = 0.0
-    
-    def calculate(self, error: float, dt: Optional[float] = None) -> float:
-        """Calculate PID output with adaptive parameters"""
+    def calculate(self, error):
+        # Calculate time difference
         current_time = time.time()
-        dt = max(current_time - self.last_time if dt is None else dt, 1e-3)
-        
-        # Store error for analysis
-        self.error_history.append(error)
-        
-        # Adaptive parameter adjustment
-        if self.config.enable_adaptive_pid:
-            self._adapt_parameters()
-        
-        # Proportional term with gain scheduling
-        proportional = self.kp * error
-        
-        # Integral term with conditional integration
-        if self.integral_active and abs(error) < 0.5:  # Only integrate for small errors
-            self.integral += error * dt
-            self.integral = np.clip(self.integral, -self.integral_max, self.integral_max)
-        elif abs(error) > 0.7:  # Reset integral for large errors
-            self.integral *= 0.8
-        
-        integral_term = self.ki * self.integral
-        
-        # Derivative term with advanced filtering
-        derivative = (error - self.prev_error) / dt
-        
-        # Apply low-pass filter to derivative
-        self.filtered_derivative = (self.derivative_filter_alpha * derivative + 
-                                  (1 - self.derivative_filter_alpha) * self.filtered_derivative)
-        
-        self.derivative_history.append(self.filtered_derivative)
-        
-        # Use median of recent derivatives for robustness
-        if len(self.derivative_history) >= 3:
-            derivative_term = self.kd * np.median(list(self.derivative_history)[-3:])
-        else:
-            derivative_term = self.kd * self.filtered_derivative
-        
-        # Calculate total output
-        output = proportional + integral_term + derivative_term
-        
-        # Output limiting and rate limiting
-        if self.output_history:
-            max_change = self.config.max_steering_rate * dt
-            output = np.clip(output, 
-                           self.output_history[-1] - max_change,
-                           self.output_history[-1] + max_change)
-        
-        output = np.clip(output, -1.0, 1.0)
-        
-        # Store for next iteration
-        self.output_history.append(output)
-        self.prev_error = error
+        dt = current_time - self.last_time
         self.last_time = current_time
         
-        # Update performance metric
-        self._update_performance_metric(error, output)
+        # Ensure dt is not too small
+        dt = max(dt, 0.001)
         
-        return output
-    
-    def _adapt_parameters(self):
-        """Adapt PID parameters based on performance"""
-        if time.time() - self.last_adaptation_time < 2.0:  # Adapt every 2 seconds
-            return
-            
-        if len(self.performance_metric) < 20:
-            return
+        # Calculate integral term with windup protection
+        self.integral += error * dt
+        self.integral = np.clip(self.integral, -self.max_integral, self.max_integral)
         
-        # Calculate recent performance
-        recent_performance = np.mean(list(self.performance_metric)[-10:])
-        older_performance = np.mean(list(self.performance_metric)[-20:-10])
+        # Calculate derivative term
+        derivative = (error - self.previous_error) / dt
         
-        # Adapt Kp based on performance trend
-        if recent_performance > older_performance * 1.1:  # Performance getting worse
-            self.kp = max(self.config.pid_kp_range[0], 
-                         self.kp - self.config.pid_adaptation_rate)
-        elif recent_performance < older_performance * 0.9:  # Performance improving
-            self.kp = min(self.config.pid_kp_range[1], 
-                         self.kp + self.config.pid_adaptation_rate)
+        # Calculate PID output
+        p_term = self.kp * error
+        i_term = self.ki * self.integral
+        d_term = self.kd * derivative
         
-        self.last_adaptation_time = time.time()
-        logging.debug(f"🎛️ Adapted PID: Kp={self.kp:.3f}")
-    
-    def _update_performance_metric(self, error: float, output: float):
-        """Update performance metric for adaptation"""
-        # Performance metric combines error magnitude and output stability
-        error_component = abs(error)
+        output = p_term + i_term + d_term
         
-        # Output stability (penalize rapid changes)
-        if len(self.output_history) > 1:
-            output_stability = abs(output - self.output_history[-2])
-        else:
-            output_stability = 0
+        # Store error for next iteration
+        self.previous_error = error
         
-        performance = error_component + 0.5 * output_stability
-        self.performance_metric.append(performance)
+        # Limit output to range [-1.0, 1.0]
+        return np.clip(output, -1.0, 1.0)
     
     def reset(self):
-        """Reset PID controller state"""
-        self.prev_error = 0.0
+        self.previous_error = 0.0
         self.integral = 0.0
-        self.filtered_derivative = 0.0
-        self.error_history.clear()
-        self.derivative_history.clear()
-        self.output_history.clear()
-        self.performance_metric.clear()
         self.last_time = time.time()
-        logging.info("🔄 Adaptive PID Controller Reset")
+        logger.info("🔄 PID Controller Reset")
 
 # -----------------------------------------------------------------------------
-# --- ENHANCED ESP32 COMMUNICATION ---
+# --- ESP32 Communication ---
 # -----------------------------------------------------------------------------
-
-class EnhancedESP32Communicator:
-    """Enhanced ESP32 communication with better error handling and monitoring"""
-    
-    def __init__(self, ip: str, port: int):
+class ESP32Connection:
+    def __init__(self, ip, port):
         self.ip = ip
         self.port = port
-        self.sock = None
+        self.socket = None
         self.last_command = None
-        
-        # Connection management
-        self.connect_attempts = 0
-        self.max_connect_attempts = 5
-        self.reconnect_delay = 5.0
-        self.last_reconnect_attempt = 0
-        
-        # Monitoring
-        self.commands_sent = 0
-        self.connection_errors = 0
-        self.last_successful_send = 0
-        self.response_times = deque(maxlen=20)
-        
-        # Command queuing for reliability
-        self.command_queue = deque(maxlen=10)
-        self.command_lock = threading.Lock()
-        
+        self.connection_attempts = 0
         self.connect()
     
-    def connect(self) -> bool:
-        """Connect to ESP32 with improved error handling"""
-        current_time = time.time()
-        
-        # Rate limit reconnection attempts
-        if current_time - self.last_reconnect_attempt < self.reconnect_delay:
-            return False
-        
-        self.last_reconnect_attempt = current_time
-        
-        if self.sock:
-            try:
-                self.sock.close()
-            except:
+    def connect(self):
+        global esp_connected
+        if self.socket:
+            try: 
+                self.socket.close()
+            except: 
                 pass
-            self.sock = None
+            self.socket = None
         
         try:
-            self.sock = socket.create_connection((self.ip, self.port), timeout=3)
-            self.sock.settimeout(1.0)
-            logging.info(f"✅ ESP32 connected: {self.ip}:{self.port}")
-            self.connect_attempts = 0
-            self.last_command = None
+            self.socket = socket.create_connection((self.ip, self.port), timeout=2)
+            self.socket.settimeout(0.2)
+            esp_connected = True
+            self.connection_attempts = 0
+            logger.info(f"✅ Connected to ESP32 at {self.ip}:{self.port}")
             return True
-            
         except Exception as e:
-            self.connection_errors += 1
-            logging.error(f"❌ ESP32 connection failed (Attempt {self.connect_attempts+1}): {e}")
-            self.sock = None
-            self.connect_attempts += 1
+            esp_connected = False
+            self.connection_attempts += 1
+            if self.connection_attempts % 10 == 1:  # Log every 10 attempts
+                logger.error(f"❌ Failed to connect to ESP32 (attempt {self.connection_attempts}): {e}")
+            self.socket = None
             return False
     
-    def send_command_reliable(self, speed_cmd: str, turn_cmd: str) -> bool:
-        """Send command with reliability features"""
-        command = f"{speed_cmd}:{turn_cmd}\n"
-        
-        with self.command_lock:
-            # Add to queue for retry capability
-            self.command_queue.append({
-                'command': command,
-                'timestamp': time.time(),
-                'attempts': 0
-            })
-        
-        return self._send_immediate(command)
-    
-    def _send_immediate(self, command: str) -> bool:
-        """Send command immediately"""
-        if not self.sock:
-            if self.connect_attempts >= self.max_connect_attempts:
-                return False
-            if not self.connect():
-                return False
+    def send_command(self, command):
+        global esp_connected
+        if not self.socket and not self.connect():
+            return False
         
         try:
-            send_start = time.perf_counter()
+            # Add newline to command
+            full_command = f"{command}\n"
             
-            # Only send if command changed or significant time passed
-            if (self.last_command != command or 
-                time.time() - self.last_successful_send > 1.0):
-                
-                self.sock.sendall(command.encode())
-                self.last_command = command
-                self.last_successful_send = time.time()
-                
-                # Record response time
-                response_time = time.perf_counter() - send_start
-                self.response_times.append(response_time)
-                
-                self.commands_sent += 1
-                logging.debug(f"📡 Sent to ESP32: {command.strip()}")
+            # Only send if command changed
+            if full_command != self.last_command:
+                self.socket.sendall(full_command.encode())
+                self.last_command = full_command
+                logger.debug(f"📡 Sent to ESP32: {command}")
             
             return True
-            
-        except socket.timeout:
-            logging.error("💥 ESP32 Send Timeout")
-            self._handle_connection_error()
-            return False
-            
-        except socket.error as e:
-            logging.error(f"💥 ESP32 Socket Error: {e}")
-            self._handle_connection_error()
-            return False
-            
         except Exception as e:
-            logging.error(f"💥 ESP32 General Error: {e}")
-            self._handle_connection_error()
+            esp_connected = False
+            logger.error(f"Error sending command to ESP32: {e}")
+            self.socket = None
             return False
-    
-    def _handle_connection_error(self):
-        """Handle connection errors and prepare for reconnection"""
-        self.connection_errors += 1
-        if self.sock:
-            try:
-                self.sock.close()
-            except:
-                pass
-            self.sock = None
-        
-        # Reset connection attempts if too many errors
-        if self.connection_errors % 10 == 0:
-            self.connect_attempts = 0
-            logging.warning(f"🔄 Resetting ESP32 connection after {self.connection_errors} errors")
-    
-    def get_stats(self) -> Dict:
-        """Get communication statistics"""
-        avg_response_time = np.mean(list(self.response_times)) if self.response_times else 0
-        
-        return {
-            'connected': self.sock is not None,
-            'commands_sent': self.commands_sent,
-            'connection_errors': self.connection_errors,
-            'avg_response_time_ms': avg_response_time * 1000,
-            'queue_size': len(self.command_queue),
-            'last_successful_send': self.last_successful_send
-        }
     
     def close(self):
-        """Close connection with proper cleanup"""
-        if self.sock:
+        global esp_connected
+        if self.socket:
             try:
-                # Send stop command before closing
-                stop_command = "H:FORWARD\n"
-                logging.info(f"Sending STOP command to ESP32: {stop_command.strip()}")
-                self.sock.sendall(stop_command.encode())
+                self.send_command("STOP")
                 time.sleep(0.1)
-            except Exception as e:
-                logging.error(f"⚠️ Error sending stop command: {e}")
-            finally:
-                try:
-                    self.sock.close()
-                except:
-                    pass
-                self.sock = None
-                logging.info("🔌 ESP32 socket closed.")
-
-# Speed command mapping
-SPEEDS = {'FAST':'F', 'NORMAL':'N', 'SLOW':'S', 'TURN':'T', 'STOP':'H'}
+                self.socket.close()
+            except:
+                pass
+            self.socket = None
+            esp_connected = False
+            logger.info("Disconnected from ESP32")
 
 # -----------------------------------------------------------------------------
-# --- MAIN APPLICATION ---
+# --- Image Processing ---
 # -----------------------------------------------------------------------------
+def detect_line_in_roi(roi):
+    """Helper function to detect line in a specific ROI"""
+    if roi.size == 0:
+        return None, 0.0
+        
+    # Find contours in the ROI
+    contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        return None, 0.0
+    
+    # Find the largest contour (most likely the line)
+    largest_contour = max(contours, key=cv2.contourArea)
+    
+    # Check if contour is large enough to be a line
+    area = cv2.contourArea(largest_contour)
+    if area < MIN_CONTOUR_AREA:  # Minimum area threshold
+        return None, 0.0
+    
+    # Get the center of the contour
+    M = cv2.moments(largest_contour)
+    if M["m00"] == 0:
+        return None, 0.0
+    
+    # Calculate x-position of line center
+    cx = int(M["m10"] / M["m00"])
+    
+    # Calculate confidence based on contour area
+    height, width = roi.shape
+    confidence = min(area / (width * height * 0.1), 1.0)
+    
+    # Check if contour might be a corner by looking at its shape
+    # Calculate circularity - corners tend to be less circular
+    perimeter = cv2.arcLength(largest_contour, True)
+    if perimeter > 0:
+        circularity = 4 * np.pi * area / (perimeter * perimeter)
+        
+        # Low circularity might indicate a corner
+        if circularity < CORNER_CIRCULARITY_THRESHOLD:
+            # Increase confidence for potential corners
+            confidence *= CORNER_CONFIDENCE_BOOST
+    
+    return cx, confidence
 
+def process_image(frame):
+    """Detect black line in image and return line position, handling corners better"""
+    # Convert to grayscale
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Apply Gaussian blur to reduce noise
+    blurred = cv2.GaussianBlur(gray, (BLUR_SIZE, BLUR_SIZE), 0)
+    
+    # Threshold the image to identify black regions
+    _, binary = cv2.threshold(blurred, BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+    
+    # Create multiple ROIs to better detect corners
+    height, width = binary.shape
+    
+    # Bottom ROI (closest to robot) - Primary detection area
+    bottom_height = int(height * 0.3)
+    bottom_roi = binary[height - bottom_height:height, :]
+    
+    # Middle ROI (for corner detection) - Look ahead to see upcoming turns
+    middle_height = int(height * 0.2)
+    middle_roi = binary[height - bottom_height - middle_height:height - bottom_height, :]
+    
+    # Process bottom ROI first (where the line should be)
+    bottom_x, bottom_confidence = detect_line_in_roi(bottom_roi)
+    
+    # If bottom confidence is high, use it directly
+    if bottom_confidence > 0.5:
+        return bottom_x, bottom_roi, bottom_confidence
+        
+    # Process middle ROI to detect upcoming corners
+    middle_x, middle_confidence = detect_line_in_roi(middle_roi)
+    
+    # Corner detection logic
+    if bottom_confidence > 0.2 and middle_confidence > 0.2:
+        # Both ROIs have some line - could be a corner
+        # Calculate how much the line shifts - indicates a corner
+        if bottom_x is not None and middle_x is not None:
+            # Calculate shift which could indicate a corner
+            shift = abs(middle_x - bottom_x)
+            
+            if shift > width * 0.1:  # Significant shift indicates corner
+                logger.debug(f"Corner detected! Shift: {shift}")
+                robot_stats['corner_count'] += 1
+
+                # Use a weighted average favoring the bottom ROI
+                weighted_x = int((bottom_x * 0.7) + (middle_x * 0.3))
+                weighted_confidence = max(bottom_confidence, middle_confidence)
+                return weighted_x, bottom_roi, weighted_confidence
+    
+    # If no clear corner, prioritize bottom ROI
+    if bottom_confidence > 0.2:
+        return bottom_x, bottom_roi, bottom_confidence
+    elif middle_confidence > 0.3:  # Higher threshold for middle section
+        return middle_x, middle_roi, middle_confidence * 0.8  # Slightly reduce confidence
+    else:
+        return None, None, 0.0
+
+# -----------------------------------------------------------------------------
+# --- Movement Control ---
+# -----------------------------------------------------------------------------
+def get_turn_command(steering):
+    """Convert steering value to turn command with improved corner handling"""
+    # Apply deadzone to avoid oscillation
+    if abs(steering) < STEERING_DEADZONE:
+        return COMMANDS['FORWARD']
+    
+    # For sharper turns (might be corners), use more aggressive turning
+    if abs(steering) > 0.7:
+        if steering < 0:  # Negative steering turns right
+            return COMMANDS['RIGHT']
+        else:  # Positive steering turns left
+            return COMMANDS['LEFT']
+    
+    # Normal steering behavior
+    if steering < 0:  # Negative steering turns right
+        return COMMANDS['RIGHT']
+    else:  # Positive steering turns left
+        return COMMANDS['LEFT']
+
+# -----------------------------------------------------------------------------
+# --- Visualization ---
+# -----------------------------------------------------------------------------
+def draw_debug_info(frame, line_x=None, roi=None, confidence=0.0):
+    """Draw debug information on frame"""
+    height, width = frame.shape[:2]
+    
+    # Draw ROI rectangles for both bottom and middle sections
+    bottom_height = int(height * 0.3)
+    middle_height = int(height * 0.2)
+    
+    # Bottom ROI (main detection area)
+    bottom_top = height - bottom_height
+    cv2.rectangle(frame, (0, bottom_top), (width, height), (0, 255, 255), 2)
+    cv2.putText(frame, "Bottom ROI", (5, bottom_top + 15), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+    
+    # Middle ROI (corner detection)
+    middle_top = bottom_top - middle_height
+    cv2.rectangle(frame, (0, middle_top), (width, bottom_top), (0, 200, 255), 2)
+    cv2.putText(frame, "Corner ROI", (5, middle_top + 15), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1)
+    
+    # Draw center line
+    center_x = width // 2
+    cv2.line(frame, (center_x, 0), (center_x, height), (200, 200, 200), 1)
+    
+    # Draw detected line position
+    if line_x is not None:
+        # Draw circle at detected line position
+        line_y = bottom_top + bottom_height // 2
+        cv2.circle(frame, (line_x, line_y), 10, (0, 0, 255), -1)
+        cv2.line(frame, (center_x, line_y), (line_x, line_y), (255, 0, 255), 2)
+        
+        # Draw offset line
+        offset_text = f"Offset: {line_offset:.2f}"
+        cv2.putText(frame, offset_text, (line_x - 40, line_y - 15),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+    
+    # Draw status information
+    status_color = (0, 255, 0) if line_detected else (0, 0, 255)
+    cv2.putText(frame, f"Status: {robot_status}", (10, 20), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color, 1)
+    cv2.putText(frame, f"Offset: {line_offset:.2f}", (10, 40), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.putText(frame, f"Confidence: {confidence:.2f}", (10, 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    cv2.putText(frame, f"Command: {turn_command}", (10, 80), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    cv2.putText(frame, f"FPS: {current_fps:.1f}", (10, 100), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    
+    # Draw corner detection indicator
+    if "corner" in robot_status.lower():
+        cv2.putText(frame, "CORNER DETECTED", (width//2 - 80, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
+    # Draw direction arrow
+    arrow_y = height - 30
+    arrow_color = (0, 255, 0)  # Green for forward
+    arrow_text = "FORWARD"
+    
+    if turn_command == COMMANDS['LEFT']:
+        arrow_color = (0, 255, 255)  # Yellow for left
+        arrow_text = "LEFT"
+    elif turn_command == COMMANDS['RIGHT']:
+        arrow_color = (255, 255, 0)  # Cyan for right
+        arrow_text = "RIGHT"
+    elif turn_command == COMMANDS['STOP']:
+        arrow_color = (0, 0, 255)  # Red for stop
+        arrow_text = "STOP"
+    
+    cv2.putText(frame, arrow_text, (width // 2 - 30, arrow_y), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, arrow_color, 2)
+
+# -----------------------------------------------------------------------------
+# --- Flask Web Interface ---
+# -----------------------------------------------------------------------------
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    """Serve the modern dashboard directly as HTML"""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Line Follower Robot Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            color: #fff;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-left: 10px;
+            animation: pulse 2s infinite;
+        }
+        
+        .status-online { background-color: #4CAF50; }
+        .status-offline { background-color: #f44336; }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        
+        .dashboard {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        @media (max-width: 768px) {
+            .dashboard {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .video-section {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .video-feed {
+            width: 100%;
+            height: auto;
+            border-radius: 10px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        
+        .stats-section {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        
+        .stat-card {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 15px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: transform 0.3s ease;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .stat-header {
+            font-size: 0.9em;
+            opacity: 0.8;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .stat-value {
+            font-size: 1.8em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        
+        .stat-label {
+            font-size: 0.8em;
+            opacity: 0.7;
+        }
+        
+        .command-display {
+            text-align: center;
+            padding: 15px;
+            border-radius: 10px;
+            font-weight: bold;
+            font-size: 1.2em;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-top: 10px;
+        }
+        
+        .cmd-forward { background: linear-gradient(45deg, #4CAF50, #8BC34A); }
+        .cmd-left { background: linear-gradient(45deg, #FF9800, #FFC107); }
+        .cmd-right { background: linear-gradient(45deg, #2196F3, #03DAC6); }
+        .cmd-stop { background: linear-gradient(45deg, #f44336, #E91E63); }
+        
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #8BC34A);
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+        
+        .connection-status {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+        
+        .connection-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Line Follower Robot</h1>
+            <div>Control Dashboard <span id="status-dot" class="status-indicator status-offline"></span></div>
+        </div>
+        
+        <div class="dashboard">
+            <div class="video-section">
+                <h3 style="margin-bottom: 15px;">📷 Live Camera Feed</h3>
+                <img src="/video_feed" class="video-feed" alt="Robot Camera Feed">
+            </div>
+            
+            <div class="stats-section">
+                <div class="stat-card">
+                    <div class="stat-header">Robot Status</div>
+                    <div class="stat-value" id="robot-status">Loading...</div>
+                    <div class="stat-label">Current Operation</div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-header">Current Command</div>
+                    <div class="command-display cmd-stop" id="command-display">STOP</div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-header">Line Detection</div>
+                    <div class="stat-value" id="confidence">0%</div>
+                    <div class="stat-label">Confidence Level</div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="confidence-bar" style="width: 0%"></div>
+                    </div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-header">Performance</div>
+                    <div class="stat-value" id="fps">0.0</div>
+                    <div class="stat-label">Frames Per Second</div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-header">Steering</div>
+                    <div class="stat-value" id="offset">0.00</div>
+                    <div class="stat-label">Line Offset</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="connection-status">
+            <div class="connection-item">
+                <span>ESP32 Connection:</span>
+                <span id="esp-status">
+                    <div class="loading"></div> Connecting...
+                </span>
+            </div>
+            <div class="connection-item">
+                <span>Camera Feed:</span>
+                <span id="camera-status">
+                    <div class="loading"></div> Loading...
+                </span>
+            </div>
+            <div class="connection-item">
+                <span>Uptime:</span>
+                <span id="uptime">00:00:00</span>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let startTime = Date.now();
+        let lastUpdateTime = Date.now();
+        
+        // Update status periodically
+        function updateStatus() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    // Update robot status
+                    document.getElementById('robot-status').textContent = data.status || 'Unknown';
+                    
+                    // Update command display
+                    const commandDisplay = document.getElementById('command-display');
+                    const command = data.command || 'STOP';
+                    commandDisplay.textContent = command;
+                    commandDisplay.className = 'command-display cmd-' + command.toLowerCase();
+                    
+                    // Update confidence
+                    const confidence = Math.round((data.confidence || 0) * 100);
+                    document.getElementById('confidence').textContent = confidence + '%';
+                    document.getElementById('confidence-bar').style.width = confidence + '%';
+                    
+                    // Update FPS
+                    document.getElementById('fps').textContent = (data.fps || 0).toFixed(1);
+                    
+                    // Update offset
+                    document.getElementById('offset').textContent = (data.offset || 0).toFixed(2);
+                    
+                    // Update connection statuses
+                    const statusDot = document.getElementById('status-dot');
+                    const espStatus = document.getElementById('esp-status');
+                    const cameraStatus = document.getElementById('camera-status');
+                    
+                    if (data.esp_connected) {
+                        statusDot.className = 'status-indicator status-online';
+                        espStatus.innerHTML = '✅ Connected';
+                    } else {
+                        statusDot.className = 'status-indicator status-offline';
+                        espStatus.innerHTML = '❌ Disconnected';
+                    }
+                    
+                    // Camera status based on recent updates
+                    const timeSinceUpdate = Date.now() - lastUpdateTime;
+                    if (timeSinceUpdate < 2000) {
+                        cameraStatus.innerHTML = '✅ Active';
+                    } else {
+                        cameraStatus.innerHTML = '⚠️ No Signal';
+                    }
+                    
+                    lastUpdateTime = Date.now();
+                })
+                .catch(error => {
+                    console.error('Error fetching status:', error);
+                    document.getElementById('robot-status').textContent = 'Connection Error';
+                    document.getElementById('status-dot').className = 'status-indicator status-offline';
+                });
+        }
+        
+        // Update uptime
+        function updateUptime() {
+            const elapsed = Date.now() - startTime;
+            const hours = Math.floor(elapsed / 3600000);
+            const minutes = Math.floor((elapsed % 3600000) / 60000);
+            const seconds = Math.floor((elapsed % 60000) / 1000);
+            
+            const uptime = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            document.getElementById('uptime').textContent = uptime;
+        }
+        
+        // Start periodic updates
+        setInterval(updateStatus, 500);  // Update every 500ms
+        setInterval(updateUptime, 1000); // Update uptime every second
+        
+        // Initial load
+        updateStatus();
+        updateUptime();
+        
+        // Handle image load events
+        const videoFeed = document.querySelector('.video-feed');
+        videoFeed.addEventListener('load', () => {
+            document.getElementById('camera-status').innerHTML = '✅ Active';
+        });
+        
+        videoFeed.addEventListener('error', () => {
+            document.getElementById('camera-status').innerHTML = '❌ Error';
+        });
+    </script>
+</body>
+</html>"""
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(), 
+                   mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/api/status')
+def api_status():
+    global robot_stats
+    
+    # Calculate uptime
+    current_time = time.time()
+    if 'start_time' not in robot_stats:
+        robot_stats['start_time'] = current_time
+    
+    uptime = current_time - robot_stats['start_time']
+    
+    return jsonify({
+        'status': robot_status,
+        'command': turn_command,
+        'offset': line_offset,
+        'fps': current_fps,
+        'confidence': confidence,
+        'line_detected': line_detected,
+        'esp_connected': esp_connected,
+        'uptime': uptime,
+        'total_frames': robot_stats.get('total_frames', 0),
+        'corner_count': robot_stats.get('corner_count', 0)
+    })
+
+# Legacy endpoint for backward compatibility
+@app.route('/status')
+def status():
+    return api_status().get_json()
+
+def generate_frames():
+    global output_frame, frame_lock, robot_stats
+    while True:
+        with frame_lock:
+            if output_frame is not None:
+                frame_to_send = output_frame.copy()
+                robot_stats['total_frames'] = robot_stats.get('total_frames', 0) + 1
+            else:
+                frame_to_send = np.zeros((CAMERA_HEIGHT, CAMERA_WIDTH, 3), dtype=np.uint8)
+                cv2.putText(frame_to_send, "No Camera Feed", 
+                           (CAMERA_WIDTH//2-80, CAMERA_HEIGHT//2),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                robot_stats['lost_frames'] = robot_stats.get('lost_frames', 0) + 1
+        
+        ret, jpeg = cv2.imencode('.jpg', frame_to_send, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if ret:
+            yield (b'--frame\r\n'
+                  b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+        time.sleep(1/30)  # Limit to 30 FPS for web streaming
+
+def run_flask_server():
+    logger.info("🌐 Starting web server on http://0.0.0.0:5000")
+    try:
+        app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True)
+    except Exception as e:
+        logger.error(f"Failed to start web server: {e}")
+
+# -----------------------------------------------------------------------------
+# --- Main Application ---
+# -----------------------------------------------------------------------------
 def main():
-    """Main application with all improvements"""
+    global output_frame, line_offset, steering_value, turn_command, robot_status
+    global line_detected, current_fps, confidence, esp_connection, robot_stats
     
-    # Load configuration
-    config = ConfigManager()
-    
-    # Setup logging
-    log_level = getattr(logging, config.system.log_level.upper())
-    logging.basicConfig(level=log_level, 
-                       format='🤖 [%(asctime)s] %(levelname)s: %(message)s', 
-                       datefmt='%H:%M:%S')
-    logger = logging.getLogger("EnhancedLineFollower")
-    
-    logger.info("🚀 Starting Enhanced Line Following Robot...")
-    
-    # Initialize components
-    performance_monitor = PerformanceMonitor()
-    data_logger = DataLogger(config.system)
-    kalman_filter = KalmanLineFilter()
+    logger.info("🚀 Starting Simple Line Follower Robot")
+    robot_status = "Starting camera"
+    robot_stats['start_time'] = time.time()
     
     # Initialize camera
-    logger.info("📷 Initializing camera...")
-    cap = cv2.VideoCapture(config.vision.cam_index)
+    cap = cv2.VideoCapture(0)  # Try camera 0 first
     if not cap.isOpened():
-        logger.error("❌ Camera failed to open")
-        return
+        logger.warning("Camera 0 failed, trying camera 1")
+        cap = cv2.VideoCapture(1)
+        if not cap.isOpened():
+            logger.error("❌ Failed to open any camera")
+            robot_status = "Camera Error"
+            # Start web server anyway for status monitoring
+            run_flask_server()
+            return
     
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.vision.cam_width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.vision.cam_height)
-    cap.set(cv2.CAP_PROP_FPS, config.vision.cam_fps)
+    # Set camera properties
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer for lower latency
     
+    # Get actual camera resolution
     actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     actual_fps = cap.get(cv2.CAP_PROP_FPS)
-    
-    logger.info(f"📷 Camera: {actual_width}x{actual_height} @ {actual_fps:.1f}FPS")
-    
-    # Initialize threaded image processor
-    image_processor = ThreadedImageProcessor(config.vision)
-    if config.system.enable_threading:
-        image_processor.start()
+    logger.info(f"📷 Camera initialized: {actual_width}x{actual_height} @ {actual_fps}fps")
     
     # Initialize PID controller
-    pid_controller = AdaptivePIDController(config.control)
+    pid = SimplePID(KP, KI, KD, MAX_INTEGRAL)
     
-    # Initialize ESP32 communication
-    esp32_comm = EnhancedESP32Communicator(config.system.esp32_ip, config.system.esp32_port)
+    # Connect to ESP32
+    robot_status = "Connecting to ESP32"
+    esp_connection = ESP32Connection(ESP32_IP, ESP32_PORT)
     
-    # Main loop variables
-    frame_count = 0
+    # Start web interface in a separate thread
+    flask_thread = threading.Thread(target=run_flask_server, daemon=True)
+    flask_thread.start()
+    logger.info("🌐 Web dashboard available at http://localhost:5000")
+    
+    # FPS calculation
+    fps_history = deque(maxlen=30)
     search_counter = 0
-    last_known_offset = 0.0
-    last_status_log = time.time()
     
-    # Robot state
-    current_offset = 0.0
-    current_angle = 0.0
-    current_steering = 0.0
-    current_speed_cmd = SPEEDS['STOP']
-    current_turn_cmd = "FORWARD"
-    robot_status = "Ready"
-    confidence_score = 0.0
-    lines_detected = 0
+    # History for smoothing
+    offset_history = deque(maxlen=3)
+    steering_history = deque(maxlen=2)
+    last_known_good_offset = 0.0
+    corner_detected_count = 0
     
-    logger.info("🤖 Enhanced Robot READY!")
+    logger.info("✅ Robot ready! Starting line detection...")
+    robot_status = "Ready - Searching for line"
     
     try:
+        frame_count = 0
         while True:
-            loop_start_time = time.perf_counter()
+            # Measure processing time for FPS calculation
+            start_time = time.time()
             
-            # Capture frame
+            # Capture frame from camera
             ret, frame = cap.read()
             if not ret:
-                logger.warning("⚠️ No frame from camera")
+                logger.warning("⚠️ Failed to capture frame")
+                robot_status = "Camera read error"
+                robot_stats['lost_frames'] = robot_stats.get('lost_frames', 0) + 1
                 time.sleep(0.1)
                 continue
             
             frame_count += 1
+            robot_stats['total_frames'] = frame_count
             
-            # Process frame
-            if config.system.enable_threading:
-                # Threaded processing
-                image_processor.process_frame_async(frame)
-                result = image_processor.get_result()
-                
-                if result:
-                    final_offset, final_angle, detected_line_segments, confidence, processed_frame = result
-                else:
-                    # Use prediction if no result available
-                    final_offset, final_angle = kalman_filter.predict()
-                    detected_line_segments = []
-                    confidence = 0.1
-                    processed_frame = None
-            else:
-                # Synchronous processing (fallback)
-                processed_frame = image_processor._preprocess_optimized(frame)
-                roi_zones_data = image_processor._extract_roi_zones(processed_frame)
-                final_offset, final_angle, detected_line_segments, confidence, _ = image_processor._detect_lines_enhanced(roi_zones_data, processed_frame)
+            # Process image to find line
+            line_x, roi, detection_confidence = process_image(frame)
+            confidence = detection_confidence
             
-            # Apply Kalman filtering
-            if final_offset is not None and final_angle is not None:
-                kalman_offset, kalman_angle = kalman_filter.update(final_offset, final_angle, confidence)
-                # Use Kalman filtered values for control
-                final_offset, final_angle = kalman_offset, kalman_angle
+            # Create a copy for visualization
+            display_frame = frame.copy()
             
-            # Update state
-            current_offset = final_offset if final_offset is not None else 0.0
-            current_angle = final_angle if final_angle is not None else 0.0
-            lines_detected = len(detected_line_segments) if detected_line_segments else 0
-            confidence_score = confidence
-            
-            # Control logic
-            if final_offset is not None and confidence > 0.15:
-                robot_status = f"Following (C:{confidence:.2f})"
+            # Update line following logic
+            if line_x is not None and confidence > 0.2:
+                # Line detected
+                line_detected = True
                 search_counter = 0
-                last_known_offset = final_offset
                 
-                # PID control
-                steering_error = -final_offset
-                current_steering = pid_controller.calculate(steering_error)
+                # Calculate line position relative to center (-1.0 to 1.0)
+                center_x = frame.shape[1] / 2
+                raw_offset = (line_x - center_x) / center_x
                 
-                # Speed selection based on confidence and offset
-                abs_offset = abs(final_offset)
-                speed_zones = config.control.speed_zones
+                # Add to history for smoothing
+                offset_history.append(raw_offset)
                 
-                if confidence > 0.7 and abs_offset < speed_zones['PERFECT']['threshold']:
-                    current_speed_cmd = SPEEDS[speed_zones['PERFECT']['speed']]
-                elif confidence > 0.4 and abs_offset < speed_zones['GOOD']['threshold']:
-                    current_speed_cmd = SPEEDS[speed_zones['GOOD']['speed']]
-                elif abs_offset < speed_zones['MODERATE']['threshold']:
-                    current_speed_cmd = SPEEDS[speed_zones['MODERATE']['speed']]
+                # Use average of recent offsets for stability
+                if len(offset_history) > 0:
+                    line_offset = sum(offset_history) / len(offset_history)
                 else:
-                    current_speed_cmd = SPEEDS[speed_zones['LARGE']['speed']]
+                    line_offset = raw_offset
                 
-                # Turn command
-                if abs(current_steering) < config.control.steering_deadzone:
-                    current_turn_cmd = 'FORWARD'
-                elif current_steering < -0.05:
-                    current_turn_cmd = 'LEFT'
-                elif current_steering > 0.05:
-                    current_turn_cmd = 'RIGHT'
-                else:
-                    current_turn_cmd = 'FORWARD'
+                # Remember this offset as last known good position
+                last_known_good_offset = line_offset
+                
+                # Check for corner
+                if abs(line_offset) > 0.4 and confidence > 0.3:
+                    corner_detected_count += 1
                     
-            elif final_offset is not None and confidence > 0.05:
-                robot_status = f"Weak Signal (C:{confidence:.2f})"
-                search_counter = 0
-                last_known_offset = final_offset
+                    # Adjust status based on corner detection duration
+                    if corner_detected_count > 5:
+                        robot_status = f"🔄 Taking corner ({corner_detected_count})"
+                        
+                        # For sharp corners, exaggerate the steering to make tighter turns
+                        if abs(line_offset) > 0.5:
+                            line_offset *= 1.5  # Increase turning response
+                    else:
+                        robot_status = f"⚠️ Corner detected ({corner_detected_count})"
+                else:
+                    if corner_detected_count > 0:
+                        corner_detected_count -= 1
+                    else:
+                        corner_detected_count = 0
+                        robot_status = f"✅ Following line (C:{confidence:.2f})"
                 
-                steering_error = -final_offset * 0.7
-                current_steering = pid_controller.calculate(steering_error)
-                current_speed_cmd = SPEEDS['SLOW']
-                current_turn_cmd = 'LEFT' if current_steering < 0 else 'RIGHT'
+                # Calculate steering using PID controller
+                # Negative offset means line is to the left, so invert for steering
+                steering_error = -line_offset
+                steering_value = pid.calculate(steering_error)
+                
+                # Add to steering history
+                steering_history.append(steering_value)
+                
+                # Use average of recent steering values for smoother response
+                if len(steering_history) > 0:
+                    avg_steering = sum(steering_history) / len(steering_history)
+                else:
+                    avg_steering = steering_value
+                
+                # Convert steering to command
+                turn_command = get_turn_command(avg_steering)
+                
+                logger.debug(f"Line at x={line_x}, offset={line_offset:.2f}, steering={steering_value:.2f}")
                 
             else:
-                # Search behavior
-                robot_status = f"Searching... ({search_counter})"
-                current_steering = 0.0
-                pid_controller.reset()
+                # Line not detected - search mode
+                line_detected = False
                 search_counter += 1
                 
-                if search_counter < 7:
-                    current_turn_cmd = 'LEFT' if last_known_offset < 0 else 'RIGHT'
-                    current_speed_cmd = SPEEDS['NORMAL']
-                elif search_counter < 14:
-                    current_turn_cmd = 'RIGHT' if last_known_offset < 0 else 'LEFT'
-                    current_speed_cmd = SPEEDS['NORMAL']
-                elif search_counter < config.control.search_timeout:
-                    current_turn_cmd = 'LEFT' if (search_counter//4) % 2 == 0 else 'RIGHT'
-                    current_speed_cmd = SPEEDS['SLOW']
+                if search_counter < 5:
+                    # Keep last command briefly (helps with short line gaps)
+                    robot_status = "🔍 Searching for line (brief gap)"
+                elif search_counter < 15:
+                    # Try turning based on last known position
+                    if last_known_good_offset < 0:
+                        turn_command = COMMANDS['RIGHT']
+                        robot_status = "🔍 Searching right (last seen left)"
+                    else:
+                        turn_command = COMMANDS['LEFT']
+                        robot_status = "🔍 Searching left (last seen right)"
+                elif search_counter < 30:
+                    # Switch direction
+                    if turn_command == COMMANDS['LEFT']:
+                        turn_command = COMMANDS['RIGHT']
+                    else:
+                        turn_command = COMMANDS['LEFT']
+                    robot_status = f"🔄 Searching opposite direction ({search_counter})"
+                elif search_counter < 45:
+                    # Try moving forward a bit
+                    turn_command = COMMANDS['FORWARD']
+                    robot_status = "⬆️ Moving forward to find line"
                 else:
-                    current_turn_cmd = 'FORWARD'
-                    current_speed_cmd = SPEEDS['SLOW']
-                    if search_counter > config.control.search_timeout + 10:
+                    # Stop and reset if line completely lost
+                    turn_command = COMMANDS['STOP']
+                    robot_status = "🛑 Line lost - stopped"
+                    
+                    # Reset search after a pause
+                    if search_counter > 60:
                         search_counter = 0
+                        last_known_good_offset = 0.0
+                        pid.reset()
+                        offset_history.clear()
+                        steering_history.clear()
+                        logger.info("🔄 Search pattern reset")
             
             # Send command to ESP32
-            esp32_comm.send_command_reliable(current_speed_cmd, current_turn_cmd)
+            if esp_connection:
+                success = esp_connection.send_command(turn_command)
+                if not success and frame_count % 30 == 0:  # Log occasionally
+                    logger.warning("📡 ESP32 communication failed")
             
-            # Performance monitoring
-            processing_time = time.perf_counter() - loop_start_time
-            fps = 1.0 / processing_time if processing_time > 0 else config.vision.cam_fps
-            performance_monitor.update(processing_time, fps, confidence_score)
+            # Draw debug information
+            draw_debug_info(display_frame, line_x, roi, confidence)
             
-            # Data logging
-            data_logger.log_data({
-                'frame_count': frame_count,
-                'offset': current_offset,
-                'angle': current_angle,
-                'confidence': confidence_score,
-                'steering_output': current_steering,
-                'speed_cmd': current_speed_cmd,
-                'turn_cmd': current_turn_cmd,
-                'processing_time_ms': processing_time * 1000,
-                'fps': fps,
-                'line_count': lines_detected,
-                'robot_status': robot_status,
-                'esp32_connected': esp32_comm.sock is not None
-            })
+            # Update output frame for web interface
+            with frame_lock:
+                output_frame = display_frame.copy()
             
-            # Periodic status logging
-            if time.time() - last_status_log > 5.0:
-                perf_stats = performance_monitor.get_stats()
-                esp32_stats = esp32_comm.get_stats()
-                
-                logger.info(f"Status: {robot_status}, FPS: {perf_stats.get('avg_fps', 0):.1f}, "
-                           f"Conf: {confidence_score:.2f}, PID_Kp: {pid_controller.kp:.3f}, "
-                           f"ESP32: {'OK' if esp32_stats.get('connected') else 'ERR'}")
-                
-                last_status_log = time.time()
+            # Calculate FPS
+            processing_time = time.time() - start_time
+            if processing_time > 0:
+                fps_history.append(1.0 / processing_time)
+                current_fps = sum(fps_history) / len(fps_history)
             
-            # Frame rate control
-            target_loop_time = 1.0 / config.vision.cam_fps
-            if processing_time < target_loop_time:
-                time.sleep(target_loop_time - processing_time)
-    
+            # Log status periodically
+            if frame_count % 60 == 0:  # Every 2 seconds at 30fps
+                logger.info(f"📊 Status: {robot_status} | FPS: {current_fps:.1f} | "
+                           f"Command: {turn_command} | ESP32: {'✅' if esp_connected else '❌'}")
+            
+            # Small delay to prevent overwhelming the system
+            time.sleep(0.01)
+            
     except KeyboardInterrupt:
-        logger.info("🛑 Shutdown requested by user")
-    
+        logger.info("🛑 Stopping robot (Ctrl+C pressed)")
+        robot_status = "Shutting down"
     except Exception as e:
-        logger.error(f"💥 Fatal error in main loop: {e}", exc_info=True)
-    
+        logger.error(f"💥 Unexpected error: {e}", exc_info=True)
+        robot_status = f"Error: {str(e)}"
     finally:
-        logger.info("🧹 Cleaning up...")
+        # Clean up
+        robot_status = "Cleaning up"
         
-        # Cleanup
-        if config.system.enable_threading:
-            image_processor.stop()
+        if esp_connection:
+            logger.info("📡 Stopping robot and disconnecting ESP32")
+            esp_connection.send_command(COMMANDS['STOP'])
+            time.sleep(0.2)  # Give time for stop command
+            esp_connection.close()
         
-        esp32_comm.close()
-        data_logger.close()
-        
-        if cap.isOpened():
+        if 'cap' in locals() and cap.isOpened():
             cap.release()
+            logger.info("📷 Camera released")
         
-        cv2.destroyAllWindows()
-        
-        # Save configuration
-        config.save_config()
-        
-        logger.info("✅ Cleanup complete. Exiting.")
+        logger.info("✅ Robot stopped cleanly")
 
 if __name__ == "__main__":
-    main() 
+    main()
