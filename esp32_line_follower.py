@@ -1,639 +1,490 @@
-"""
-ESP32 Line Following Robot Controller - MicroPython Version
-Supports 4 wheels with encoders and dual motor drivers
-Compatible with Raspberry Pi vision system
+#!/usr/bin/env python3
 
-Hardware Requirements:
-- ESP32 DevKit
-- 2x Motor Drivers (L298N or similar)
-- 4x DC Motors with encoders
-- WiFi connection
-
-Author: AI Assistant
-Date: 2024
-"""
-
-import network
+import cv2
+import numpy as np
 import socket
 import time
-import json
-from machine import Pin, PWM, Timer
-import _thread
-import gc
+import logging
+import threading
+from collections import deque
+from flask import Flask, Response, render_template_string
 
 # -----------------------------------------------------------------------------
-# --- CONFIGURATION ---
+# --- CONFIGURATION FOR BLACK LINE FOLLOWING ---
 # -----------------------------------------------------------------------------
+# ESP32 Configuration - UPDATE THIS TO MATCH YOUR ESP32's IP
+ESP32_IP = '192.168.53.117'  # Change this to your ESP32's IP address
+ESP32_PORT = 1234
+CAMERA_WIDTH, CAMERA_HEIGHT = 320, 240
+CAMERA_FPS = 15
 
-# WiFi Configuration
-WIFI_SSID = "CJ"        # Replace with your WiFi SSID
-WIFI_PASSWORD = "4533simon" # Replace with your WiFi password
-SERVER_PORT = 1234
+# Image processing parameters
+BLACK_THRESHOLD = 60  # Higher values detect darker lines
+BLUR_SIZE = 5
 
-# Motor Driver Pins (L298N Configuration)
-# Motor Driver 1 (Left Side)
-LEFT_MOTOR_PWM_A = 25     # ENA pin
-LEFT_MOTOR_IN1 = 26       # IN1 pin
-LEFT_MOTOR_IN2 = 27       # IN2 pin
-LEFT_MOTOR_PWM_B = 14     # ENB pin  
-LEFT_MOTOR_IN3 = 12       # IN3 pin
-LEFT_MOTOR_IN4 = 13       # IN4 pin
+# Simple PID controller values
+KP = 0.6  # Proportional gain
+KI = 0.02  # Integral gain
+KD = 0.1   # Derivative gain
 
-# Motor Driver 2 (Right Side)
-RIGHT_MOTOR_PWM_A = 32    # ENA pin
-RIGHT_MOTOR_IN1 = 33      # IN1 pin
-RIGHT_MOTOR_IN2 = 25      # IN2 pin  
-RIGHT_MOTOR_PWM_B = 26    # ENB pin
-RIGHT_MOTOR_IN3 = 27      # IN3 pin
-RIGHT_MOTOR_IN4 = 14      # IN4 pin
-
-# Encoder Pins
-LEFT_ENCODER_A_PIN = 18   # Left front motor encoder A
-LEFT_ENCODER_B_PIN = 19   # Left front motor encoder B
-LEFT_ENCODER_A2_PIN = 21  # Left rear motor encoder A
-LEFT_ENCODER_B2_PIN = 22  # Left rear motor encoder B
-
-RIGHT_ENCODER_A_PIN = 16  # Right front motor encoder A  
-RIGHT_ENCODER_B_PIN = 17  # Right front motor encoder B
-RIGHT_ENCODER_A2_PIN = 4  # Right rear motor encoder A
-RIGHT_ENCODER_B2_PIN = 2  # Right rear motor encoder B
-
-# Status LED
-STATUS_LED_PIN = 2
-
-# Motor Speed Settings
-SPEED_FAST = 1023      # Maximum speed (10-bit PWM)
-SPEED_NORMAL = 700     # Normal cruising speed  
-SPEED_SLOW = 400       # Slow speed for precise movements
-SPEED_TURN = 600       # Speed for turning
-SPEED_STOP = 0         # Stop
-
-# PWM Configuration
-PWM_FREQUENCY = 1000   # 1kHz
-
-# Encoder Configuration
-ENCODER_PPR = 20       # Pulses per revolution (adjust for your encoders)
-WHEEL_DIAMETER = 6.5   # Wheel diameter in cm
-WHEEL_CIRCUMFERENCE = 3.14159 * WHEEL_DIAMETER
-
-# Command timeout
-COMMAND_TIMEOUT = 2000  # 2 seconds in milliseconds
+# Commands for ESP32
+COMMANDS = {'FORWARD': 'FORWARD', 'LEFT': 'LEFT', 'RIGHT': 'RIGHT', 'STOP': 'STOP'}
+SPEED = 'SLOW'  # Default speed
 
 # -----------------------------------------------------------------------------
-# --- GLOBAL VARIABLES ---
+# --- Global Variables ---
 # -----------------------------------------------------------------------------
-
-# WiFi and server
-wlan = None
-server_socket = None
-client_socket = None
-
-# Motor control pins
-left_motor_pwm_a = None
-left_motor_in1 = None
-left_motor_in2 = None
-left_motor_pwm_b = None
-left_motor_in3 = None
-left_motor_in4 = None
-
-right_motor_pwm_a = None
-right_motor_in1 = None
-right_motor_in2 = None
-right_motor_pwm_b = None
-right_motor_in3 = None
-right_motor_in4 = None
-
-# Encoder pins
-left_encoder_a = None
-left_encoder_b = None
-left_encoder_a2 = None
-left_encoder_b2 = None
-right_encoder_a = None
-right_encoder_b = None
-right_encoder_a2 = None
-right_encoder_b2 = None
-
-# Status LED
-status_led = None
-
-# Encoder counters
-left_encoder_count = 0
-left_encoder_count2 = 0
-right_encoder_count = 0
-right_encoder_count2 = 0
-
-# Motor states
-left_motor_speed = 0
-right_motor_speed = 0
-left_motor_direction = "STOP"
-right_motor_direction = "STOP"
-
-# Command tracking
-last_command = ""
-last_command_time = 0
-last_heartbeat = 0
-
-# Status tracking
+output_frame = None
+frame_lock = threading.Lock()
+line_offset = 0.0
+steering_value = 0.0
+turn_command = COMMANDS['STOP']
 robot_status = "Initializing"
-is_connected = False
+line_detected = False
+current_fps = 0.0
+confidence = 0.0
+esp_connection = None
 
 # -----------------------------------------------------------------------------
-# --- ENCODER INTERRUPT HANDLERS ---
+# --- Logging Setup ---
 # -----------------------------------------------------------------------------
-
-def left_encoder_a_handler(pin):
-    global left_encoder_count
-    left_encoder_count += 1
-
-def left_encoder_a2_handler(pin):
-    global left_encoder_count2
-    left_encoder_count2 += 1
-
-def right_encoder_a_handler(pin):
-    global right_encoder_count
-    right_encoder_count += 1
-
-def right_encoder_a2_handler(pin):
-    global right_encoder_count2
-    right_encoder_count2 += 1
+logging.basicConfig(level=logging.INFO, 
+                   format='🤖 [%(asctime)s] %(levelname)s: %(message)s', 
+                   datefmt='%H:%M:%S')
+logger = logging.getLogger("SimpleLineFollower")
 
 # -----------------------------------------------------------------------------
-# --- SETUP FUNCTIONS ---
+# --- PID Controller ---
 # -----------------------------------------------------------------------------
-
-def setup_pins():
-    """Initialize all GPIO pins and PWM"""
-    global left_motor_pwm_a, left_motor_in1, left_motor_in2, left_motor_pwm_b
-    global left_motor_in3, left_motor_in4, right_motor_pwm_a, right_motor_in1
-    global right_motor_in2, right_motor_pwm_b, right_motor_in3, right_motor_in4
-    global status_led
-    
-    print("🔧 Setting up GPIO pins...")
-    
-    # Left motor driver pins
-    left_motor_pwm_a = PWM(Pin(LEFT_MOTOR_PWM_A), freq=PWM_FREQUENCY)
-    left_motor_in1 = Pin(LEFT_MOTOR_IN1, Pin.OUT)
-    left_motor_in2 = Pin(LEFT_MOTOR_IN2, Pin.OUT)
-    left_motor_pwm_b = PWM(Pin(LEFT_MOTOR_PWM_B), freq=PWM_FREQUENCY)
-    left_motor_in3 = Pin(LEFT_MOTOR_IN3, Pin.OUT)
-    left_motor_in4 = Pin(LEFT_MOTOR_IN4, Pin.OUT)
-    
-    # Right motor driver pins
-    right_motor_pwm_a = PWM(Pin(RIGHT_MOTOR_PWM_A), freq=PWM_FREQUENCY)
-    right_motor_in1 = Pin(RIGHT_MOTOR_IN1, Pin.OUT)
-    right_motor_in2 = Pin(RIGHT_MOTOR_IN2, Pin.OUT)
-    right_motor_pwm_b = PWM(Pin(RIGHT_MOTOR_PWM_B), freq=PWM_FREQUENCY)
-    right_motor_in3 = Pin(RIGHT_MOTOR_IN3, Pin.OUT)
-    right_motor_in4 = Pin(RIGHT_MOTOR_IN4, Pin.OUT)
-    
-    # Status LED
-    status_led = Pin(STATUS_LED_PIN, Pin.OUT)
-    
-    # Initialize motors to stop
-    stop_all_motors()
-    print("✅ GPIO pins initialized")
-
-def setup_encoders():
-    """Initialize encoder pins with interrupts"""
-    global left_encoder_a, left_encoder_b, left_encoder_a2, left_encoder_b2
-    global right_encoder_a, right_encoder_b, right_encoder_a2, right_encoder_b2
-    
-    print("🔄 Setting up encoders...")
-    
-    # Left encoders
-    left_encoder_a = Pin(LEFT_ENCODER_A_PIN, Pin.IN, Pin.PULL_UP)
-    left_encoder_b = Pin(LEFT_ENCODER_B_PIN, Pin.IN, Pin.PULL_UP)
-    left_encoder_a2 = Pin(LEFT_ENCODER_A2_PIN, Pin.IN, Pin.PULL_UP)
-    left_encoder_b2 = Pin(LEFT_ENCODER_B2_PIN, Pin.IN, Pin.PULL_UP)
-    
-    # Right encoders
-    right_encoder_a = Pin(RIGHT_ENCODER_A_PIN, Pin.IN, Pin.PULL_UP)
-    right_encoder_b = Pin(RIGHT_ENCODER_B_PIN, Pin.IN, Pin.PULL_UP)
-    right_encoder_a2 = Pin(RIGHT_ENCODER_A2_PIN, Pin.IN, Pin.PULL_UP)
-    right_encoder_b2 = Pin(RIGHT_ENCODER_B2_PIN, Pin.IN, Pin.PULL_UP)
-    
-    # Setup interrupts
-    left_encoder_a.irq(trigger=Pin.IRQ_RISING, handler=left_encoder_a_handler)
-    left_encoder_a2.irq(trigger=Pin.IRQ_RISING, handler=left_encoder_a2_handler)
-    right_encoder_a.irq(trigger=Pin.IRQ_RISING, handler=right_encoder_a_handler)
-    right_encoder_a2.irq(trigger=Pin.IRQ_RISING, handler=right_encoder_a2_handler)
-    
-    print("✅ Encoders initialized")
-
-def setup_wifi():
-    """Connect to WiFi network"""
-    global wlan, is_connected
-    
-    print("🌐 Connecting to WiFi...")
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    
-    if not wlan.isconnected():
-        wlan.connect(WIFI_SSID, WIFI_PASSWORD)
-        attempts = 0
-        while not wlan.isconnected() and attempts < 20:
-            print(".", end="")
-            time.sleep(0.5)
-            attempts += 1
-    
-    if wlan.isconnected():
-        print(f"\n✅ WiFi Connected!")
-        print(f"📍 IP Address: {wlan.ifconfig()[0]}")
-        is_connected = True
-        return True
-    else:
-        print(f"\n❌ WiFi Connection Failed!")
-        return False
-
-def setup_server():
-    """Setup TCP server"""
-    global server_socket
-    
-    print("📡 Setting up server...")
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind(('', SERVER_PORT))
-    server_socket.listen(1)
-    
-    print(f"✅ Server listening on port {SERVER_PORT}")
-    print(f"🌐 Connect to: {wlan.ifconfig()[0]}:{SERVER_PORT}")
-
-# -----------------------------------------------------------------------------
-# --- MOTOR CONTROL FUNCTIONS ---
-# -----------------------------------------------------------------------------
-
-def set_left_motors(direction, speed):
-    """Control left side motors"""
-    global left_motor_speed, left_motor_direction
-    
-    left_motor_speed = speed
-    left_motor_direction = direction
-    
-    # Left front motor (Motor A)
-    if direction == "FORWARD":
-        left_motor_in1.value(1)
-        left_motor_in2.value(0)
-    elif direction == "BACKWARD":
-        left_motor_in1.value(0)
-        left_motor_in2.value(1)
-    else:  # STOP
-        left_motor_in1.value(0)
-        left_motor_in2.value(0)
-    
-    left_motor_pwm_a.duty(speed)
-    
-    # Left rear motor (Motor B)
-    if direction == "FORWARD":
-        left_motor_in3.value(1)
-        left_motor_in4.value(0)
-    elif direction == "BACKWARD":
-        left_motor_in3.value(0)
-        left_motor_in4.value(1)
-    else:  # STOP
-        left_motor_in3.value(0)
-        left_motor_in4.value(0)
-    
-    left_motor_pwm_b.duty(speed)
-
-def set_right_motors(direction, speed):
-    """Control right side motors"""
-    global right_motor_speed, right_motor_direction
-    
-    right_motor_speed = speed
-    right_motor_direction = direction
-    
-    # Right front motor (Motor A)
-    if direction == "FORWARD":
-        right_motor_in1.value(1)
-        right_motor_in2.value(0)
-    elif direction == "BACKWARD":
-        right_motor_in1.value(0)
-        right_motor_in2.value(1)
-    else:  # STOP
-        right_motor_in1.value(0)
-        right_motor_in2.value(0)
-    
-    right_motor_pwm_a.duty(speed)
-    
-    # Right rear motor (Motor B)
-    if direction == "FORWARD":
-        right_motor_in3.value(1)
-        right_motor_in4.value(0)
-    elif direction == "BACKWARD":
-        right_motor_in3.value(0)
-        right_motor_in4.value(1)
-    else:  # STOP
-        right_motor_in3.value(0)
-        right_motor_in4.value(0)
-    
-    right_motor_pwm_b.duty(speed)
-
-def move_forward(speed):
-    """Move robot forward"""
-    set_left_motors("FORWARD", speed)
-    set_right_motors("FORWARD", speed)
-    print("⬆️ Moving Forward")
-
-def turn_left(speed):
-    """Turn robot left using differential steering"""
-    left_speed = int(speed * 0.3)  # Slow left side
-    right_speed = speed            # Normal right side
-    
-    set_left_motors("FORWARD", left_speed)
-    set_right_motors("FORWARD", right_speed)
-    print("⬅️ Turning Left")
-
-def turn_right(speed):
-    """Turn robot right using differential steering"""
-    left_speed = speed             # Normal left side
-    right_speed = int(speed * 0.3) # Slow right side
-    
-    set_left_motors("FORWARD", left_speed)
-    set_right_motors("FORWARD", right_speed)
-    print("➡️ Turning Right")
-
-def stop_all_motors():
-    """Stop all motors"""
-    set_left_motors("STOP", 0)
-    set_right_motors("STOP", 0)
-    print("⏹️ All Motors Stopped")
-
-# -----------------------------------------------------------------------------
-# --- COMMAND PROCESSING ---
-# -----------------------------------------------------------------------------
-
-def parse_speed_command(speed_cmd):
-    """Parse speed command and return PWM value"""
-    speed_map = {
-        'F': SPEED_FAST,
-        'N': SPEED_NORMAL,
-        'S': SPEED_SLOW,
-        'T': SPEED_TURN,
-        'H': SPEED_STOP
-    }
-    return speed_map.get(speed_cmd, SPEED_STOP)
-
-def execute_movement(speed, direction):
-    """Execute movement command"""
-    print(f"🚗 Executing: Speed={speed}, Direction={direction}")
-    
-    if direction == "FORWARD":
-        move_forward(speed)
-    elif direction == "LEFT":
-        turn_left(speed)
-    elif direction == "RIGHT":
-        turn_right(speed)
-    elif speed == SPEED_STOP:
-        stop_all_motors()
-    else:
-        print(f"⚠️ Unknown direction: {direction}")
-        stop_all_motors()
-
-def process_command(command):
-    """Process incoming command"""
-    global last_command, last_command_time, last_heartbeat
-    
-    print(f"📨 Received: {command}")
-    
-    # Parse command format: "SPEED:DIRECTION"
-    try:
-        parts = command.split(':')
-        if len(parts) != 2:
-            print("❌ Invalid command format")
-            return
+class SimplePID:
+    def __init__(self, kp, ki, kd):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.previous_error = 0.0
+        self.integral = 0.0
         
-        speed_cmd = parts[0].strip()
-        direction_cmd = parts[1].strip()
+    def calculate(self, error):
+        # Calculate integral term with windup protection
+        self.integral += error
+        self.integral = np.clip(self.integral, -5.0, 5.0)
         
-        # Process speed command
-        target_speed = parse_speed_command(speed_cmd)
+        # Calculate derivative term
+        derivative = error - self.previous_error
         
-        # Execute movement
-        execute_movement(target_speed, direction_cmd)
+        # Calculate PID output
+        output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
         
-        last_command = command
-        last_command_time = time.ticks_ms()
-        last_heartbeat = time.ticks_ms()
+        # Store error for next iteration
+        self.previous_error = error
         
-    except Exception as e:
-        print(f"❌ Error processing command: {e}")
-        stop_all_motors()
-
-# -----------------------------------------------------------------------------
-# --- CLIENT HANDLER ---
-# -----------------------------------------------------------------------------
-
-def handle_client():
-    """Handle client connections in separate thread"""
-    global client_socket, last_heartbeat
+        # Limit output to range [-1.0, 1.0]
+        return np.clip(output, -1.0, 1.0)
     
-    while True:
+    def reset(self):
+        self.previous_error = 0.0
+        self.integral = 0.0
+        logger.info("🔄 PID Controller Reset")
+
+# -----------------------------------------------------------------------------
+# --- ESP32 Communication ---
+# -----------------------------------------------------------------------------
+class ESP32Connection:
+    def __init__(self, ip, port):
+        self.ip = ip
+        self.port = port
+        self.socket = None
+        self.last_command = None
+        self.connect()
+    
+    def connect(self):
+        if self.socket:
+            try: 
+                self.socket.close()
+            except: 
+                pass
+            self.socket = None
+        
         try:
-            if server_socket:
-                print("👂 Waiting for client connection...")
-                client_socket, addr = server_socket.accept()
-                print(f"📱 Client connected from {addr}")
-                last_heartbeat = time.ticks_ms()
-                
-                while True:
-                    try:
-                        data = client_socket.recv(1024)
-                        if not data:
-                            break
-                        
-                        command = data.decode('utf-8').strip()
-                        if command:
-                            process_command(command)
-                            
-                    except OSError:
-                        break
-                    except Exception as e:
-                        print(f"❌ Client error: {e}")
-                        break
-                
-                print("📱 Client disconnected")
-                client_socket.close()
-                client_socket = None
-                
+            self.socket = socket.create_connection((self.ip, self.port), timeout=2)
+            self.socket.settimeout(0.2)
+            logger.info(f"✅ Connected to ESP32 at {self.ip}:{self.port}")
+            return True
         except Exception as e:
-            print(f"❌ Server error: {e}")
-            time.sleep(1)
-
-# -----------------------------------------------------------------------------
-# --- MONITORING FUNCTIONS ---
-# -----------------------------------------------------------------------------
-
-def check_command_timeout():
-    """Check for command timeout and stop motors if needed"""
-    global last_command_time
+            logger.error(f"❌ Failed to connect to ESP32: {e}")
+            self.socket = None
+            return False
     
-    if last_command_time > 0:
-        if time.ticks_diff(time.ticks_ms(), last_command_time) > COMMAND_TIMEOUT:
-            print("⚠️ Command timeout - stopping motors")
-            stop_all_motors()
-            last_command_time = 0
-
-def update_status_led():
-    """Update status LED based on connection state"""
-    current_time = time.ticks_ms()
+    def send_command(self, command):
+        if not self.socket and not self.connect():
+            return False
+        
+        try:
+            # Add newline to command
+            full_command = f"{command}\n"
+            
+            # Only send if command changed
+            if full_command != self.last_command:
+                self.socket.sendall(full_command.encode())
+                self.last_command = full_command
+                logger.debug(f"📡 Sent to ESP32: {command}")
+            
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error sending command to ESP32: {e}")
+            self.socket = None
+            return False
     
-    if is_connected and client_socket:
-        # Solid on when connected and receiving commands
-        if time.ticks_diff(current_time, last_heartbeat) < 3000:
-            status_led.value(1)
-        else:
-            # Slow blink when connected but no recent commands
-            status_led.value((current_time // 1000) % 2)
-    elif is_connected:
-        # Fast blink when WiFi connected but no client
-        status_led.value((current_time // 250) % 2)
-    else:
-        # Off when no WiFi
-        status_led.value(0)
-
-def print_status():
-    """Print robot status for debugging"""
-    print(f"📊 Status - Left: {left_motor_speed} ({left_encoder_count + left_encoder_count2}/2), "
-          f"Right: {right_motor_speed} ({right_encoder_count + right_encoder_count2}/2)")
-    print(f"📡 WiFi: {is_connected}, Client: {client_socket is not None}")
-    print(f"💾 Free memory: {gc.mem_free()} bytes")
+    def close(self):
+        if self.socket:
+            try:
+                self.send_command("STOP")
+                time.sleep(0.1)
+                self.socket.close()
+            except:
+                pass
+            self.socket = None
+            logger.info("🔌 Disconnected from ESP32")
 
 # -----------------------------------------------------------------------------
-# --- MAIN PROGRAM ---
+# --- Image Processing ---
 # -----------------------------------------------------------------------------
+def process_image(frame):
+    """Detect black line in image and return line position"""
+    # Convert to grayscale
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Apply Gaussian blur to reduce noise
+    blurred = cv2.GaussianBlur(gray, (BLUR_SIZE, BLUR_SIZE), 0)
+    
+    # Threshold the image to identify black regions
+    _, binary = cv2.threshold(blurred, BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+    
+    # Focus on bottom part of the image (where the line is most visible)
+    height, width = binary.shape
+    roi_height = int(height * 0.3)  # Bottom 30% of the image
+    roi = binary[height - roi_height:height, :]
+    
+    # Find contours in the ROI
+    contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        return None, None, 0.0
+    
+    # Find the largest contour (most likely the line)
+    largest_contour = max(contours, key=cv2.contourArea)
+    
+    # Check if contour is large enough to be a line
+    area = cv2.contourArea(largest_contour)
+    if area < 100:  # Minimum area threshold
+        return None, None, 0.0
+    
+    # Get the center of the contour
+    M = cv2.moments(largest_contour)
+    if M["m00"] == 0:
+        return None, None, 0.0
+    
+    # Calculate x-position of line center
+    cx = int(M["m10"] / M["m00"])
+    
+    # Calculate offset from center (-1.0 to 1.0)
+    center_x = width / 2
+    offset = (cx - center_x) / center_x
+    
+    # Calculate confidence based on contour area
+    confidence = min(area / (width * roi_height * 0.1), 1.0)
+    
+    # Return line position and confidence
+    return cx, roi, confidence
 
+# -----------------------------------------------------------------------------
+# --- Movement Control ---
+# -----------------------------------------------------------------------------
+def get_turn_command(steering):
+    """Convert steering value to turn command"""
+    if abs(steering) < 0.1:  # Small deadzone
+        return COMMANDS['FORWARD']
+    elif steering < 0:  # Negative steering turns right
+        return COMMANDS['RIGHT']
+    else:  # Positive steering turns left
+        return COMMANDS['LEFT']
+
+# -----------------------------------------------------------------------------
+# --- Visualization ---
+# -----------------------------------------------------------------------------
+def draw_debug_info(frame, line_x=None, roi=None, confidence=0.0):
+    """Draw debug information on frame"""
+    height, width = frame.shape[:2]
+    
+    # Draw ROI rectangle
+    roi_height = int(height * 0.3)
+    roi_top = height - roi_height
+    cv2.rectangle(frame, (0, roi_top), (width, height), (0, 255, 255), 2)
+    
+    # Draw center line
+    center_x = width // 2
+    cv2.line(frame, (center_x, 0), (center_x, height), (200, 200, 200), 1)
+    
+    # Draw detected line position
+    if line_x is not None:
+        # Adjust line_x to frame coordinates
+        cv2.circle(frame, (line_x, roi_top + roi_height // 2), 10, (0, 0, 255), -1)
+        cv2.line(frame, (center_x, roi_top + roi_height // 2), 
+                 (line_x, roi_top + roi_height // 2), (255, 0, 255), 2)
+    
+    # Draw status text
+    status_color = (0, 255, 0) if line_detected else (0, 0, 255)
+    cv2.putText(frame, f"Status: {robot_status}", (10, 20), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color, 1)
+    cv2.putText(frame, f"Offset: {line_offset:.2f}", (10, 40), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.putText(frame, f"Command: {turn_command}", (10, 60), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    cv2.putText(frame, f"FPS: {current_fps:.1f}", (10, 80), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    
+    # Draw direction arrow
+    arrow_y = height - 30
+    arrow_color = (0, 255, 0)  # Green for forward
+    arrow_text = "FORWARD"
+    
+    if turn_command == COMMANDS['LEFT']:
+        arrow_color = (0, 255, 255)  # Yellow for left
+        arrow_text = "LEFT"
+    elif turn_command == COMMANDS['RIGHT']:
+        arrow_color = (255, 255, 0)  # Cyan for right
+        arrow_text = "RIGHT"
+    
+    cv2.putText(frame, arrow_text, (width // 2 - 30, arrow_y), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, arrow_color, 2)
+
+# -----------------------------------------------------------------------------
+# --- Flask Web Interface ---
+# -----------------------------------------------------------------------------
+app = Flask(__name__)
+
+# Simple HTML template for web interface
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+    <title>Simple Line Follower</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: Arial; background: #222; color: white; text-align: center; }
+        .container { margin: 20px auto; max-width: 800px; }
+        h1 { color: #00ffff; }
+        .video-feed { width: 100%; border: 2px solid #444; border-radius: 5px; }
+        .status { margin-top: 20px; padding: 10px; background: #333; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Simple Line Follower Robot</h1>
+        <img src="{{ url_for('video_feed') }}" class="video-feed">
+        <div class="status">
+            <h2>Robot Status: <span id="status">Unknown</span></h2>
+            <p>Command: <span id="command">None</span></p>
+        </div>
+    </div>
+    
+    <script>
+        // Update status periodically
+        setInterval(function() {
+            fetch('/status')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('status').textContent = data.status;
+                    document.getElementById('command').textContent = data.command;
+                });
+        }, 500);
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(), 
+                   mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/status')
+def status():
+    return {
+        'status': robot_status,
+        'command': turn_command,
+        'offset': line_offset,
+        'fps': current_fps,
+        'confidence': confidence
+    }
+
+def generate_frames():
+    global output_frame, frame_lock
+    while True:
+        with frame_lock:
+            if output_frame is not None:
+                frame_to_send = output_frame.copy()
+            else:
+                frame_to_send = np.zeros((CAMERA_HEIGHT, CAMERA_WIDTH, 3), dtype=np.uint8)
+                cv2.putText(frame_to_send, "No Camera Feed", 
+                           (CAMERA_WIDTH//2-80, CAMERA_HEIGHT//2),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        
+        ret, jpeg = cv2.imencode('.jpg', frame_to_send, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if ret:
+            yield (b'--frame\r\n'
+                  b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+        time.sleep(1/30)  # Limit to 30 FPS for web streaming
+
+def run_flask_server():
+    logger.info("🌐 Starting web server on http://0.0.0.0:5000")
+    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True)
+
+# -----------------------------------------------------------------------------
+# --- Main Application ---
+# -----------------------------------------------------------------------------
 def main():
-    """Main program"""
-    global robot_status
+    global output_frame, line_offset, steering_value, turn_command, robot_status
+    global line_detected, current_fps, confidence, esp_connection
     
-    print("🤖 ESP32 Line Following Robot - MicroPython")
-    print("=" * 50)
+    logger.info("🚀 Starting Simple Line Follower Robot")
+    robot_status = "Starting camera"
     
-    # Initialize hardware
-    robot_status = "Setting up pins"
-    setup_pins()
-    
-    robot_status = "Setting up encoders"
-    setup_encoders()
-    
-    robot_status = "Connecting WiFi"
-    if not setup_wifi():
-        print("❌ Failed to connect to WiFi. Check credentials.")
+    # Initialize camera
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        logger.error("❌ Failed to open camera")
         return
     
-    robot_status = "Starting server"
-    setup_server()
+    # Set camera properties
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
     
-    # Flash LED to indicate ready
-    for i in range(5):
-        status_led.value(1)
-        time.sleep(0.1)
-        status_led.value(0)
-        time.sleep(0.1)
+    # Get actual camera resolution
+    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    logger.info(f"📷 Camera initialized: {actual_width}x{actual_height}")
     
+    # Initialize PID controller
+    pid = SimplePID(KP, KI, KD)
+    
+    # Connect to ESP32
+    robot_status = "Connecting to ESP32"
+    esp_connection = ESP32Connection(ESP32_IP, ESP32_PORT)
+    
+    # Start web interface in a separate thread
+    flask_thread = threading.Thread(target=run_flask_server, daemon=True)
+    flask_thread.start()
+    
+    # FPS calculation
+    fps_history = deque(maxlen=10)
+    search_counter = 0
+    
+    logger.info("🤖 Robot ready! Starting line detection...")
     robot_status = "Ready"
-    print("✅ Robot Ready!")
     
-    # Start client handler in separate thread
-    _thread.start_new_thread(handle_client, ())
-    
-    # Main monitoring loop
-    last_status_print = 0
-    status_counter = 0
-    
-    while True:
-        try:
-            current_time = time.ticks_ms()
+    try:
+        while True:
+            # Measure processing time for FPS calculation
+            start_time = time.time()
             
-            # Check command timeout
-            check_command_timeout()
+            # Capture frame from camera
+            ret, frame = cap.read()
+            if not ret:
+                logger.warning("⚠️ Failed to capture frame")
+                robot_status = "Camera error"
+                time.sleep(0.1)
+                continue
             
-            # Update status LED
-            update_status_led()
+            # Process image to find line
+            line_x, roi, detection_confidence = process_image(frame)
+            confidence = detection_confidence
             
-            # Print status every 5 seconds
-            if time.ticks_diff(current_time, last_status_print) > 5000:
-                if status_counter % 2 == 0:  # Every 10 seconds
-                    print_status()
-                last_status_print = current_time
-                status_counter += 1
+            # Create a copy for visualization
+            display_frame = frame.copy()
             
-            # Garbage collection
-            if status_counter % 10 == 0:
-                gc.collect()
+            # Update line following logic
+            if line_x is not None and confidence > 0.2:
+                # Line detected
+                line_detected = True
+                robot_status = "Following line"
+                search_counter = 0
+                
+                # Calculate line position relative to center (-1.0 to 1.0)
+                center_x = frame.shape[1] / 2
+                line_offset = (line_x - center_x) / center_x
+                
+                # Calculate steering using PID controller
+                # Negative offset means line is to the left, so invert for steering
+                steering_error = -line_offset
+                steering_value = pid.calculate(steering_error)
+                
+                # Convert steering to command
+                turn_command = get_turn_command(steering_value)
+                
+                logger.debug(f"🎯 Line at x={line_x}, offset={line_offset:.2f}, steering={steering_value:.2f}")
+                
+            else:
+                # Line not detected - search mode
+                line_detected = False
+                search_counter += 1
+                
+                if search_counter < 10:
+                    # Keep last command briefly
+                    robot_status = "Searching for line"
+                elif search_counter < 20:
+                    # Turn left to search
+                    turn_command = COMMANDS['LEFT']
+                    robot_status = "Searching left"
+                elif search_counter < 40:
+                    # Turn right to search
+                    turn_command = COMMANDS['RIGHT']
+                    robot_status = "Searching right"
+                else:
+                    # Reset search pattern
+                    turn_command = COMMANDS['FORWARD']
+                    robot_status = "Moving forward"
+                    if search_counter > 60:
+                        search_counter = 0
             
-            time.sleep(0.1)
+            # Send command to ESP32
+            if esp_connection:
+                esp_connection.send_command(turn_command)
             
-        except KeyboardInterrupt:
-            print("\n🛑 Shutdown requested")
-            break
-        except Exception as e:
-            print(f"❌ Main loop error: {e}")
-            time.sleep(1)
-    
-    # Cleanup
-    print("🧹 Cleaning up...")
-    stop_all_motors()
-    if client_socket:
-        client_socket.close()
-    if server_socket:
-        server_socket.close()
-    status_led.value(0)
-    print("✅ Cleanup complete")
-
-# -----------------------------------------------------------------------------
-# --- BOOT SEQUENCE ---
-# -----------------------------------------------------------------------------
+            # Draw debug information
+            draw_debug_info(display_frame, line_x, roi, confidence)
+            
+            # Update output frame for web interface
+            with frame_lock:
+                output_frame = display_frame.copy()
+            
+            # Calculate FPS
+            processing_time = time.time() - start_time
+            fps_history.append(1.0 / max(processing_time, 0.001))
+            current_fps = sum(fps_history) / len(fps_history)
+            
+            # Log status periodically
+            if len(fps_history) % 30 == 0:
+                logger.info(f"📊 Status: {robot_status} | FPS: {current_fps:.1f} | Command: {turn_command}")
+            
+    except KeyboardInterrupt:
+        logger.info("🛑 Stopping robot (Ctrl+C pressed)")
+    except Exception as e:
+        logger.error(f"❌ Error: {e}", exc_info=True)
+    finally:
+        # Clean up
+        if esp_connection:
+            esp_connection.send_command(COMMANDS['STOP'])
+            esp_connection.close()
+        
+        if 'cap' in locals() and cap.isOpened():
+            cap.release()
+        
+        logger.info("✅ Robot stopped")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"💥 Fatal error: {e}")
-        # Emergency stop
-        try:
-            stop_all_motors()
-        except:
-            pass
-
-"""
-SETUP INSTRUCTIONS:
-
-1. Install MicroPython on ESP32:
-   - Download firmware from micropython.org
-   - Flash using esptool.py: esptool.py --chip esp32 write_flash -z 0x1000 firmware.bin
-
-2. Upload this file to ESP32:
-   - Use Thonny, uPyCraft, or ampy
-   - Save as main.py on the ESP32
-
-3. Update WiFi credentials:
-   - Change WIFI_SSID and WIFI_PASSWORD
-
-4. Wire hardware according to pin definitions in code
-
-5. Update ESP32_IP in Raspberry Pi code to match ESP32's IP
-
-WIRING GUIDE:
-
-Motor Driver 1 (Left Side):
-- ENA -> GPIO 25, IN1 -> GPIO 26, IN2 -> GPIO 27
-- ENB -> GPIO 14, IN3 -> GPIO 12, IN4 -> GPIO 13
-
-Motor Driver 2 (Right Side):  
-- ENA -> GPIO 32, IN1 -> GPIO 33, IN2 -> GPIO 25
-- ENB -> GPIO 26, IN3 -> GPIO 27, IN4 -> GPIO 14
-
-Encoders:
-- Left Front: A->GPIO18, B->GPIO19
-- Left Rear: A->GPIO21, B->GPIO22  
-- Right Front: A->GPIO16, B->GPIO17
-- Right Rear: A->GPIO4, B->GPIO2
-
-Power:
-- Motor drivers: 12V battery + 5V logic
-- ESP32: 5V VIN or 3.3V supply
-- Common ground for all components
-
-Status LED: GPIO2 (built-in LED on most ESP32 boards)
-""" 
+    main()

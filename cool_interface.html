@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🤖 SMART Line Follower AI Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Roboto:wght@300;400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #1a1d29;
+            --bg-accent: #252b3a;
+            --text-primary: #e8eaed;
+            --text-secondary: #9aa0a6;
+            --accent-cyber: #00ffff;
+            --accent-neon: #ff00ff;
+            --accent-gold: #ffd700;
+            --success: #00ff41;
+            --warning: #ffab00;
+            --error: #ff1744;
+            --shadow-glow: 0 0 20px rgba(0,255,255,0.3);
+            --border-cyber: 1px solid rgba(0,255,255,0.4);
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Roboto', sans-serif;
+            background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+        
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: radial-gradient(circle at 20% 80%, rgba(0,255,255,0.1) 0%, transparent 50%),
+                       radial-gradient(circle at 80% 20%, rgba(255,0,255,0.1) 0%, transparent 50%);
+            pointer-events: none;
+            z-index: -1;
+        }
+        
+        .header {
+            text-align: center;
+            padding: 20px;
+            position: relative;
+        }
+        
+        .header h1 {
+            font-family: 'Orbitron', monospace;
+            font-size: 3rem;
+            font-weight: 900;
+            background: linear-gradient(45deg, var(--accent-cyber), var(--accent-neon), var(--accent-gold));
+            background-clip: text;
+            -webkit-background-clip: text;
+            color: transparent;
+            text-shadow: 0 0 30px rgba(0,255,255,0.5);
+            margin-bottom: 10px;
+            animation: glow 2s ease-in-out infinite alternate;
+        }
+        
+        .header .subtitle {
+            font-size: 1.2rem;
+            color: var(--text-secondary);
+            font-weight: 300;
+            letter-spacing: 2px;
+        }
+        
+        @keyframes glow {
+            from { filter: drop-shadow(0 0 5px rgba(0,255,255,0.5)); }
+            to { filter: drop-shadow(0 0 20px rgba(0,255,255,0.8)); }
+        }
+        
+        .main-container {
+            display: grid;
+            grid-template-columns: 1fr 400px;
+            gap: 25px;
+            padding: 0 20px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .video-section {
+            position: relative;
+        }
+        
+        .video-card {
+            background: var(--bg-accent);
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: var(--shadow-glow);
+            border: var(--border-cyber);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .video-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--accent-cyber), transparent);
+            animation: scan 3s linear infinite;
+        }
+        
+        @keyframes scan {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+        
+        .video-feed {
+            width: 100%;
+            height: auto;
+            border-radius: 10px;
+            border: 2px solid rgba(0,255,255,0.3);
+            box-shadow: 0 0 20px rgba(0,255,255,0.2);
+        }
+        
+        .controls-section {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        .status-card {
+            background: var(--bg-accent);
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: var(--shadow-glow);
+            border: var(--border-cyber);
+            position: relative;
+        }
+        
+        .status-card h2 {
+            font-family: 'Orbitron', monospace;
+            color: var(--accent-cyber);
+            margin-bottom: 15px;
+            font-size: 1.3rem;
+            text-align: center;
+        }
+        
+        .connection-status {
+            text-align: center;
+            padding: 15px;
+            border-radius: 10px;
+            font-weight: bold;
+            font-size: 1.1rem;
+            margin-bottom: 20px;
+            transition: all 0.3s ease;
+        }
+        
+        .connected {
+            background: linear-gradient(45deg, rgba(0,255,65,0.2), rgba(0,255,65,0.1));
+            color: var(--success);
+            border: 1px solid var(--success);
+            box-shadow: 0 0 15px rgba(0,255,65,0.3);
+        }
+        
+        .disconnected {
+            background: linear-gradient(45deg, rgba(255,23,68,0.2), rgba(255,23,68,0.1));
+            color: var(--error);
+            border: 1px solid var(--error);
+            box-shadow: 0 0 15px rgba(255,23,68,0.3);
+        }
+        
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+        }
+        
+        .metric-item {
+            background: rgba(255,255,255,0.05);
+            border-radius: 10px;
+            padding: 15px;
+            border: 1px solid rgba(255,255,255,0.1);
+            transition: all 0.3s ease;
+            position: relative;
+        }
+        
+        .metric-item:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,255,255,0.2);
+            border-color: var(--accent-cyber);
+        }
+        
+        .metric-label {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .metric-value {
+            color: var(--text-primary);
+            font-size: 1.8rem;
+            font-weight: bold;
+            font-family: 'Orbitron', monospace;
+        }
+        
+        .metric-unit {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            margin-left: 5px;
+        }
+        
+        .confidence-bar {
+            width: 100%;
+            height: 6px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        
+        .confidence-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--error) 0%, var(--warning) 50%, var(--success) 100%);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+        
+        .ai-status {
+            background: var(--bg-accent);
+            border-radius: 15px;
+            padding: 20px;
+            border: var(--border-cyber);
+            box-shadow: var(--shadow-glow);
+        }
+        
+        .ai-brain {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        
+        .brain-icon {
+            font-size: 3rem;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        
+        .ai-metrics {
+            display: grid;
+            gap: 10px;
+        }
+        
+        .ai-metric {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 8px;
+            border-left: 3px solid var(--accent-cyber);
+        }
+        
+        .performance-chart {
+            background: var(--bg-accent);
+            border-radius: 15px;
+            padding: 20px;
+            border: var(--border-cyber);
+            box-shadow: var(--shadow-glow);
+            margin-top: 20px;
+        }
+        
+        .chart-header {
+            text-align: center;
+            color: var(--accent-cyber);
+            font-family: 'Orbitron', monospace;
+            margin-bottom: 15px;
+        }
+        
+        .steering-indicator {
+            position: relative;
+            height: 100px;
+            background: linear-gradient(90deg, var(--error) 0%, var(--success) 50%, var(--error) 100%);
+            border-radius: 50px;
+            margin: 20px 0;
+        }
+        
+        .steering-needle {
+            position: absolute;
+            top: 50%;
+            width: 4px;
+            height: 80px;
+            background: var(--text-primary);
+            border-radius: 2px;
+            transform: translateY(-50%);
+            transition: left 0.3s ease;
+            box-shadow: 0 0 10px rgba(255,255,255,0.5);
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+        
+        @media (max-width: 1024px) {
+            .main-container {
+                grid-template-columns: 1fr;
+                gap: 20px;
+            }
+            
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .metrics-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🤖 SMART LINE FOLLOWER AI</h1>
+        <div class="subtitle">Intelligent Autonomous Navigation System</div>
+    </div>
+
+    <div class="main-container">
+        <div class="video-section">
+            <div class="video-card">
+                <img src="{{ url_for('video_feed') }}" class="video-feed" alt="Live Camera Feed">
+            </div>
+            
+            <div class="performance-chart">
+                <div class="chart-header">🎯 Steering Control</div>
+                <div class="steering-indicator">
+                    <div class="steering-needle" id="steering-needle"></div>
+                </div>
+                <div style="display: flex; justify-content: space-between; color: var(--text-secondary); font-size: 0.9rem; margin-top: 10px;">
+                    <span>⬅️ LEFT</span>
+                    <span>CENTER</span>
+                    <span>RIGHT ➡️</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="controls-section">
+            <div class="status-card">
+                <h2>🔗 CONNECTION STATUS</h2>
+                <div id="esp-status" class="connection-status disconnected">ESP32: Connecting...</div>
+            </div>
+
+            <div class="status-card">
+                <h2>📊 LIVE METRICS</h2>
+                <div class="metrics-grid">
+                    <div class="metric-item">
+                        <div class="metric-label">Robot Status</div>
+                        <div class="metric-value" id="robot-status">Initializing</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">Lines Detected</div>
+                        <div class="metric-value" id="lines-detected">0</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">AI Confidence</div>
+                        <div class="metric-value" id="confidence">0.00<span class="metric-unit">%</span></div>
+                        <div class="confidence-bar">
+                            <div class="confidence-fill" id="confidence-bar"></div>
+                        </div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">Line Offset</div>
+                        <div class="metric-value" id="line-offset">0.000</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">Steering Power</div>
+                        <div class="metric-value" id="steering">0.000</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">Speed Mode</div>
+                        <div class="metric-value" id="speed-cmd">STOP</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">Turn Direction</div>
+                        <div class="metric-value" id="turn-cmd">FORWARD</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">Camera FPS</div>
+                        <div class="metric-value" id="fps">0.0<span class="metric-unit">Hz</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="ai-status">
+                <h2>🧠 AI STATUS</h2>
+                <div class="ai-brain">
+                    <div class="brain-icon">🤖</div>
+                    <div id="ai-mode">SMART ADAPTIVE MODE</div>
+                </div>
+                <div class="ai-metrics">
+                    <div class="ai-metric">
+                        <span>Environment Adaptation</span>
+                        <span id="env-status">🌟 Active</span>
+                    </div>
+                    <div class="ai-metric">
+                        <span>Anti-Oscillation</span>
+                        <span id="anti-osc">🛡️ Enabled</span>
+                    </div>
+                    <div class="ai-metric">
+                        <span>Smart Filtering</span>
+                        <span id="smart-filter">⚡ Online</span>
+                    </div>
+                    <div class="ai-metric">
+                        <span>Vision Processing</span>
+                        <span id="vision-proc">👁️ Enhanced</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const speedMap = {
+            'F': '🚀 FAST',
+            'N': '⚡ NORMAL', 
+            'S': '🐢 SLOW',
+            'T': '🔄 TURN',
+            'H': '🛑 STOP'
+        };
+
+        const turnMap = {
+            'FORWARD': '⬆️ FWD',
+            'LEFT': '⬅️ LEFT',
+            'RIGHT': '➡️ RIGHT'
+        };
+
+        function updateSteering(steering) {
+            const needle = document.getElementById('steering-needle');
+            const indicator = document.querySelector('.steering-indicator');
+            const maxOffset = indicator.offsetWidth / 2 - 2;
+            const position = Math.max(0, Math.min(indicator.offsetWidth - 4, maxOffset + (steering * maxOffset)));
+            needle.style.left = position + 'px';
+        }
+
+        function updateStatus() {
+            fetch('/status')
+                .then(e => e.json())
+                .then(e => {
+                    document.getElementById('robot-status').textContent = e.robot_status || 'N/A';
+                    document.getElementById('lines-detected').textContent = e.lines_detected || 0;
+                    
+                    const confidence = (e.confidence || 0) * 100;
+                    document.getElementById('confidence').innerHTML = confidence.toFixed(1) + '<span class="metric-unit">%</span>';
+                    document.getElementById('confidence-bar').style.width = confidence + '%';
+                    
+                    document.getElementById('line-offset').textContent = (e.line_offset || 0).toFixed(3);
+                    
+                    const steering = e.steering || 0;
+                    document.getElementById('steering').textContent = steering.toFixed(3);
+                    updateSteering(steering);
+                    
+                    document.getElementById('speed-cmd').textContent = speedMap[e.speed_cmd] || e.speed_cmd || 'N/A';
+                    document.getElementById('turn-cmd').textContent = turnMap[e.turn_cmd] || e.turn_cmd || 'N/A';
+                    document.getElementById('fps').innerHTML = (e.fps || 0).toFixed(1) + '<span class="metric-unit">Hz</span>';
+                    
+                    const espStatus = document.getElementById('esp-status');
+                    if (e.esp_connected) {
+                        espStatus.className = 'connection-status connected';
+                        espStatus.textContent = '🟢 ESP32: Connected & Active';
+                    } else {
+                        espStatus.className = 'connection-status disconnected';
+                        espStatus.textContent = '🔴 ESP32: Disconnected';
+                    }
+                })
+                .catch(e => console.error('Status update failed:', e));
+        }
+
+        setInterval(updateStatus, 200);
+        updateStatus();
+    </script>
+</body>
+</html> 
