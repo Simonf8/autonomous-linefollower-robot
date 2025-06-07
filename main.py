@@ -82,7 +82,7 @@ COMMANDS = {'FORWARD': 'FORWARD', 'LEFT': 'LEFT', 'RIGHT': 'RIGHT', 'STOP': 'STO
            'AVOID_LEFT': 'EMERGENCY_LEFT', 'AVOID_RIGHT': 'EMERGENCY_RIGHT'}  # Emergency avoidance!
 SPEED = 'SLOW'  # Default speed
 
-# Steering parameters  
+# Steering parameters
 STEERING_DEADZONE = 0.12  # Ignore small errors (slightly reduced for more responsiveness)
 MAX_STEERING = 0.95 # Maximum steering value (slightly increased for better responsiveness)
 
@@ -91,18 +91,23 @@ obstacle_memory = {}  # Learning-based obstacle memory
 performance_history = deque(maxlen=PID_ADAPTATION_WINDOW)  # PID performance tracking
 learned_maneuvers = {}  # Successful avoidance patterns
 
-# Object avoidance state
+# Enhanced 3-phase obstacle avoidance state
 object_detected = False
 object_position = 0.0
-avoidance_phase = 'none'
-avoidance_side = 'none'
+avoidance_phase = 'none'  # 'none', 'turning', 'clearing', 'returning'
+avoidance_side = 'none'   # 'left', 'right'
 avoidance_frame_count = 0
-avoidance_duration = 0  # How long to keep avoiding
+avoidance_duration = 0
 corner_warning = False
 corner_prediction_frames = 0
 object_detection_frames = 0
 OBJECT_DETECTION_PERSISTENCE = 0  # Immediate detection for faster avoidance
-AVOIDANCE_MINIMUM_DURATION = 15  # Keep avoiding for at least 15 frames (about 3 seconds)
+
+# Dynamic avoidance parameters
+MAX_TURN_DURATION = 20          # Maximum frames to turn if object still visible
+AVOIDANCE_CLEAR_DURATION = 12   # Phase 2: Move forward to clear object  
+AVOIDANCE_RETURN_DURATION = 15  # Phase 3: Turn back to find line
+OBJECT_CLEAR_THRESHOLD = 3      # Frames without seeing object to consider it cleared
 
 # Avoidance phase durations
 AVOIDANCE_TURN_FRAMES = 8      # Frames to turn away from object
@@ -484,8 +489,8 @@ def detect_objects_in_zone(binary_roi, width, line_position=None):
             continue
             
         # 3. Calculate object center position
-        center_x = x + w/2
-        relative_pos = (center_x - width/2) / (width/2)
+            center_x = x + w/2
+            relative_pos = (center_x - width/2) / (width/2)
         
         # 4. Check if object is in the robot's path (more lenient)
         if line_position is not None:
@@ -517,7 +522,7 @@ def detect_objects_in_zone(binary_roi, width, line_position=None):
         
         # Log detected object for debugging
         print(f"DEBUG: Valid object - Area: {area}, Width: {width_ratio:.2f}, Height: {height_ratio:.2f}, Aspect: {aspect_ratio:.2f}, Pos: {relative_pos:.2f}, Compact: {compactness:.2f}")
-            
+        
         objects.append({
             'position': relative_pos,
             'width_ratio': width_ratio,
@@ -597,12 +602,12 @@ def process_image_multi_zone(frame):
     if corner_prediction_frames <= 0:
         corner_warning = False
     
-    # Update object detection with PERSISTENT avoidance
-    global object_detection_frames, avoidance_duration
+    # Update object detection for 3-PHASE NAVIGATION
+    global object_detection_frames, avoidance_phase
     
-    if detected_objects:
+    if detected_objects and avoidance_phase == 'none':
+        # Only start new avoidance if not already in progress
         # Find the most significant object (largest and most centered)
-        # For YOLO objects, use width_ratio * height_ratio as area equivalent
         def object_significance(obj):
             if 'area' in obj:
                 # Traditional CV detection
@@ -614,35 +619,31 @@ def process_image_multi_zone(frame):
         
         main_object = max(detected_objects, key=object_significance)
         
-        # IMMEDIATE detection AND start avoidance persistence
+        # IMMEDIATE detection - trigger 3-phase avoidance
         if not object_detected:  # First time detecting this object
             robot_stats['objects_detected'] += 1
-            avoidance_duration = AVOIDANCE_MINIMUM_DURATION  # Start persistence timer
             if 'class_name' in main_object:
                 # YOLO object
-                logger.info(f"🚨 YOLO Object detected! {main_object['class_name']} (conf: {main_object['confidence']:.2f}, pos: {main_object['position']:.2f}) - STARTING {AVOIDANCE_MINIMUM_DURATION} FRAME AVOIDANCE!")
+                logger.info(f"🚨 YOLO Object detected! {main_object['class_name']} (conf: {main_object['confidence']:.2f}, pos: {main_object['position']:.2f}) - STARTING DYNAMIC NAVIGATION!")
             else:
                 # Traditional CV object
-                logger.info(f"🚨 Object detected! Position: {main_object['position']:.2f}, Area: {main_object.get('area', 'N/A')} - STARTING {AVOIDANCE_MINIMUM_DURATION} FRAME AVOIDANCE!")
+                logger.info(f"🚨 Object detected! Position: {main_object['position']:.2f}, Area: {main_object.get('area', 'N/A')} - STARTING DYNAMIC NAVIGATION!")
         
         object_detected = True
         object_position = main_object['position']
         object_detection_frames = 1
-        # Reset avoidance duration since we still see the object
-        avoidance_duration = max(avoidance_duration, 5)  # Keep avoiding for at least 5 more frames
-    else:
-        # No objects detected - but check if we should keep avoiding
-        if avoidance_duration > 0:
-            avoidance_duration -= 1
-            object_detected = True  # Keep avoiding even though we don't see object
-            logger.debug(f"🚨 Continuing avoidance for {avoidance_duration} more frames")
-        else:
-            # Avoidance period finished
-            if object_detected:
-                logger.info("✅ Avoidance complete - resuming line following")
-            object_detected = False
-            object_position = 0.0
-            object_detection_frames = 0
+        
+    elif avoidance_phase == 'none':
+        # No objects detected and not in avoidance
+        if object_detected:
+            logger.info("✅ No more objects detected")
+        object_detected = False
+        object_position = 0.0
+        object_detection_frames = 0
+    
+    # During avoidance phases, keep object_detected True to maintain avoidance
+    elif avoidance_phase != 'none':
+        object_detected = True  # Keep avoidance active during navigation phases
     
     # Determine primary line position
     line_x = None
@@ -764,25 +765,108 @@ class SmartAvoidanceSystem:
 smart_avoidance = SmartAvoidanceSystem()
 
 def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected_now=False, line_offset_now=0.0, detected_objects_list=None):
-    """Convert steering value to turn command with EMERGENCY avoidance"""
-    global avoidance_phase, avoidance_side, avoidance_frame_count
+    """Convert steering value to turn command with DYNAMIC OBSTACLE NAVIGATION"""
+    global avoidance_phase, avoidance_side, avoidance_frame_count, avoidance_duration
     
-    # EMERGENCY OBSTACLE AVOIDANCE - Maximum aggressive
-    if avoid_objects and detected_objects_list:
-        main_object = detected_objects_list[0]  # Use the first/main detected object
-        object_pos = main_object['position']
+    # DYNAMIC OBSTACLE NAVIGATION SYSTEM
+    if avoid_objects and (detected_objects_list or avoidance_phase != 'none'):
         
-        logger.info(f"🚨 EMERGENCY AVOIDANCE ACTIVE! Object at position: {object_pos:.2f}")
+        # START NEW AVOIDANCE SEQUENCE
+        if avoidance_phase == 'none' and detected_objects_list:
+            main_object = detected_objects_list[0]
+            object_pos = main_object['position']
+            
+            # Determine avoidance direction
+            if object_pos < 0:  # Object on left side
+                avoidance_side = 'right'  # Turn right to avoid
+                logger.info(f"🚨 STARTING DYNAMIC AVOIDANCE: Object LEFT at {object_pos:.2f} - Turning RIGHT until clear")
+            else:  # Object on right side or center  
+                avoidance_side = 'left'   # Turn left to avoid
+                logger.info(f"🚨 STARTING DYNAMIC AVOIDANCE: Object RIGHT at {object_pos:.2f} - Turning LEFT until clear")
+            
+            # Start Phase 1: Turn until object not visible
+            avoidance_phase = 'turning'
+            avoidance_frame_count = 0
+            avoidance_duration = 0  # Will increment until object clears
+            logger.info(f"🚨 PHASE 1: TURNING {avoidance_side.upper()} until object not visible")
         
-        # Emergency decision: go opposite direction from object with maximum force
-        if object_pos < 0:  # Object on left side
-            logger.info("🚨 EMERGENCY: Avoiding LEFT - EMERGENCY RIGHT TURN")
-            return COMMANDS['AVOID_RIGHT']
-        else:  # Object on right side or center
-            logger.info("🚨 EMERGENCY: Avoiding RIGHT - EMERGENCY LEFT TURN") 
-            return COMMANDS['AVOID_LEFT']
+        # EXECUTE CURRENT AVOIDANCE PHASE
+        avoidance_frame_count += 1
+        
+        if avoidance_phase == 'turning':
+            # PHASE 1: Turn until object is no longer visible
+            if detected_objects_list:
+                # Object still visible - keep turning
+                avoidance_duration += 1
+                if avoidance_duration > MAX_TURN_DURATION:
+                    # Safety limit - switch to clearing even if object visible
+                    logger.info(f"🚨 PHASE 1: Max turn duration reached - switching to clearing")
+                    avoidance_phase = 'clearing'
+                    avoidance_duration = AVOIDANCE_CLEAR_DURATION
+                    avoidance_frame_count = 0
+                    return COMMANDS['FORWARD']
+                else:
+                    # Continue turning
+                    logger.info(f"🚨 PHASE 1: Object still visible - turning {avoidance_side} (frame {avoidance_duration})")
+                    return COMMANDS['AVOID_RIGHT'] if avoidance_side == 'right' else COMMANDS['AVOID_LEFT']
+            else:
+                # Object no longer visible! Switch to clearing
+                logger.info(f"🚨 PHASE 1: Object cleared from view after {avoidance_duration} frames - switching to PHASE 2")
+                avoidance_phase = 'clearing'
+                avoidance_duration = AVOIDANCE_CLEAR_DURATION
+                avoidance_frame_count = 0
+                return COMMANDS['FORWARD']
+        
+        elif avoidance_phase == 'clearing':
+            # PHASE 2: Move forward to clear object area
+            avoidance_duration -= 1
+            if line_detected_now and abs(line_offset_now) < 0.3:
+                # Line found during clearing! Switch to Phase 3 early
+                avoidance_phase = 'returning'
+                avoidance_duration = AVOIDANCE_RETURN_DURATION // 2  # Shorter return since line found
+                avoidance_frame_count = 0
+                logger.info(f"🚨 PHASE 2: LINE FOUND during clearing! Early switch to PHASE 3")
+                return COMMANDS['FORWARD']
+            elif avoidance_duration <= 0:
+                # Switch to Phase 3: Return to line
+                avoidance_phase = 'returning'
+                avoidance_duration = AVOIDANCE_RETURN_DURATION
+                avoidance_frame_count = 0
+                logger.info(f"🚨 PHASE 3: RETURNING to line - Turning {opposite_direction(avoidance_side)} to find line")
+                return COMMANDS['AVOID_LEFT'] if avoidance_side == 'right' else COMMANDS['AVOID_RIGHT']
+            else:
+                # Continue clearing
+                logger.info(f"🚨 PHASE 2: Clearing object area - {avoidance_duration} frames left")
+                return COMMANDS['FORWARD']
+        
+        elif avoidance_phase == 'returning':
+            # PHASE 3: Turn back toward line
+            avoidance_duration -= 1
+            if line_detected_now and abs(line_offset_now) < 0.2:
+                # Line found! Complete avoidance
+                logger.info(f"🚨 PHASE 3: LINE ACQUIRED! Avoidance complete - resuming line following")
+                avoidance_phase = 'none'
+                avoidance_side = 'none'
+                avoidance_frame_count = 0
+                avoidance_duration = 0
+                # Return to normal line following
+                if abs(steering) < STEERING_DEADZONE:
+                    return COMMANDS['FORWARD']
+                return COMMANDS['RIGHT'] if steering < 0 else COMMANDS['LEFT']
+            elif avoidance_duration <= 0:
+                # Return phase complete - end avoidance
+                logger.info(f"🚨 PHASE 3: Return complete - resuming forward search for line")
+                avoidance_phase = 'none'
+                avoidance_side = 'none'
+                avoidance_frame_count = 0
+                avoidance_duration = 0
+                return COMMANDS['FORWARD']  # Move forward to search
+            else:
+                # Continue returning toward line
+                logger.info(f"🚨 PHASE 3: Returning {opposite_direction(avoidance_side)} - {avoidance_duration} frames left")
+                return COMMANDS['AVOID_LEFT'] if avoidance_side == 'right' else COMMANDS['AVOID_RIGHT']
     
-    # Normal line following behavior
+    # NORMAL LINE FOLLOWING BEHAVIOR
     if abs(steering) < STEERING_DEADZONE:
         return COMMANDS['FORWARD']
     
@@ -790,6 +874,10 @@ def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected
         return COMMANDS['RIGHT'] if steering < 0 else COMMANDS['LEFT']
     
     return COMMANDS['RIGHT'] if steering < 0 else COMMANDS['LEFT']
+
+def opposite_direction(direction):
+    """Helper function to get opposite direction"""
+    return 'left' if direction == 'right' else 'right'
 
 # -----------------------------------------------------------------------------
 # --- Enhanced Visualization ---
@@ -1813,13 +1901,19 @@ def main():
                             robot_status = f"AVOIDANCE: Line found! Steering back (offset: {line_offset:.2f})"
                         else:
                             robot_status = f" AVOIDANCE: Blind return, searching for line"
-                    elif object_detected:
-                        if avoidance_duration > 0:
-                            robot_status = f"🚨 AVOIDING OBJECT - {avoidance_duration} frames remaining"
+                    elif object_detected and avoidance_phase != 'none':
+                        if avoidance_phase == 'turning':
+                            robot_status = f"🚨 PHASE 1: TURNING {avoidance_side.upper()} until object clear (frame {avoidance_duration})"
+                        elif avoidance_phase == 'clearing':
+                            robot_status = f"🚨 PHASE 2: CLEARING object area - {avoidance_duration} frames left"
+                        elif avoidance_phase == 'returning':
+                            robot_status = f"🚨 PHASE 3: RETURNING to line - {avoidance_duration} frames left"
                         else:
-                            robot_status = f"⚠️ Object detected - Preparing avoidance"
+                            robot_status = f"🚨 DYNAMIC AVOIDANCE - Phase: {avoidance_phase}"
+                    elif object_detected:
+                        robot_status = f"⚠️ Object detected - Starting avoidance"
                     elif detected_objects:
-                        robot_status = f"👀 Object candidate detected (building confidence)"
+                        robot_status = f"👀 Object candidate detected"
                     else:
                         robot_status = f"✅ Following line (C:{confidence:.2f})"
                 
@@ -1845,10 +1939,13 @@ def main():
                 else:
                     avg_steering = steering_value
                 
-                # Convert steering to command with PERSISTENT object avoidance
+                # Convert steering to command with DYNAMIC NAVIGATION
                 should_avoid = OBJECT_DETECTION_ENABLED and object_detected
-                if should_avoid:
-                    logger.info(f"🚨 PERSISTENT AVOIDANCE! Duration: {avoidance_duration} frames, Position: {object_position:.2f}")
+                if should_avoid and avoidance_phase != 'none':
+                    if avoidance_phase == 'turning':
+                        logger.info(f"🚨 DYNAMIC NAVIGATION! Phase: {avoidance_phase.upper()} - frame {avoidance_duration}")
+                    else:
+                        logger.info(f"🚨 DYNAMIC NAVIGATION! Phase: {avoidance_phase.upper()} - {avoidance_duration} frames left")
                 
                 turn_command = get_turn_command_with_avoidance(avg_steering, 
                                                              avoid_objects=should_avoid,
