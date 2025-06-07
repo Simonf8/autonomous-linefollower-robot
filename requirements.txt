@@ -1,0 +1,37 @@
+# Core Dependencies for Autonomous Line Follower Robot
+# ===================================================
+
+# Computer Vision & Image Processing
+opencv-python>=4.5.0
+numpy>=1.21.0
+
+# Web Framework & Dashboard
+Flask>=2.0.0
+Jinja2>=3.0.0
+
+# AI & Machine Learning  
+ultralytics>=8.0.0
+torch>=1.11.0
+torchvision>=0.12.0
+
+# Data Processing & Analysis
+scipy>=1.7.0
+matplotlib>=3.5.0
+
+# System & Hardware Communication
+pyserial>=3.5
+requests>=2.25.0
+
+# Performance & Optimization
+Pillow>=8.3.0
+psutil>=5.8.0
+
+# Development & Debugging (Optional)
+pytest>=6.2.0
+black>=21.0.0
+flake8>=3.9.0
+
+# Platform Specific (Raspberry Pi)
+# Uncomment if running on Raspberry Pi
+# RPi.GPIO>=0.7.0
+# picamera>=1.13 

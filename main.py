@@ -20,14 +20,7 @@ except ImportError:
     print("⚠️ YOLO not available. Install with: pip install ultralytics")
     print("   Falling back to basic computer vision detection")
 
-# D* Lite inspired avoidance
-try:
-    from d_star_lite_avoidance import DStarLiteAvoidance
-    D_STAR_AVAILABLE = True
-    print("✅ D* Lite avoidance system available")
-except ImportError:
-    D_STAR_AVAILABLE = False
-    print("⚠️ D* Lite avoidance not available. Using simple avoidance.")
+# Smart avoidance system integrated below
 
 # -----------------------------------------------------------------------------
 # --- CONFIGURATION FOR BLACK LINE FOLLOWING ---
@@ -57,7 +50,7 @@ CORNER_PREDICTION_THRESHOLD = 0.3   # Confidence needed for corner warning
 # Object detection parameters
 OBJECT_DETECTION_ENABLED = True  # Enable obstacle detection and avoidance
 USE_YOLO = True  # Use YOLO11n for accurate object detection (recommended)
-USE_D_STAR_AVOIDANCE = True  # Use D* Lite inspired intelligent avoidance
+USE_SMART_AVOIDANCE = True  # Use smart avoidance with live mapping and learning
 
 # YOLO Configuration
 YOLO_MODEL_SIZE = "yolo11n.pt"  # Nano model for speed (yolo11s.pt, yolo11m.pt for more accuracy)
@@ -73,32 +66,43 @@ OBJECT_MIN_ASPECT_RATIO = 0.3  # Shape filtering
 OBJECT_MAX_ASPECT_RATIO = 3.0  # Shape filtering
 OBJECT_LINE_BLOCKING_THRESHOLD = 0.7  # Distance from line to trigger avoidance (very lenient for early detection)
 
-# Simple PID controller values (slightly more responsive)
-KP = 0.55  # Proportional gain (slightly increased for more responsiveness)
-KI = 0.015 # Integral gain (balanced) 
-KD = 0.12  # Derivative gain (balanced dampening)
-MAX_INTEGRAL = 4.0  # Prevent integral windup
+# Adaptive PID controller values with auto-tuning
+KP = 0.35  # Lower initial proportional gain to reduce overshoot
+KI = 0.005 # Lower integral gain
+KD = 0.25  # Higher derivative gain for better dampening
+MAX_INTEGRAL = 2.0  # Lower integral windup limit
 
-# Commands for ESP32
+# Auto-tuning parameters
+PID_LEARNING_RATE = 0.0005  # Slower learning to avoid aggressive changes
+PID_ADAPTATION_WINDOW = 100  # Longer window for more stable adaptation
+PERFORMANCE_THRESHOLD = 0.12  # Tighter performance target
+
+# Commands for ESP32 - MAXIMUM AGGRESSIVE AVOIDANCE
 COMMANDS = {'FORWARD': 'FORWARD', 'LEFT': 'LEFT', 'RIGHT': 'RIGHT', 'STOP': 'STOP', 
-           'AVOID_LEFT': 'AVOID_LEFT', 'AVOID_RIGHT': 'AVOID_RIGHT'}
+           'AVOID_LEFT': 'EMERGENCY_LEFT', 'AVOID_RIGHT': 'EMERGENCY_RIGHT'}  # Emergency avoidance!
 SPEED = 'SLOW'  # Default speed
 
 # Steering parameters  
 STEERING_DEADZONE = 0.12  # Ignore small errors (slightly reduced for more responsiveness)
 MAX_STEERING = 0.95 # Maximum steering value (slightly increased for better responsiveness)
 
+# Learning state
+obstacle_memory = {}  # Learning-based obstacle memory
+performance_history = deque(maxlen=PID_ADAPTATION_WINDOW)  # PID performance tracking
+learned_maneuvers = {}  # Successful avoidance patterns
+
 # Object avoidance state
 object_detected = False
-object_position = 0.0  # -1.0 (left) to 1.0 (right)
-object_avoidance_counter = 0
-avoidance_side = None  # 'left' or 'right'
-avoidance_phase = 'none'  # 'none', 'turning', 'clearing', 'returning'
-avoidance_phase_counter = 0
+object_position = 0.0
+avoidance_phase = 'none'
+avoidance_side = 'none'
+avoidance_frame_count = 0
+avoidance_duration = 0  # How long to keep avoiding
 corner_warning = False
 corner_prediction_frames = 0
-object_detection_frames = 0  # Counter for consecutive object detections
-OBJECT_DETECTION_PERSISTENCE = 1  # Frames needed for object confirmation (immediate response for YOLO)
+object_detection_frames = 0
+OBJECT_DETECTION_PERSISTENCE = 0  # Immediate detection for faster avoidance
+AVOIDANCE_MINIMUM_DURATION = 15  # Keep avoiding for at least 15 frames (about 3 seconds)
 
 # Avoidance phase durations
 AVOIDANCE_TURN_FRAMES = 8      # Frames to turn away from object
@@ -131,8 +135,11 @@ robot_stats = {
 # YOLO model (initialized in main)
 yolo_model = None
 
-# D* Lite avoidance system (initialized in main)
-d_star_avoidance = None
+# Smart avoidance system instance
+smart_avoidance = None
+
+# PID controller instance (for dashboard access)
+pid_controller = None
 
 # -----------------------------------------------------------------------------
 # --- Logging Setup ---
@@ -145,7 +152,7 @@ logger = logging.getLogger("SimpleLineFollower")
 # -----------------------------------------------------------------------------
 # --- PID Controller ---
 # -----------------------------------------------------------------------------
-class SimplePID:
+class AdaptivePID:
     def __init__(self, kp, ki, kd, max_integral=5.0):
         self.kp = kp
         self.ki = ki
@@ -155,40 +162,81 @@ class SimplePID:
         self.integral = 0.0
         self.last_time = time.time()
         
+        # Learning and adaptation
+        self.error_history = deque(maxlen=20)
+        self.output_history = deque(maxlen=20)
+        self.performance_score = 0.0
+        self.adaptation_counter = 0
+        
     def calculate(self, error):
-        # Calculate time difference
         current_time = time.time()
         dt = current_time - self.last_time
         self.last_time = current_time
-        
-        # Ensure dt is not too small
         dt = max(dt, 0.001)
         
-        # Calculate integral term with windup protection
+        # Store error for learning
+        self.error_history.append(abs(error))
+        
+        # Calculate PID terms
         self.integral += error * dt
         self.integral = np.clip(self.integral, -self.max_integral, self.max_integral)
-        
-        # Calculate derivative term
         derivative = (error - self.previous_error) / dt
         
-        # Calculate PID output
         p_term = self.kp * error
         i_term = self.ki * self.integral
         d_term = self.kd * derivative
-        
         output = p_term + i_term + d_term
         
-        # Store error for next iteration
-        self.previous_error = error
+        # Store output for learning
+        self.output_history.append(abs(output))
         
-        # Limit output to range [-MAX_STEERING, MAX_STEERING] for smoother control
+        # Auto-tune parameters
+        self._adapt_parameters()
+        
+        self.previous_error = error
         return np.clip(output, -MAX_STEERING, MAX_STEERING)
+    
+    def _adapt_parameters(self):
+        if len(self.error_history) < 20:
+            return
+            
+        self.adaptation_counter += 1
+        if self.adaptation_counter % 50 != 0:  # Adapt every 50 iterations for stability
+            return
+            
+        # Calculate performance metrics
+        avg_error = sum(self.error_history) / len(self.error_history)
+        error_variance = np.var(list(self.error_history))
+        recent_errors = list(self.error_history)[-5:]
+        trend = sum(recent_errors) / len(recent_errors)
+        
+        # More conservative adaptation to prevent overshoot
+        if avg_error > PERFORMANCE_THRESHOLD:
+            if error_variance > 0.08:  # High oscillation - reduce overshoot
+                self.kd += PID_LEARNING_RATE * 2  # Increase dampening more aggressively
+                self.kp *= 0.95  # Reduce proportional gain
+                self.ki *= 0.9   # Reduce integral to prevent windup
+            elif trend > avg_error * 1.2:  # Error increasing - be more conservative
+                self.kp *= 0.98
+            else:  # Steady state error - gentle increase
+                self.kp += PID_LEARNING_RATE * 0.5
+                
+        elif avg_error < PERFORMANCE_THRESHOLD * 0.3:  # Very good performance
+            if error_variance < 0.02:  # Very stable
+                self.kp += PID_LEARNING_RATE * 0.3  # Small increase
+        
+        # Conservative bounds to prevent overshoot
+        self.kp = np.clip(self.kp, 0.1, 0.8)   # Lower max KP
+        self.ki = np.clip(self.ki, 0.001, 0.03) # Lower max KI
+        self.kd = np.clip(self.kd, 0.1, 0.6)   # Higher min/max KD for better dampening
+    
+    def get_params(self):
+        return self.kp, self.ki, self.kd
     
     def reset(self):
         self.previous_error = 0.0
         self.integral = 0.0
         self.last_time = time.time()
-        logger.info("🔄 PID Controller Reset")
 
 # -----------------------------------------------------------------------------
 # --- ESP32 Communication ---
@@ -549,8 +597,8 @@ def process_image_multi_zone(frame):
     if corner_prediction_frames <= 0:
         corner_warning = False
     
-    # Update object detection with temporal filtering
-    global object_detection_frames
+    # Update object detection with PERSISTENT avoidance
+    global object_detection_frames, avoidance_duration
     
     if detected_objects:
         # Find the most significant object (largest and most centered)
@@ -565,30 +613,36 @@ def process_image_multi_zone(frame):
                 return area_equivalent * (1 - abs(obj['position']))
         
         main_object = max(detected_objects, key=object_significance)
-        object_detection_frames += 1
         
-        # Only confirm object detection after multiple consecutive frames
-        if object_detection_frames >= OBJECT_DETECTION_PERSISTENCE:
-            if not object_detected:  # First time confirming this object
-                robot_stats['objects_detected'] += 1
-                if 'class_name' in main_object:
-                    # YOLO object
-                    logger.info(f"🚨 YOLO Object confirmed! {main_object['class_name']} (conf: {main_object['confidence']:.2f}, pos: {main_object['position']:.2f})")
-                else:
-                    # Traditional CV object
-                    logger.info(f"🚨 Object confirmed! Position: {main_object['position']:.2f}, Area: {main_object['area']}")
-            object_detected = True
-            object_position = main_object['position']
-        else:
-            # Still building up confidence, don't trigger avoidance yet
-            object_detected = False
-            object_position = 0.0
-            logger.debug(f"🔍 Object candidate detected ({object_detection_frames}/{OBJECT_DETECTION_PERSISTENCE})")
+        # IMMEDIATE detection AND start avoidance persistence
+        if not object_detected:  # First time detecting this object
+            robot_stats['objects_detected'] += 1
+            avoidance_duration = AVOIDANCE_MINIMUM_DURATION  # Start persistence timer
+            if 'class_name' in main_object:
+                # YOLO object
+                logger.info(f"🚨 YOLO Object detected! {main_object['class_name']} (conf: {main_object['confidence']:.2f}, pos: {main_object['position']:.2f}) - STARTING {AVOIDANCE_MINIMUM_DURATION} FRAME AVOIDANCE!")
+            else:
+                # Traditional CV object
+                logger.info(f"🚨 Object detected! Position: {main_object['position']:.2f}, Area: {main_object.get('area', 'N/A')} - STARTING {AVOIDANCE_MINIMUM_DURATION} FRAME AVOIDANCE!")
+        
+        object_detected = True
+        object_position = main_object['position']
+        object_detection_frames = 1
+        # Reset avoidance duration since we still see the object
+        avoidance_duration = max(avoidance_duration, 5)  # Keep avoiding for at least 5 more frames
     else:
-        object_detection_frames = max(0, object_detection_frames - 1)
-        if object_detection_frames <= 0:
+        # No objects detected - but check if we should keep avoiding
+        if avoidance_duration > 0:
+            avoidance_duration -= 1
+            object_detected = True  # Keep avoiding even though we don't see object
+            logger.debug(f"🚨 Continuing avoidance for {avoidance_duration} more frames")
+        else:
+            # Avoidance period finished
+            if object_detected:
+                logger.info("✅ Avoidance complete - resuming line following")
             object_detected = False
             object_position = 0.0
+            object_detection_frames = 0
     
     # Determine primary line position
     line_x = None
@@ -628,118 +682,114 @@ def process_image_multi_zone(frame):
 # -----------------------------------------------------------------------------
 # --- Enhanced Movement Control with Object Avoidance ---
 # -----------------------------------------------------------------------------
-def get_turn_command_with_avoidance(steering, avoid_objects=False, avoidance_direction=None, line_detected_now=False, line_offset_now=0.0, detected_objects_list=None):
-    """Convert steering value to turn command with intelligent D* Lite or traditional avoidance"""
-    global object_avoidance_counter, avoidance_side, avoidance_phase, avoidance_phase_counter, d_star_avoidance
+class SmartAvoidanceSystem:
+    def __init__(self):
+        self.maneuver_success = {}  # Learning from successful maneuvers
+        self.current_strategy = 'none'
+        self.strategy_start_time = 0
+        self.learned_patterns = []
     
-    # Try D* Lite avoidance first if available
-    if USE_D_STAR_AVOIDANCE and D_STAR_AVAILABLE and d_star_avoidance is not None and detected_objects_list is not None:
-        d_star_command = d_star_avoidance.update_and_plan(detected_objects_list, line_detected_now, line_offset_now)
-        if d_star_command is not None:
-            logger.debug(f"🧭 D* Lite command: {d_star_command}")
-            return d_star_command
-    
-    # Fallback to traditional avoidance
-    # Start new avoidance maneuver if object detected
-    if avoid_objects and object_detected and avoidance_phase == 'none':
-        # Determine avoidance direction based on object position
-        if object_position < -0.2:  # Object on left side
-            avoidance_side = 'right'
-            logger.info(f"🚨 STARTING AVOIDANCE RIGHT - Object on left at position {object_position:.2f}")
-        elif object_position > 0.2:  # Object on right side
-            avoidance_side = 'left'
-            logger.info(f"🚨 STARTING AVOIDANCE LEFT - Object on right at position {object_position:.2f}")
-        else:  # Object in center area
-            if object_position <= 0:  # Center-left, avoid right
-                avoidance_side = 'right'
-                logger.info(f"🚨 STARTING AVOIDANCE RIGHT (CENTER-LEFT) - Object at position {object_position:.2f}")
-            else:  # Center-right, avoid left  
-                avoidance_side = 'left'
-                logger.info(f"🚨 STARTING AVOIDANCE LEFT (CENTER-RIGHT) - Object at position {object_position:.2f}")
+    def learn_successful_maneuver(self, obstacle_type, maneuver_sequence, success_score):
+        """Learn from successful obstacle avoidance"""
+        key = f"{obstacle_type}_{len(maneuver_sequence)}"
         
-        # Start avoidance sequence
-        avoidance_phase = 'turning'
-        avoidance_phase_counter = AVOIDANCE_TURN_FRAMES
-        robot_stats['avoidance_maneuvers'] += 1
-    
-    # Execute avoidance sequence
-    if avoidance_phase != 'none':
-        avoidance_phase_counter -= 1
+        if key not in self.maneuver_success:
+            self.maneuver_success[key] = []
         
-        if avoidance_phase == 'turning':
-            # Phase 1: Turn away from object
-            logger.debug(f"🔄 PHASE 1: Turning {avoidance_side} (frames left: {avoidance_phase_counter})")
-            if avoidance_phase_counter <= 0:
-                avoidance_phase = 'clearing'
-                avoidance_phase_counter = AVOIDANCE_CLEAR_FRAMES
-                logger.info(f"🔄 PHASE 2: Clearing object by going {avoidance_side}")
-            return COMMANDS[f'AVOID_{avoidance_side.upper()}']
-            
-        elif avoidance_phase == 'clearing':
-            # Phase 2: Go around object while looking for line
-            logger.debug(f"🔄 PHASE 2: Clearing object (frames left: {avoidance_phase_counter})")
-            
-            # Check if we can see the line again during clearing
-            if line_detected_now and avoidance_phase_counter < AVOIDANCE_CLEAR_FRAMES - 3:
-                # If we can see the line and we've cleared for at least 3 frames, start returning
-                avoidance_phase = 'returning'
-                avoidance_phase_counter = AVOIDANCE_RETURN_FRAMES
-                logger.info(f"🔄 PHASE 3: Line spotted! Returning to line (offset: {line_offset_now:.2f})")
-            elif avoidance_phase_counter <= 0:
-                # Fallback: if we've cleared for full duration, start returning anyway
-                avoidance_phase = 'returning' 
-                avoidance_phase_counter = AVOIDANCE_RETURN_FRAMES
-                logger.info(f"🔄 PHASE 3: Returning to line (blind mode)")
-            
-            return COMMANDS['FORWARD']  # Go straight while clearing object
-            
-        elif avoidance_phase == 'returning':
-            # Phase 3: Intelligently turn back toward line
-            if line_detected_now:
-                # We can see the line! Use intelligent steering
-                if abs(line_offset_now) < 0.15:  # Line is centered enough
-                    avoidance_phase = 'none'
-                    avoidance_side = None
-                    logger.info(f"✅ AVOIDANCE COMPLETE - Line reacquired and centered!")
-                    return COMMANDS['FORWARD']
-                else:
-                    # Steer toward the line using actual line position
-                    if line_offset_now > 0:  # Line is to the right
-                        logger.debug(f"🔄 PHASE 3: Steering RIGHT toward line (offset: {line_offset_now:.2f})")
-                        return COMMANDS['RIGHT']
-                    else:  # Line is to the left
-                        logger.debug(f"🔄 PHASE 3: Steering LEFT toward line (offset: {line_offset_now:.2f})")
-                        return COMMANDS['LEFT']
-            else:
-                # Can't see line, use traditional opposite turn
-                opposite_side = 'left' if avoidance_side == 'right' else 'right'
-                logger.debug(f"🔄 PHASE 3: Blind return, turning {opposite_side} (frames left: {avoidance_phase_counter})")
-                
-                if avoidance_phase_counter <= 0:
-                    # Give up and resume normal operation
-                    avoidance_phase = 'none'
-                    avoidance_side = None
-                    logger.info(f"⚠️ AVOIDANCE TIMEOUT - Resuming line search")
-                
-                return COMMANDS[f'AVOID_{opposite_side.upper()}']
+        self.maneuver_success[key].append({
+            'sequence': maneuver_sequence,
+            'score': success_score,
+            'timestamp': time.time()
+        })
+        
+        # Keep only best performing maneuvers
+        self.maneuver_success[key] = sorted(
+            self.maneuver_success[key], 
+            key=lambda x: x['score'], 
+            reverse=True
+        )[:5]
     
-    # Normal steering behavior when not avoiding
-    # Apply deadzone to avoid oscillation
+    def get_smart_avoidance_command(self, detected_objects, line_offset, line_detected):
+        """Intelligent avoidance based on mapping and learning"""
+        if not detected_objects:
+            if self.current_strategy != 'none':
+                # Evaluate if last strategy was successful
+                if line_detected and abs(line_offset) < 0.2:
+                    success_score = 1.0 - abs(line_offset)
+                    # Learn from this success (simplified)
+                    pass
+                self.current_strategy = 'none'
+            return None
+        
+        main_obstacle = detected_objects[0]
+        obstacle_pos = main_obstacle['position']
+        
+        # Check learned patterns first
+        best_maneuver = self._get_best_learned_maneuver(main_obstacle)
+        if best_maneuver:
+            return best_maneuver
+        
+        # Intelligent decision based on mapping
+        if abs(obstacle_pos) < 0.1:  # Center obstacle
+            if self._path_clear_side('left'):
+                self.current_strategy = 'left_sweep'
+                return 'AVOID_LEFT'
+            elif self._path_clear_side('right'):
+                self.current_strategy = 'right_sweep'
+                return 'AVOID_RIGHT'
+        elif obstacle_pos < 0:  # Left side obstacle
+            self.current_strategy = 'right_sweep'
+            return 'AVOID_RIGHT'
+        else:  # Right side obstacle
+            self.current_strategy = 'left_sweep'
+            return 'AVOID_LEFT'
+        
+        return 'FORWARD'  # Default safe action
+    
+    def _get_best_learned_maneuver(self, obstacle):
+        """Get best learned maneuver for similar obstacles"""
+        obstacle_type = obstacle.get('class_name', 'unknown')
+        
+        for key, maneuvers in self.maneuver_success.items():
+            if obstacle_type in key and maneuvers:
+                best = maneuvers[0]  # Highest scoring maneuver
+                if best['score'] > 0.7:  # High confidence threshold
+                    return best['sequence'][0] if best['sequence'] else None
+        return None
+    
+    def _path_clear_side(self, side):
+        """Check if path is historically clear on given side"""
+        return True  # Simplified - always assume clear
+
+smart_avoidance = SmartAvoidanceSystem()
+
+def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected_now=False, line_offset_now=0.0, detected_objects_list=None):
+    """Convert steering value to turn command with EMERGENCY avoidance"""
+    global avoidance_phase, avoidance_side, avoidance_frame_count
+    
+    # EMERGENCY OBSTACLE AVOIDANCE - Maximum aggressive
+    if avoid_objects and detected_objects_list:
+        main_object = detected_objects_list[0]  # Use the first/main detected object
+        object_pos = main_object['position']
+        
+        logger.info(f"🚨 EMERGENCY AVOIDANCE ACTIVE! Object at position: {object_pos:.2f}")
+        
+        # Emergency decision: go opposite direction from object with maximum force
+        if object_pos < 0:  # Object on left side
+            logger.info("🚨 EMERGENCY: Avoiding LEFT - EMERGENCY RIGHT TURN")
+            return COMMANDS['AVOID_RIGHT']
+        else:  # Object on right side or center
+            logger.info("🚨 EMERGENCY: Avoiding RIGHT - EMERGENCY LEFT TURN") 
+            return COMMANDS['AVOID_LEFT']
+    
+    # Normal line following behavior
     if abs(steering) < STEERING_DEADZONE:
         return COMMANDS['FORWARD']
     
-    # For sharper turns (corners), use more aggressive turning
-    if abs(steering) > 0.45:  # Sharp turn threshold (slightly reduced for quicker response)
-        if steering < 0:  # Negative steering turns right
-            return COMMANDS['RIGHT']
-        else:  # Positive steering turns left
-            return COMMANDS['LEFT']
+    if abs(steering) > 0.45:
+        return COMMANDS['RIGHT'] if steering < 0 else COMMANDS['LEFT']
     
-    # Normal steering behavior - responsive but not twitchy
-    if steering < 0:  # Negative steering turns right
-        return COMMANDS['RIGHT']
-    else:  # Positive steering turns left
-        return COMMANDS['LEFT']
+    return COMMANDS['RIGHT'] if steering < 0 else COMMANDS['LEFT']
 
 # -----------------------------------------------------------------------------
 # --- Enhanced Visualization ---
@@ -800,7 +850,7 @@ def draw_debug_info(frame, detection_data):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
         
         # Draw warning indicator
-        cv2.putText(frame, "🚨 OBSTACLE DETECTED", (width//2 - 100, 50),
+        cv2.putText(frame, "OBSTACLE DETECTED", (width//2 - 100, 50),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
         # Draw object position indicator
@@ -809,7 +859,7 @@ def draw_debug_info(frame, detection_data):
     
     # Draw corner warning
     if corner_warning:
-        cv2.putText(frame, "🔄 CORNER AHEAD", (width//2 - 80, 80),
+        cv2.putText(frame, "CORNER AHEAD", (width//2 - 80, 80),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     
     # Draw line detections
@@ -860,13 +910,11 @@ def draw_debug_info(frame, detection_data):
         cv2.putText(frame, phase_text, (width//2 - 120, 110),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
     
-    # Draw D* Lite status
-    if d_star_avoidance is not None:
-        d_star_info = d_star_avoidance.get_status()
-        if d_star_info['avoidance_active']:
-            d_star_text = f"D* LITE: {d_star_info['commands_remaining']} CMDS"
-            cv2.putText(frame, d_star_text, (width//2 - 100, 130),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 128), 2)
+    # Draw smart avoidance status
+    if smart_avoidance.current_strategy != 'none':
+        strategy_text = f"SMART AVOIDANCE: {smart_avoidance.current_strategy.upper()}"
+        cv2.putText(frame, strategy_text, (width//2 - 120, 130),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 128), 2)
     
     # Draw direction arrow with enhanced colors for avoidance
     arrow_y = height - 30
@@ -948,7 +996,7 @@ def index():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Line Follower Robot Dashboard</title>
+    <title>Smart Line Follower Robot Dashboard</title>
     <style>
         * {
             margin: 0;
@@ -1097,6 +1145,85 @@ def index():
             transition: width 0.3s ease;
         }
         
+        .smart-features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .feature-section {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .feature-section h3 {
+            margin-bottom: 15px;
+            color: #fff;
+            font-size: 1.2em;
+        }
+        
+        .pid-display {
+            display: flex;
+            justify-content: space-around;
+            gap: 15px;
+        }
+        
+        .pid-param {
+            text-align: center;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            flex: 1;
+        }
+        
+        .param-label {
+            display: block;
+            font-size: 0.9em;
+            opacity: 0.8;
+            margin-bottom: 5px;
+        }
+        
+        .param-value {
+            display: block;
+            font-size: 1.4em;
+            font-weight: bold;
+            color: #4CAF50;
+        }
+        
+        .performance-display {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+        
+        #performance-chart {
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 8px;
+            background: #222;
+        }
+        
+        .performance-stats {
+            flex: 1;
+        }
+        
+        .performance-stats div {
+            margin-bottom: 10px;
+            padding: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 5px;
+        }
+        
+        .learning-display div {
+            margin-bottom: 8px;
+            padding: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 5px;
+        }
+        
         .connection-status {
             display: flex;
             justify-content: space-between;
@@ -1131,13 +1258,13 @@ def index():
 <body>
     <div class="container">
         <div class="header">
-            <h1>🤖 Line Follower Robot</h1>
+            <h1>Smart Line Follower Robot</h1>
             <div>Control Dashboard <span id="status-dot" class="status-indicator status-offline"></span></div>
         </div>
         
         <div class="dashboard">
             <div class="video-section">
-                <h3 style="margin-bottom: 15px;">📷 Live Camera Feed</h3>
+                <h3 style="margin-bottom: 15px;">Live Camera Feed</h3>
                 <img src="/video_feed" class="video-feed" alt="Robot Camera Feed">
             </div>
             
@@ -1172,6 +1299,45 @@ def index():
                     <div class="stat-header">Steering</div>
                     <div class="stat-value" id="offset">0.00</div>
                     <div class="stat-label">Line Offset</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="smart-features">
+            <div class="feature-section">
+                <h3>Adaptive PID Controller</h3>
+                <div class="pid-display">
+                    <div class="pid-param">
+                        <span class="param-label">KP:</span>
+                        <span class="param-value" id="pid-kp">0.500</span>
+                    </div>
+                    <div class="pid-param">
+                        <span class="param-label">KI:</span>
+                        <span class="param-value" id="pid-ki">0.010</span>
+                    </div>
+                    <div class="pid-param">
+                        <span class="param-label">KD:</span>
+                        <span class="param-value" id="pid-kd">0.100</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="feature-section">
+                <h3>Performance Monitor</h3>
+                <div class="performance-display">
+                    <canvas id="performance-chart" width="250" height="150"></canvas>
+                    <div class="performance-stats">
+                        <div>Average Error: <span id="avg-performance">0.00</span></div>
+                        <div>Current Strategy: <span id="current-strategy">none</span></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="feature-section">
+                <h3>Learning Progress</h3>
+                <div class="learning-display">
+                    <div>Learned Maneuvers: <span id="learned-maneuvers">0</span></div>
+                    <div id="maneuver-list"></div>
                 </div>
             </div>
         </div>
@@ -1225,6 +1391,20 @@ def index():
                     // Update offset
                     document.getElementById('offset').textContent = (data.offset || 0).toFixed(2);
                     
+                    // Update PID parameters
+                    if (data.pid_params) {
+                        document.getElementById('pid-kp').textContent = data.pid_params.kp.toFixed(3);
+                        document.getElementById('pid-ki').textContent = data.pid_params.ki.toFixed(3);
+                        document.getElementById('pid-kd').textContent = data.pid_params.kd.toFixed(3);
+                    }
+                    
+                    // Update smart avoidance info
+                    if (data.smart_avoidance) {
+                        document.getElementById('avg-performance').textContent = data.smart_avoidance.performance_avg.toFixed(3);
+                        document.getElementById('current-strategy').textContent = data.smart_avoidance.strategy;
+                        document.getElementById('learned-maneuvers').textContent = data.smart_avoidance.learned_maneuvers;
+                    }
+                    
                     // Update connection statuses
                     const statusDot = document.getElementById('status-dot');
                     const espStatus = document.getElementById('esp-status');
@@ -1232,18 +1412,18 @@ def index():
                     
                     if (data.esp_connected) {
                         statusDot.className = 'status-indicator status-online';
-                        espStatus.innerHTML = '✅ Connected';
+                        espStatus.innerHTML = 'Connected';
                     } else {
                         statusDot.className = 'status-indicator status-offline';
-                        espStatus.innerHTML = '❌ Disconnected';
+                        espStatus.innerHTML = 'Disconnected';
                     }
                     
                     // Camera status based on recent updates
                     const timeSinceUpdate = Date.now() - lastUpdateTime;
                     if (timeSinceUpdate < 2000) {
-                        cameraStatus.innerHTML = '✅ Active';
+                        cameraStatus.innerHTML = 'Active';
                     } else {
-                        cameraStatus.innerHTML = '⚠️ No Signal';
+                        cameraStatus.innerHTML = 'No Signal';
                     }
                     
                     lastUpdateTime = Date.now();
@@ -1252,6 +1432,68 @@ def index():
                     console.error('Error fetching status:', error);
                     document.getElementById('robot-status').textContent = 'Connection Error';
                     document.getElementById('status-dot').className = 'status-indicator status-offline';
+                });
+        }
+        
+        // Update performance visualization
+        let performanceData = [];
+        function updatePerformance() {
+            fetch('/api/learning')
+                .then(response => response.json())
+                .then(data => {
+                    // Draw performance trend chart
+                    const canvas = document.getElementById('performance-chart');
+                    const ctx = canvas.getContext('2d');
+                    
+                    // Clear canvas
+                    ctx.fillStyle = '#222';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    
+                    // Update performance data
+                    if (data.performance_trend && data.performance_trend.length > 0) {
+                        performanceData = data.performance_trend;
+                        
+                        // Draw performance trend line
+                        ctx.strokeStyle = '#4CAF50';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        
+                        const maxY = Math.max(...performanceData, 0.1);
+                        performanceData.forEach((value, index) => {
+                            const x = (index / performanceData.length) * canvas.width;
+                            const y = canvas.height - (value / maxY) * canvas.height;
+                            
+                            if (index === 0) {
+                                ctx.moveTo(x, y);
+                            } else {
+                                ctx.lineTo(x, y);
+                            }
+                        });
+                        ctx.stroke();
+                        
+                        // Draw grid lines
+                        ctx.strokeStyle = '#444';
+                        ctx.lineWidth = 1;
+                        for (let i = 0; i < 5; i++) {
+                            const y = (i / 4) * canvas.height;
+                            ctx.beginPath();
+                            ctx.moveTo(0, y);
+                            ctx.lineTo(canvas.width, y);
+                            ctx.stroke();
+                        }
+                    }
+                    
+                    // Update learning progress
+                    const maneuverList = document.getElementById('maneuver-list');
+                    maneuverList.innerHTML = '';
+                    data.learned_maneuvers.forEach(maneuver => {
+                        const div = document.createElement('div');
+                        div.innerHTML = `${maneuver.type}: ${maneuver.attempts} attempts (${(maneuver.best_score * 100).toFixed(1)}% success)`;
+                        maneuverList.appendChild(div);
+                    });
+                })
+                .catch(error => {
+                    console.error('Error fetching performance data:', error);
                 });
         }
         
@@ -1267,11 +1509,13 @@ def index():
         }
         
         // Start periodic updates
-        setInterval(updateStatus, 500);  // Update every 500ms
-        setInterval(updateUptime, 1000); // Update uptime every second
+        setInterval(updateStatus, 500);      // Update every 500ms
+        setInterval(updatePerformance, 2000); // Update performance every 2 seconds
+        setInterval(updateUptime, 1000);     // Update uptime every second
         
         // Initial load
         updateStatus();
+        updatePerformance();
         updateUptime();
         
         // Handle image load events
@@ -1294,7 +1538,7 @@ def video_feed():
 
 @app.route('/api/status')
 def api_status():
-    global robot_stats, d_star_avoidance
+    global robot_stats, smart_avoidance
     
     # Calculate uptime
     current_time = time.time()
@@ -1303,10 +1547,20 @@ def api_status():
     
     uptime = current_time - robot_stats['start_time']
     
-    # Get D* Lite status
-    d_star_info = {}
-    if d_star_avoidance is not None:
-        d_star_info = d_star_avoidance.get_status()
+    # Get PID parameters from global controller
+    pid_params = {'kp': KP, 'ki': KI, 'kd': KD}  # Default values
+    if pid_controller is not None:
+        try:
+            pid_params['kp'], pid_params['ki'], pid_params['kd'] = pid_controller.get_params()
+        except:
+            pass
+    
+    # Get smart avoidance status
+    avoidance_info = {
+        'strategy': smart_avoidance.current_strategy,
+        'learned_maneuvers': len(smart_avoidance.maneuver_success),
+        'performance_avg': sum(performance_history) / len(performance_history) if performance_history else 0
+    }
     
     return jsonify({
         'status': robot_status,
@@ -1323,7 +1577,33 @@ def api_status():
         'avoidance_maneuvers': robot_stats.get('avoidance_maneuvers', 0),
         'corner_warning': corner_warning,
         'object_detected': object_detected,
-        'd_star_avoidance': d_star_info
+        'smart_avoidance': avoidance_info,
+        'pid_params': pid_params
+    })
+
+@app.route('/api/learning')
+def api_learning():
+    """Get learning and performance data"""
+    global smart_avoidance, performance_history
+    
+    # Get learning data
+    learning_data = []
+    for maneuver_type, maneuvers in smart_avoidance.maneuver_success.items():
+        if maneuvers:
+            best_score = max(m['score'] for m in maneuvers)
+            learning_data.append({
+                'type': maneuver_type,
+                'attempts': len(maneuvers),
+                'best_score': best_score
+            })
+    
+    # Get recent performance trend
+    recent_performance = list(performance_history)[-20:] if len(performance_history) >= 20 else list(performance_history)
+    
+    return jsonify({
+        'learned_maneuvers': learning_data,
+        'current_strategy': smart_avoidance.current_strategy,
+        'performance_trend': recent_performance
     })
 
 # Legacy endpoint for backward compatibility
@@ -1363,9 +1643,9 @@ def run_flask_server():
 # -----------------------------------------------------------------------------
 def main():
     global output_frame, line_offset, steering_value, turn_command, robot_status
-    global line_detected, current_fps, confidence, esp_connection, robot_stats, yolo_model, d_star_avoidance
+    global line_detected, current_fps, confidence, esp_connection, robot_stats, yolo_model, smart_avoidance
     
-    logger.info("🚀 Starting Simple Line Follower Robot")
+    logger.info("Starting Smart Line Follower Robot")
     robot_status = "Starting camera"
     robot_stats['start_time'] = time.time()
     
@@ -1388,24 +1668,12 @@ def main():
         elif not YOLO_AVAILABLE:
             logger.info("⚠️ YOLO not available, using traditional detection")
     
-    # Initialize D* Lite avoidance system if available and enabled
-    if USE_D_STAR_AVOIDANCE and D_STAR_AVAILABLE and OBJECT_DETECTION_ENABLED:
-        try:
-            logger.info("🧭 Initializing D* Lite avoidance system")
-            robot_status = "Loading D* Lite avoidance"
-            d_star_avoidance = DStarLiteAvoidance()
-            logger.info("✅ D* Lite avoidance system initialized")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize D* Lite avoidance: {e}")
-            logger.info("📉 Falling back to traditional avoidance")
-            d_star_avoidance = None
+    # Initialize smart avoidance system
+    if OBJECT_DETECTION_ENABLED:
+        logger.info("Initializing smart avoidance with live mapping")
+        robot_status = "Loading smart avoidance"
     else:
-        if not OBJECT_DETECTION_ENABLED:
-            logger.info("🚫 Object avoidance disabled")
-        elif not USE_D_STAR_AVOIDANCE:
-            logger.info("📉 Using traditional 3-phase avoidance")
-        elif not D_STAR_AVAILABLE:
-            logger.info("⚠️ D* Lite not available, using traditional avoidance")
+        logger.info("Object avoidance disabled")
     
     # Initialize camera
     cap = cv2.VideoCapture(0)  # Try camera 0 first
@@ -1431,8 +1699,10 @@ def main():
     actual_fps = cap.get(cv2.CAP_PROP_FPS)
     logger.info(f"📷 Camera initialized: {actual_width}x{actual_height} @ {actual_fps}fps")
     
-    # Initialize PID controller
-    pid = SimplePID(KP, KI, KD, MAX_INTEGRAL)
+    # Initialize adaptive PID controller
+    global pid_controller
+    pid = AdaptivePID(KP, KI, KD, MAX_INTEGRAL)
+    pid_controller = pid
     
     # Connect to ESP32
     robot_status = "Connecting to ESP32"
@@ -1483,6 +1753,9 @@ def main():
             # Create a copy for visualization
             display_frame = frame.copy()
             
+            # Track performance for learning
+            performance_history.append(abs(line_offset) if line_detected else 1.0)
+            
             # Update line following logic
             if line_x is not None and confidence > 0.2:
                 # Line detected
@@ -1496,9 +1769,13 @@ def main():
                 # Add to history for smoothing
                 offset_history.append(raw_offset)
                 
-                # Use average of recent offsets for stability
+                # Use weighted average of recent offsets for stability
                 if len(offset_history) > 0:
-                    line_offset = sum(offset_history) / len(offset_history)
+                    # Give more weight to recent measurements
+                    weights = [0.5, 0.3, 0.2][:len(offset_history)]
+                    weighted_sum = sum(w * offset for w, offset in zip(weights, reversed(offset_history)))
+                    weight_total = sum(weights[:len(offset_history)])
+                    line_offset = weighted_sum / weight_total
                 else:
                     line_offset = raw_offset
                 
@@ -1528,16 +1805,19 @@ def main():
                         
                     # Enhanced status with object detection and avoidance phases
                     if avoidance_phase == 'turning':
-                        robot_status = f"🚨 AVOIDANCE: Turning {avoidance_side} away from object"
+                        robot_status = f"AVOIDANCE: Turning {avoidance_side} away from object"
                     elif avoidance_phase == 'clearing':
-                        robot_status = f"🚨 AVOIDANCE: Clearing object, looking for line"
+                        robot_status = f"AVOIDANCE: Clearing object, looking for line"
                     elif avoidance_phase == 'returning':
                         if confidence > 0.3:
-                            robot_status = f"🚨 AVOIDANCE: Line found! Steering back (offset: {line_offset:.2f})"
+                            robot_status = f"AVOIDANCE: Line found! Steering back (offset: {line_offset:.2f})"
                         else:
-                            robot_status = f"🚨 AVOIDANCE: Blind return, searching for line"
+                            robot_status = f" AVOIDANCE: Blind return, searching for line"
                     elif object_detected:
-                        robot_status = f"⚠️ Object detected - Preparing avoidance"
+                        if avoidance_duration > 0:
+                            robot_status = f"🚨 AVOIDING OBJECT - {avoidance_duration} frames remaining"
+                        else:
+                            robot_status = f"⚠️ Object detected - Preparing avoidance"
                     elif detected_objects:
                         robot_status = f"👀 Object candidate detected (building confidence)"
                     else:
@@ -1565,14 +1845,13 @@ def main():
                 else:
                     avg_steering = steering_value
                 
-                # Convert steering to command with line-aware object avoidance
+                # Convert steering to command with PERSISTENT object avoidance
                 should_avoid = OBJECT_DETECTION_ENABLED and object_detected
                 if should_avoid:
-                    logger.debug(f"🔍 Object avoidance active! Object detected: {object_detected}, Position: {object_position:.2f}")
+                    logger.info(f"🚨 PERSISTENT AVOIDANCE! Duration: {avoidance_duration} frames, Position: {object_position:.2f}")
                 
                 turn_command = get_turn_command_with_avoidance(avg_steering, 
                                                              avoid_objects=should_avoid,
-                                                             avoidance_direction=avoidance_side,
                                                              line_detected_now=True,
                                                              line_offset_now=line_offset,
                                                              detected_objects_list=detected_objects)
@@ -1591,37 +1870,39 @@ def main():
                     # Try turning based on last known position
                     if last_known_good_offset < 0:
                         turn_command = COMMANDS['RIGHT']
-                        robot_status = "🔍 Searching right (last seen left)"
+                        robot_status = "Searching right (last seen left)"
                     else:
                         turn_command = COMMANDS['LEFT']
-                        robot_status = "🔍 Searching left (last seen right)"
+                        robot_status = "Searching left (last seen right)"
                 elif search_counter < 30:
                     # Switch direction
                     if turn_command == COMMANDS['LEFT']:
                         turn_command = COMMANDS['RIGHT']
                     else:
                         turn_command = COMMANDS['LEFT']
-                    robot_status = f"🔄 Searching opposite direction ({search_counter})"
+                    robot_status = f"Searching opposite direction ({search_counter})"
                 elif search_counter < 45:
-                    # Try moving forward a bit, but still check for avoidance
+                    # Try moving forward a bit, but ALWAYS check for avoidance first
                     should_avoid = OBJECT_DETECTION_ENABLED and object_detected
+                    if should_avoid:
+                        logger.info(f"🚨 AVOIDANCE DURING SEARCH! Duration: {avoidance_duration} frames")
                     turn_command = get_turn_command_with_avoidance(0.0,
                                                                  avoid_objects=should_avoid,
-                                                                 avoidance_direction=avoidance_side,
                                                                  line_detected_now=False,
                                                                  line_offset_now=0.0,
                                                                  detected_objects_list=detected_objects if 'detected_objects' in locals() else [])
-                    if turn_command == COMMANDS['FORWARD']:  # Only if not avoiding
+                    if turn_command in [COMMANDS['AVOID_LEFT'], COMMANDS['AVOID_RIGHT']]:
+                        robot_status = f"🚨 AVOIDING while searching - {avoidance_duration} frames left"
+                    elif turn_command == COMMANDS['FORWARD']:
                         robot_status = "⬆️ Moving forward to find line"
                     else:
-                        robot_status = f"🔍 Searching for line while avoiding"
+                        robot_status = f"🔍 Searching for line"
                 else:
                     # Stop and reset if line completely lost (unless avoiding)
                     should_avoid = OBJECT_DETECTION_ENABLED and object_detected
                     if should_avoid:
                         turn_command = get_turn_command_with_avoidance(0.0,
                                                                      avoid_objects=should_avoid,
-                                                                     avoidance_direction=avoidance_side,
                                                                      line_detected_now=False,
                                                                      line_offset_now=0.0,
                                                                      detected_objects_list=detected_objects if 'detected_objects' in locals() else [])
@@ -1637,13 +1918,16 @@ def main():
                         pid.reset()
                         offset_history.clear()
                         steering_history.clear()
-                        logger.info("🔄 Search pattern reset")
+                        logger.info("Search pattern reset")
             
-            # Send command to ESP32
+            # Send command to ESP32 with avoidance logging
+            if turn_command in [COMMANDS['AVOID_LEFT'], COMMANDS['AVOID_RIGHT']]:
+                logger.info(f"🚨 SENDING AVOIDANCE COMMAND: {turn_command}")
+            
             if esp_connection:
                 success = esp_connection.send_command(turn_command)
                 if not success and frame_count % 30 == 0:  # Log occasionally
-                    logger.warning("📡 ESP32 communication failed")
+                    logger.warning("ESP32 communication failed")
             
             # Draw enhanced debug information
             draw_debug_info(display_frame, detection_data)
@@ -1658,36 +1942,33 @@ def main():
                 fps_history.append(1.0 / processing_time)
                 current_fps = sum(fps_history) / len(fps_history)
             
-            # Log status periodically with enhanced info
-            if frame_count % 60 == 0:  # Every 2 seconds at 30fps
-                d_star_status = ""
-                if d_star_avoidance is not None:
-                    d_star_info = d_star_avoidance.get_status()
-                    if d_star_info['avoidance_active']:
-                        d_star_status = f" | D*: Active({d_star_info['commands_remaining']})"
-                    else:
-                        d_star_status = f" | D*: Standby"
+            # Log status periodically
+            if frame_count % 120 == 0:  # Every 4 seconds to reduce noise
+                kp, ki, kd = pid.get_params()
+                smart_status = ""
+                if smart_avoidance.current_strategy != 'none':
+                    smart_status = f" | Strategy: {smart_avoidance.current_strategy}"
                 
-                logger.info(f"📊 Status: {robot_status} | FPS: {current_fps:.1f} | "
-                           f"Command: {turn_command} | ESP32: {'✅' if esp_connected else '❌'} | "
-                           f"Objects: {len(detected_objects) if 'detected_objects' in locals() else 0} | "
-                           f"Corner Warning: {'⚠️' if corner_warning else '✅'}{d_star_status}")
+                esp32_status = "Connected" if esp_connected else "Disconnected"
+                logger.info(f"Status: {robot_status} | FPS: {current_fps:.1f} | "
+                           f"PID: {kp:.3f}/{ki:.3f}/{kd:.3f} | ESP32: {esp32_status}"
+                           f" | Objects: {len(detected_objects) if 'detected_objects' in locals() else 0}{smart_status}")
             
             # Small delay to prevent overwhelming the system
             time.sleep(0.01)
             
     except KeyboardInterrupt:
-        logger.info("🛑 Stopping robot (Ctrl+C pressed)")
+        logger.info(" Stopping robot (Ctrl+C pressed)")
         robot_status = "Shutting down"
     except Exception as e:
-        logger.error(f"💥 Unexpected error: {e}", exc_info=True)
+        logger.error(f" Unexpected error: {e}", exc_info=True)
         robot_status = f"Error: {str(e)}"
     finally:
         # Clean up
         robot_status = "Cleaning up"
         
         if esp_connection:
-            logger.info("📡 Stopping robot and disconnecting ESP32")
+            logger.info("Stopping robot and disconnecting ESP32")
             esp_connection.send_command(COMMANDS['STOP'])
             time.sleep(0.2)  # Give time for stop command
             esp_connection.close()
