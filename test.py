@@ -20,15 +20,6 @@ except ImportError:
     print("⚠️ YOLO not available. Install with: pip install ultralytics")
     print("   Falling back to basic computer vision detection")
 
-# D* Lite inspired avoidance
-try:
-    from d_star_lite_avoidance import DStarLiteAvoidance
-    D_STAR_AVAILABLE = True
-    print("✅ D* Lite avoidance system available")
-except ImportError:
-    D_STAR_AVAILABLE = False
-    print("⚠️ D* Lite avoidance not available. Using simple avoidance.")
-
 # -----------------------------------------------------------------------------
 # --- CONFIGURATION FOR BLACK LINE FOLLOWING ---
 # -----------------------------------------------------------------------------
@@ -57,7 +48,6 @@ CORNER_PREDICTION_THRESHOLD = 0.3   # Confidence needed for corner warning
 # Object detection parameters
 OBJECT_DETECTION_ENABLED = True  # Enable obstacle detection and avoidance
 USE_YOLO = True  # Use YOLO11n for accurate object detection (recommended)
-USE_D_STAR_AVOIDANCE = True  # Use D* Lite inspired intelligent avoidance
 
 # YOLO Configuration
 YOLO_MODEL_SIZE = "yolo11n.pt"  # Nano model for speed (yolo11s.pt, yolo11m.pt for more accuracy)
@@ -73,8 +63,8 @@ OBJECT_MIN_ASPECT_RATIO = 0.3  # Shape filtering
 OBJECT_MAX_ASPECT_RATIO = 3.0  # Shape filtering
 OBJECT_LINE_BLOCKING_THRESHOLD = 0.7  # Distance from line to trigger avoidance (very lenient for early detection)
 
-# Simple PID controller values (slightly more responsive)
-KP = 0.55  # Proportional gain (slightly increased for more responsiveness)
+# Simple PID controller values (balanced for smooth yet responsive following)
+KP = 0.5   # Proportional gain (balanced - responsive but not aggressive)
 KI = 0.015 # Integral gain (balanced) 
 KD = 0.12  # Derivative gain (balanced dampening)
 MAX_INTEGRAL = 4.0  # Prevent integral windup
@@ -85,8 +75,8 @@ COMMANDS = {'FORWARD': 'FORWARD', 'LEFT': 'LEFT', 'RIGHT': 'RIGHT', 'STOP': 'STO
 SPEED = 'SLOW'  # Default speed
 
 # Steering parameters  
-STEERING_DEADZONE = 0.12  # Ignore small errors (slightly reduced for more responsiveness)
-MAX_STEERING = 0.95 # Maximum steering value (slightly increased for better responsiveness)
+STEERING_DEADZONE = 0.15  # Ignore small errors (balanced - not too dead, not too sensitive)
+MAX_STEERING = 0.9  # Maximum steering value (increased for better responsiveness)
 
 # Object avoidance state
 object_detected = False
@@ -130,9 +120,6 @@ robot_stats = {
 
 # YOLO model (initialized in main)
 yolo_model = None
-
-# D* Lite avoidance system (initialized in main)
-d_star_avoidance = None
 
 # -----------------------------------------------------------------------------
 # --- Logging Setup ---
@@ -628,18 +615,10 @@ def process_image_multi_zone(frame):
 # -----------------------------------------------------------------------------
 # --- Enhanced Movement Control with Object Avoidance ---
 # -----------------------------------------------------------------------------
-def get_turn_command_with_avoidance(steering, avoid_objects=False, avoidance_direction=None, line_detected_now=False, line_offset_now=0.0, detected_objects_list=None):
-    """Convert steering value to turn command with intelligent D* Lite or traditional avoidance"""
-    global object_avoidance_counter, avoidance_side, avoidance_phase, avoidance_phase_counter, d_star_avoidance
+def get_turn_command_with_avoidance(steering, avoid_objects=False, avoidance_direction=None, line_detected_now=False, line_offset_now=0.0):
+    """Convert steering value to turn command with line-aware object avoidance"""
+    global object_avoidance_counter, avoidance_side, avoidance_phase, avoidance_phase_counter
     
-    # Try D* Lite avoidance first if available
-    if USE_D_STAR_AVOIDANCE and D_STAR_AVAILABLE and d_star_avoidance is not None and detected_objects_list is not None:
-        d_star_command = d_star_avoidance.update_and_plan(detected_objects_list, line_detected_now, line_offset_now)
-        if d_star_command is not None:
-            logger.debug(f"🧭 D* Lite command: {d_star_command}")
-            return d_star_command
-    
-    # Fallback to traditional avoidance
     # Start new avoidance maneuver if object detected
     if avoid_objects and object_detected and avoidance_phase == 'none':
         # Determine avoidance direction based on object position
@@ -729,7 +708,7 @@ def get_turn_command_with_avoidance(steering, avoid_objects=False, avoidance_dir
         return COMMANDS['FORWARD']
     
     # For sharper turns (corners), use more aggressive turning
-    if abs(steering) > 0.45:  # Sharp turn threshold (slightly reduced for quicker response)
+    if abs(steering) > 0.5:  # Sharp turn threshold
         if steering < 0:  # Negative steering turns right
             return COMMANDS['RIGHT']
         else:  # Positive steering turns left
@@ -859,14 +838,6 @@ def draw_debug_info(frame, detection_data):
         phase_text = f"AVOIDANCE: {avoidance_phase.upper()} {avoidance_side.upper()}"
         cv2.putText(frame, phase_text, (width//2 - 120, 110),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
-    
-    # Draw D* Lite status
-    if d_star_avoidance is not None:
-        d_star_info = d_star_avoidance.get_status()
-        if d_star_info['avoidance_active']:
-            d_star_text = f"D* LITE: {d_star_info['commands_remaining']} CMDS"
-            cv2.putText(frame, d_star_text, (width//2 - 100, 130),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 128), 2)
     
     # Draw direction arrow with enhanced colors for avoidance
     arrow_y = height - 30
@@ -1294,7 +1265,7 @@ def video_feed():
 
 @app.route('/api/status')
 def api_status():
-    global robot_stats, d_star_avoidance
+    global robot_stats
     
     # Calculate uptime
     current_time = time.time()
@@ -1302,11 +1273,6 @@ def api_status():
         robot_stats['start_time'] = current_time
     
     uptime = current_time - robot_stats['start_time']
-    
-    # Get D* Lite status
-    d_star_info = {}
-    if d_star_avoidance is not None:
-        d_star_info = d_star_avoidance.get_status()
     
     return jsonify({
         'status': robot_status,
@@ -1322,8 +1288,7 @@ def api_status():
         'objects_detected': robot_stats.get('objects_detected', 0),
         'avoidance_maneuvers': robot_stats.get('avoidance_maneuvers', 0),
         'corner_warning': corner_warning,
-        'object_detected': object_detected,
-        'd_star_avoidance': d_star_info
+        'object_detected': object_detected
     })
 
 # Legacy endpoint for backward compatibility
@@ -1363,7 +1328,7 @@ def run_flask_server():
 # -----------------------------------------------------------------------------
 def main():
     global output_frame, line_offset, steering_value, turn_command, robot_status
-    global line_detected, current_fps, confidence, esp_connection, robot_stats, yolo_model, d_star_avoidance
+    global line_detected, current_fps, confidence, esp_connection, robot_stats, yolo_model
     
     logger.info("🚀 Starting Simple Line Follower Robot")
     robot_status = "Starting camera"
@@ -1387,25 +1352,6 @@ def main():
             logger.info("📉 Using traditional computer vision detection")
         elif not YOLO_AVAILABLE:
             logger.info("⚠️ YOLO not available, using traditional detection")
-    
-    # Initialize D* Lite avoidance system if available and enabled
-    if USE_D_STAR_AVOIDANCE and D_STAR_AVAILABLE and OBJECT_DETECTION_ENABLED:
-        try:
-            logger.info("🧭 Initializing D* Lite avoidance system")
-            robot_status = "Loading D* Lite avoidance"
-            d_star_avoidance = DStarLiteAvoidance()
-            logger.info("✅ D* Lite avoidance system initialized")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize D* Lite avoidance: {e}")
-            logger.info("📉 Falling back to traditional avoidance")
-            d_star_avoidance = None
-    else:
-        if not OBJECT_DETECTION_ENABLED:
-            logger.info("🚫 Object avoidance disabled")
-        elif not USE_D_STAR_AVOIDANCE:
-            logger.info("📉 Using traditional 3-phase avoidance")
-        elif not D_STAR_AVAILABLE:
-            logger.info("⚠️ D* Lite not available, using traditional avoidance")
     
     # Initialize camera
     cap = cv2.VideoCapture(0)  # Try camera 0 first
@@ -1548,8 +1494,8 @@ def main():
                 steering_error = -line_offset
                 raw_steering = pid.calculate(steering_error)
                 
-                # Apply light exponential smoothing for responsive control
-                alpha = 0.7  # Smoothing factor (slightly increased for more responsiveness)
+                # Apply light exponential smoothing for balanced control
+                alpha = 0.6  # Smoothing factor (increased for more responsiveness)
                 if hasattr(main, 'last_steering'):
                     steering_value = alpha * raw_steering + (1 - alpha) * main.last_steering
                 else:
@@ -1574,8 +1520,7 @@ def main():
                                                              avoid_objects=should_avoid,
                                                              avoidance_direction=avoidance_side,
                                                              line_detected_now=True,
-                                                             line_offset_now=line_offset,
-                                                             detected_objects_list=detected_objects)
+                                                             line_offset_now=line_offset)
                 
                 logger.debug(f"Line at x={line_x}, offset={line_offset:.2f}, steering={steering_value:.2f}")
                 
@@ -1609,8 +1554,7 @@ def main():
                                                                  avoid_objects=should_avoid,
                                                                  avoidance_direction=avoidance_side,
                                                                  line_detected_now=False,
-                                                                 line_offset_now=0.0,
-                                                                 detected_objects_list=detected_objects if 'detected_objects' in locals() else [])
+                                                                 line_offset_now=0.0)
                     if turn_command == COMMANDS['FORWARD']:  # Only if not avoiding
                         robot_status = "⬆️ Moving forward to find line"
                     else:
@@ -1623,8 +1567,7 @@ def main():
                                                                      avoid_objects=should_avoid,
                                                                      avoidance_direction=avoidance_side,
                                                                      line_detected_now=False,
-                                                                     line_offset_now=0.0,
-                                                                     detected_objects_list=detected_objects if 'detected_objects' in locals() else [])
+                                                                     line_offset_now=0.0)
                         robot_status = "🔍 Line lost but still avoiding object"
                     else:
                         turn_command = COMMANDS['STOP']
@@ -1660,18 +1603,10 @@ def main():
             
             # Log status periodically with enhanced info
             if frame_count % 60 == 0:  # Every 2 seconds at 30fps
-                d_star_status = ""
-                if d_star_avoidance is not None:
-                    d_star_info = d_star_avoidance.get_status()
-                    if d_star_info['avoidance_active']:
-                        d_star_status = f" | D*: Active({d_star_info['commands_remaining']})"
-                    else:
-                        d_star_status = f" | D*: Standby"
-                
                 logger.info(f"📊 Status: {robot_status} | FPS: {current_fps:.1f} | "
                            f"Command: {turn_command} | ESP32: {'✅' if esp_connected else '❌'} | "
                            f"Objects: {len(detected_objects) if 'detected_objects' in locals() else 0} | "
-                           f"Corner Warning: {'⚠️' if corner_warning else '✅'}{d_star_status}")
+                           f"Corner Warning: {'⚠️' if corner_warning else '✅'}")
             
             # Small delay to prevent overwhelming the system
             time.sleep(0.01)
