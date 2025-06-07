@@ -14,7 +14,7 @@ from flask import Flask, Response, render_template_string, jsonify
 # --- CONFIGURATION FOR BLACK LINE FOLLOWING ---
 # -----------------------------------------------------------------------------
 # ESP32 Configuration - UPDATE THIS TO MATCH YOUR ESP32's IP
-ESP32_IP = '192.168.53.117'  # Change this to your ESP32's IP address
+ESP32_IP = '192.168.2.21'  # Change this to your ESP32's IP address
 ESP32_PORT = 1234
 CAMERA_WIDTH, CAMERA_HEIGHT = 320, 240
 CAMERA_FPS = 5
