@@ -14,11 +14,11 @@ from flask import Flask, Response, render_template_string, jsonify
 try:
     from ultralytics import YOLO
     YOLO_AVAILABLE = True
-    print("✅ YOLO11n available for object detection")
+    print("YOLO11n available for object detection")
 except ImportError:
     YOLO_AVAILABLE = False
-    print("⚠️ YOLO not available. Install with: pip install ultralytics")
-    print("   Falling back to basic computer vision detection")
+    print("YOLO not available. Install with: pip install ultralytics")
+    print("Falling back to basic computer vision detection")
 
 # Smart avoidance system integrated below
 
@@ -77,10 +77,25 @@ PID_LEARNING_RATE = 0.0005  # Slower learning to avoid aggressive changes
 PID_ADAPTATION_WINDOW = 100  # Longer window for more stable adaptation
 PERFORMANCE_THRESHOLD = 0.12  # Tighter performance target
 
-# Commands for ESP32 - MAXIMUM AGGRESSIVE AVOIDANCE
+# Commands for ESP32 - GENTLE PROGRESSIVE AVOIDANCE
 COMMANDS = {'FORWARD': 'FORWARD', 'LEFT': 'LEFT', 'RIGHT': 'RIGHT', 'STOP': 'STOP', 
-           'AVOID_LEFT': 'EMERGENCY_LEFT', 'AVOID_RIGHT': 'EMERGENCY_RIGHT'}  # Emergency avoidance!
+           'AVOID_LEFT': 'LEFT', 'AVOID_RIGHT': 'RIGHT'}  # Use gentle turns for avoidance
 SPEED = 'SLOW'  # Default speed
+
+# Enhanced obstacle mapping parameters
+OBSTACLE_MAP_SIZE = 50  # Remember last 50 obstacles
+OBSTACLE_MEMORY_TIMEOUT = 30.0  # Forget obstacles after 30 seconds
+MIN_OBSTACLE_WIDTH = 0.1  # Minimum width ratio to be significant
+MIN_OBSTACLE_HEIGHT = 0.08  # Minimum height ratio to be significant
+
+# Gentle avoidance parameters - much more conservative
+GENTLE_TURN_DURATION = 8      # Longer, gentler turns
+GENTLE_CLEAR_DURATION = 15    # More time to clear obstacle safely  
+GENTLE_RETURN_DURATION = 12   # Measured return to line
+
+# Dynamic path calculation
+SAFETY_MARGIN = 1.5           # Multiply obstacle size by this for safety
+PATH_CALCULATION_ENABLED = True
 
 # Steering parameters
 STEERING_DEADZONE = 0.12  # Ignore small errors (slightly reduced for more responsiveness)
@@ -91,13 +106,16 @@ obstacle_memory = {}  # Learning-based obstacle memory
 performance_history = deque(maxlen=PID_ADAPTATION_WINDOW)  # PID performance tracking
 learned_maneuvers = {}  # Successful avoidance patterns
 
-# Enhanced 3-phase obstacle avoidance state
+# Enhanced 3-phase obstacle avoidance state with mapping
 object_detected = False
 object_position = 0.0
-avoidance_phase = 'none'  # 'none', 'turning', 'clearing', 'returning'
-avoidance_side = 'none'   # 'left', 'right'
+current_obstacle = None       # Current obstacle being avoided
+obstacle_map = {}            # Persistent obstacle memory
+avoidance_phase = 'none'     # 'none', 'mapping', 'avoiding', 'clearing', 'returning'
+avoidance_side = 'none'      # 'left', 'right'
 avoidance_frame_count = 0
 avoidance_duration = 0
+planned_path = None          # Calculated path around obstacle
 corner_warning = False
 corner_prediction_frames = 0
 object_detection_frames = 0
@@ -619,15 +637,28 @@ def process_image_multi_zone(frame):
         
         main_object = max(detected_objects, key=object_significance)
         
-        # IMMEDIATE detection - trigger 3-phase avoidance
+        # SMART detection - check if this is a significant new obstacle
+        obstacle_id = obstacle_mapper._generate_obstacle_id(main_object)
+        
         if not object_detected:  # First time detecting this object
             robot_stats['objects_detected'] += 1
+            
+            # Add to obstacle memory for tracking
+            # Use bottom_x since line_x isn't determined yet
+            line_position_for_obstacle = bottom_x if bottom_x is not None else None
+            obstacle_mapper.add_obstacle(main_object, line_position_for_obstacle)
+            
             if 'class_name' in main_object:
-                # YOLO object
-                logger.info(f"🚨 YOLO Object detected! {main_object['class_name']} (conf: {main_object['confidence']:.2f}, pos: {main_object['position']:.2f}) - STARTING DYNAMIC NAVIGATION!")
+                # YOLO object with size info
+                logger.info(f"🗺️ SMART DETECTION: {main_object['class_name']} "
+                           f"(conf: {main_object['confidence']:.2f}, "
+                           f"size: {main_object['width_ratio']:.2f}x{main_object['height_ratio']:.2f}, "
+                           f"pos: {main_object['position']:.2f}) - Calculating optimal path!")
             else:
                 # Traditional CV object
-                logger.info(f"🚨 Object detected! Position: {main_object['position']:.2f}, Area: {main_object.get('area', 'N/A')} - STARTING DYNAMIC NAVIGATION!")
+                logger.info(f"🗺️ SMART DETECTION: Object "
+                           f"(size: {main_object.get('width_ratio', 'N/A')}x{main_object.get('height_ratio', 'N/A')}, "
+                           f"pos: {main_object['position']:.2f}, area: {main_object.get('area', 'N/A')}) - Mapping geometry!")
         
         object_detected = True
         object_position = main_object['position']
@@ -764,106 +795,309 @@ class SmartAvoidanceSystem:
 
 smart_avoidance = SmartAvoidanceSystem()
 
-def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected_now=False, line_offset_now=0.0, detected_objects_list=None):
-    """Convert steering value to turn command with DYNAMIC OBSTACLE NAVIGATION"""
-    global avoidance_phase, avoidance_side, avoidance_frame_count, avoidance_duration
+# -----------------------------------------------------------------------------
+# --- Intelligent Obstacle Mapping and Path Planning System ---
+# -----------------------------------------------------------------------------
+class ObstacleMapper:
+    def __init__(self):
+        self.obstacle_memory = {}  # Persistent obstacle memory
+        self.current_obstacles = []  # Currently detected obstacles
+        self.last_cleanup = time.time()
+        
+    def add_obstacle(self, obstacle_data, line_position=None):
+        """Add or update an obstacle in memory with geometry tracking"""
+        obstacle_id = self._generate_obstacle_id(obstacle_data)
+        current_time = time.time()
+        
+        # Calculate obstacle geometry
+        width_ratio = obstacle_data.get('width_ratio', 0)
+        height_ratio = obstacle_data.get('height_ratio', 0)
+        position = obstacle_data.get('position', 0)
+        
+        # Enhanced obstacle info with geometry
+        obstacle_info = {
+            'position': position,
+            'width_ratio': width_ratio,
+            'height_ratio': height_ratio,
+            'first_seen': current_time,
+            'last_seen': current_time,
+            'confidence': obstacle_data.get('confidence', 0.5),
+            'class_name': obstacle_data.get('class_name', 'unknown'),
+            'line_position_when_detected': line_position,
+            'avoidance_count': self.obstacle_memory.get(obstacle_id, {}).get('avoidance_count', 0),
+            'estimated_real_width': self._estimate_real_size(width_ratio, height_ratio),
+            'significance_score': self._calculate_significance(obstacle_data)
+        }
+        
+        self.obstacle_memory[obstacle_id] = obstacle_info
+        return obstacle_id
     
-    # DYNAMIC OBSTACLE NAVIGATION SYSTEM
+    def calculate_avoidance_path(self, obstacle_data, line_position=None):
+        """Calculate optimal path around obstacle based on its geometry"""
+        if not PATH_CALCULATION_ENABLED:
+            return self._simple_avoidance_decision(obstacle_data)
+        
+        width = obstacle_data.get('width_ratio', 0.2)
+        height = obstacle_data.get('height_ratio', 0.15)
+        position = obstacle_data.get('position', 0)
+        
+        # Calculate obstacle boundaries with safety margin
+        obstacle_left = position - (width * SAFETY_MARGIN) / 2
+        obstacle_right = position + (width * SAFETY_MARGIN) / 2
+        
+        # Determine best side to avoid (prefer side with more space)
+        left_space = abs(obstacle_left - (-1.0))  # Space on left side
+        right_space = abs(1.0 - obstacle_right)   # Space on right side
+        
+        # Calculate path parameters based on obstacle size
+        estimated_clear_distance = max(width * SAFETY_MARGIN, 0.3)  # Minimum safe distance
+        estimated_clear_frames = int(estimated_clear_distance * 25)  # Rough estimate
+        
+        # Choose side and calculate path
+        if left_space > right_space:
+            side = 'left'
+            turn_magnitude = min(abs(obstacle_left), 0.7)  # Limit turn strength
+        else:
+            side = 'right' 
+            turn_magnitude = min(abs(obstacle_right), 0.7)
+        
+        path_plan = {
+            'side': side,
+            'turn_magnitude': turn_magnitude,
+            'estimated_clear_frames': max(estimated_clear_frames, GENTLE_CLEAR_DURATION),
+            'obstacle_width': width,
+            'obstacle_height': height,
+            'safety_margin_used': SAFETY_MARGIN,
+            'confidence': min(obstacle_data.get('confidence', 0.5) * 1.2, 1.0)
+        }
+        
+        logger.info(f"🗺️ PATH CALCULATED: {side} side, magnitude: {turn_magnitude:.2f}, "
+                   f"clear frames: {estimated_clear_frames}, obstacle size: {width:.2f}x{height:.2f}")
+        
+        return path_plan
+    
+    def is_obstacle_cleared(self, original_obstacle, current_detections):
+        """Determine if we've successfully navigated around the obstacle"""
+        if not current_detections:
+            return True
+        
+        original_pos = original_obstacle.get('position', 0)
+        original_width = original_obstacle.get('width_ratio', 0.2)
+        
+        # Check if any current detection matches our original obstacle
+        for detection in current_detections:
+            detection_pos = detection.get('position', 0)
+            position_diff = abs(detection_pos - original_pos)
+            
+            # If we see something in similar position, obstacle not cleared
+            if position_diff < original_width:
+                return False
+        
+        return True
+    
+    def cleanup_old_obstacles(self):
+        """Remove obstacles that haven't been seen recently"""
+        current_time = time.time()
+        if current_time - self.last_cleanup < 5.0:  # Cleanup every 5 seconds
+            return
+        
+        expired_obstacles = []
+        for obstacle_id, obstacle_info in self.obstacle_memory.items():
+            if current_time - obstacle_info['last_seen'] > OBSTACLE_MEMORY_TIMEOUT:
+                expired_obstacles.append(obstacle_id)
+        
+        for obstacle_id in expired_obstacles:
+            del self.obstacle_memory[obstacle_id]
+            
+        self.last_cleanup = current_time
+        
+        if expired_obstacles:
+            logger.info(f"🧹 Cleaned up {len(expired_obstacles)} old obstacles from memory")
+    
+    def _generate_obstacle_id(self, obstacle_data):
+        """Generate a unique ID for obstacle tracking"""
+        pos = obstacle_data.get('position', 0)
+        width = obstacle_data.get('width_ratio', 0)
+        height = obstacle_data.get('height_ratio', 0)
+        
+        # Create ID based on position and size (rounded for stability)
+        return f"{round(pos, 1)}_{round(width, 2)}_{round(height, 2)}"
+    
+    def _estimate_real_size(self, width_ratio, height_ratio):
+        """Estimate real-world size category"""
+        total_size = width_ratio * height_ratio
+        
+        if total_size > 0.15:
+            return "large"
+        elif total_size > 0.08:
+            return "medium"
+        else:
+            return "small"
+    
+    def _calculate_significance(self, obstacle_data):
+        """Calculate how significant this obstacle is for avoidance"""
+        width = obstacle_data.get('width_ratio', 0)
+        height = obstacle_data.get('height_ratio', 0)
+        position = obstacle_data.get('position', 0)
+        confidence = obstacle_data.get('confidence', 0.5)
+        
+        # Size significance
+        size_score = (width * height) * 5  # Bigger = more significant
+        
+        # Position significance (center is more significant)
+        position_score = 1.0 - abs(position)  # Closer to center = more significant
+        
+        # Confidence significance
+        confidence_score = confidence
+        
+        total_significance = (size_score + position_score + confidence_score) / 3
+        return min(total_significance, 1.0)
+    
+    def _simple_avoidance_decision(self, obstacle_data):
+        """Simple left/right decision when path calculation is disabled"""
+        position = obstacle_data.get('position', 0)
+        
+        return {
+            'side': 'left' if position > 0 else 'right',
+            'turn_magnitude': 0.5,
+            'estimated_clear_frames': GENTLE_CLEAR_DURATION,
+            'confidence': 0.7
+        }
+    
+    def get_memory_stats(self):
+        """Get statistics about obstacle memory"""
+        return {
+            'total_obstacles': len(self.obstacle_memory),
+            'recent_obstacles': len([o for o in self.obstacle_memory.values() 
+                                   if time.time() - o['last_seen'] < 10]),
+            'avg_significance': sum(o.get('significance_score', 0) 
+                                  for o in self.obstacle_memory.values()) / 
+                                max(len(self.obstacle_memory), 1)
+        }
+
+# Initialize obstacle mapper
+obstacle_mapper = ObstacleMapper()
+
+def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected_now=False, line_offset_now=0.0, detected_objects_list=None):
+    """Convert steering value to turn command with INTELLIGENT OBSTACLE MAPPING"""
+    global avoidance_phase, avoidance_side, avoidance_frame_count, avoidance_duration, current_obstacle, planned_path
+    
+    # Clean up old obstacles periodically
+    obstacle_mapper.cleanup_old_obstacles()
+    
+    # INTELLIGENT OBSTACLE NAVIGATION SYSTEM
     if avoid_objects and (detected_objects_list or avoidance_phase != 'none'):
         
-        # START NEW AVOIDANCE SEQUENCE
+        # START NEW AVOIDANCE SEQUENCE WITH MAPPING
         if avoidance_phase == 'none' and detected_objects_list:
             main_object = detected_objects_list[0]
-            object_pos = main_object['position']
             
-            # Determine avoidance direction
-            if object_pos < 0:  # Object on left side
-                avoidance_side = 'right'  # Turn right to avoid
-                logger.info(f"🚨 STARTING DYNAMIC AVOIDANCE: Object LEFT at {object_pos:.2f} - Turning RIGHT until clear")
-            else:  # Object on right side or center  
-                avoidance_side = 'left'   # Turn left to avoid
-                logger.info(f"🚨 STARTING DYNAMIC AVOIDANCE: Object RIGHT at {object_pos:.2f} - Turning LEFT until clear")
+            # Add obstacle to memory and calculate optimal path
+            obstacle_id = obstacle_mapper.add_obstacle(main_object, line_offset_now)
+            planned_path = obstacle_mapper.calculate_avoidance_path(main_object, line_offset_now)
+            current_obstacle = main_object
             
-            # Start Phase 1: Turn until object not visible
-            avoidance_phase = 'turning'
+            # Use calculated path parameters
+            avoidance_side = planned_path['side']
+            avoidance_phase = 'mapping'  # Start with mapping phase
             avoidance_frame_count = 0
-            avoidance_duration = 0  # Will increment until object clears
-            logger.info(f"🚨 PHASE 1: TURNING {avoidance_side.upper()} until object not visible")
+            avoidance_duration = GENTLE_TURN_DURATION  # Use gentle parameters
+            
+            logger.info(f"🗺️ SMART AVOIDANCE STARTED: {main_object.get('class_name', 'object')} "
+                       f"({main_object['width_ratio']:.2f}x{main_object['height_ratio']:.2f}) "
+                       f"at {main_object['position']:.2f} - Path: {avoidance_side} side")
         
-        # EXECUTE CURRENT AVOIDANCE PHASE
+        # EXECUTE INTELLIGENT AVOIDANCE PHASES
         avoidance_frame_count += 1
         
-        if avoidance_phase == 'turning':
-            # PHASE 1: Turn until object is no longer visible
-            if detected_objects_list:
-                # Object still visible - keep turning
-                avoidance_duration += 1
-                if avoidance_duration > MAX_TURN_DURATION:
-                    # Safety limit - switch to clearing even if object visible
-                    logger.info(f"🚨 PHASE 1: Max turn duration reached - switching to clearing")
-                    avoidance_phase = 'clearing'
-                    avoidance_duration = AVOIDANCE_CLEAR_DURATION
-                    avoidance_frame_count = 0
-                    return COMMANDS['FORWARD']
-                else:
-                    # Continue turning
-                    logger.info(f"🚨 PHASE 1: Object still visible - turning {avoidance_side} (frame {avoidance_duration})")
-                    return COMMANDS['AVOID_RIGHT'] if avoidance_side == 'right' else COMMANDS['AVOID_LEFT']
-            else:
-                # Object no longer visible! Switch to clearing
-                logger.info(f"🚨 PHASE 1: Object cleared from view after {avoidance_duration} frames - switching to PHASE 2")
+        if avoidance_phase == 'mapping':
+            # PHASE 1: Gentle initial turn based on calculated path
+            avoidance_duration -= 1
+            if avoidance_duration <= 0:
+                avoidance_phase = 'avoiding'
+                avoidance_duration = GENTLE_TURN_DURATION
+                logger.info(f"🗺️ PHASE 2: GENTLE NAVIGATION around {planned_path['obstacle_width']:.2f}x{planned_path['obstacle_height']:.2f} obstacle")
+            
+            logger.info(f"🗺️ PHASE 1: Mapping obstacle, gentle turn {avoidance_side} ({avoidance_duration} frames left)")
+            return COMMANDS['AVOID_RIGHT'] if avoidance_side == 'right' else COMMANDS['AVOID_LEFT']
+        
+        elif avoidance_phase == 'avoiding':
+            # PHASE 2: Gentle turn until obstacle cleared from path
+            if obstacle_mapper.is_obstacle_cleared(current_obstacle, detected_objects_list):
+                # Obstacle cleared! Switch to clearing phase
                 avoidance_phase = 'clearing'
-                avoidance_duration = AVOIDANCE_CLEAR_DURATION
-                avoidance_frame_count = 0
+                avoidance_duration = planned_path.get('estimated_clear_frames', GENTLE_CLEAR_DURATION)
+                logger.info(f"🗺️ PHASE 3: Obstacle cleared, moving forward {avoidance_duration} frames")
                 return COMMANDS['FORWARD']
+            else:
+                avoidance_duration -= 1
+                if avoidance_duration <= 0:
+                    # Continue avoiding but reset duration
+                    avoidance_duration = GENTLE_TURN_DURATION // 2  # Shorter subsequent turns
+                    logger.info(f"🗺️ PHASE 2: Continue gentle navigation {avoidance_side}")
+                else:
+                    logger.info(f"🗺️ PHASE 2: Gentle turn {avoidance_side} ({avoidance_duration} frames left)")
+                
+                return COMMANDS['AVOID_RIGHT'] if avoidance_side == 'right' else COMMANDS['AVOID_LEFT']
         
         elif avoidance_phase == 'clearing':
-            # PHASE 2: Move forward to clear object area
+            # PHASE 3: Move forward calculated distance based on obstacle size
             avoidance_duration -= 1
             if line_detected_now and abs(line_offset_now) < 0.3:
-                # Line found during clearing! Switch to Phase 3 early
+                # Line found during clearing! Smart early transition
                 avoidance_phase = 'returning'
-                avoidance_duration = AVOIDANCE_RETURN_DURATION // 2  # Shorter return since line found
-                avoidance_frame_count = 0
-                logger.info(f"🚨 PHASE 2: LINE FOUND during clearing! Early switch to PHASE 3")
+                avoidance_duration = GENTLE_RETURN_DURATION // 2  # Shorter return since line found
+                logger.info(f"🗺️ PHASE 4: LINE FOUND during clearing! Smart transition to return phase")
                 return COMMANDS['FORWARD']
             elif avoidance_duration <= 0:
-                # Switch to Phase 3: Return to line
+                # Switch to Phase 4: Smart return to line
                 avoidance_phase = 'returning'
-                avoidance_duration = AVOIDANCE_RETURN_DURATION
-                avoidance_frame_count = 0
-                logger.info(f"🚨 PHASE 3: RETURNING to line - Turning {opposite_direction(avoidance_side)} to find line")
+                avoidance_duration = GENTLE_RETURN_DURATION
+                logger.info(f"🗺️ PHASE 4: SMART RETURN - Gentle turn {opposite_direction(avoidance_side)} to find line")
                 return COMMANDS['AVOID_LEFT'] if avoidance_side == 'right' else COMMANDS['AVOID_RIGHT']
             else:
-                # Continue clearing
-                logger.info(f"🚨 PHASE 2: Clearing object area - {avoidance_duration} frames left")
+                # Continue clearing calculated distance
+                logger.info(f"🗺️ PHASE 3: Clearing obstacle safely - {avoidance_duration} frames left")
                 return COMMANDS['FORWARD']
         
         elif avoidance_phase == 'returning':
-            # PHASE 3: Turn back toward line
+            # PHASE 4: Gentle turn back toward line
             avoidance_duration -= 1
             if line_detected_now and abs(line_offset_now) < 0.2:
-                # Line found! Complete avoidance
-                logger.info(f"🚨 PHASE 3: LINE ACQUIRED! Avoidance complete - resuming line following")
+                # Line found! Complete smart avoidance
+                logger.info(f"🗺️ SUCCESS: Line reacquired! Smart avoidance complete - resuming precise following")
+                
+                # Mark successful avoidance in memory
+                if current_obstacle:
+                    obstacle_id = obstacle_mapper._generate_obstacle_id(current_obstacle)
+                    if obstacle_id in obstacle_mapper.obstacle_memory:
+                        obstacle_mapper.obstacle_memory[obstacle_id]['avoidance_count'] += 1
+                
+                # Reset all avoidance state
                 avoidance_phase = 'none'
                 avoidance_side = 'none'
                 avoidance_frame_count = 0
                 avoidance_duration = 0
+                current_obstacle = None
+                planned_path = None
+                
                 # Return to normal line following
                 if abs(steering) < STEERING_DEADZONE:
                     return COMMANDS['FORWARD']
                 return COMMANDS['RIGHT'] if steering < 0 else COMMANDS['LEFT']
             elif avoidance_duration <= 0:
-                # Return phase complete - end avoidance
-                logger.info(f"🚨 PHASE 3: Return complete - resuming forward search for line")
+                # Return phase complete - end smart avoidance
+                logger.info(f"🗺️ RETURN COMPLETE: Resuming forward search with obstacle memory")
                 avoidance_phase = 'none'
                 avoidance_side = 'none'
                 avoidance_frame_count = 0
                 avoidance_duration = 0
+                current_obstacle = None
+                planned_path = None
                 return COMMANDS['FORWARD']  # Move forward to search
             else:
-                # Continue returning toward line
-                logger.info(f"🚨 PHASE 3: Returning {opposite_direction(avoidance_side)} - {avoidance_duration} frames left")
+                # Continue gentle return toward line
+                logger.info(f"🗺️ PHASE 4: Gentle return {opposite_direction(avoidance_side)} - {avoidance_duration} frames left")
                 return COMMANDS['AVOID_LEFT'] if avoidance_side == 'right' else COMMANDS['AVOID_RIGHT']
     
     # NORMAL LINE FOLLOWING BEHAVIOR
@@ -1643,11 +1877,21 @@ def api_status():
         except:
             pass
     
-    # Get smart avoidance status
+    # Get smart avoidance status and obstacle mapping stats
     avoidance_info = {
         'strategy': smart_avoidance.current_strategy,
         'learned_maneuvers': len(smart_avoidance.maneuver_success),
         'performance_avg': sum(performance_history) / len(performance_history) if performance_history else 0
+    }
+    
+    # Get obstacle mapping statistics
+    obstacle_stats = obstacle_mapper.get_memory_stats()
+    obstacle_info = {
+        'total_mapped': obstacle_stats['total_obstacles'],
+        'recent_obstacles': obstacle_stats['recent_obstacles'],
+        'avg_significance': obstacle_stats['avg_significance'],
+        'current_phase': avoidance_phase,
+        'planned_path': planned_path.get('side', 'none') if planned_path else 'none'
     }
     
     return jsonify({
@@ -1666,6 +1910,7 @@ def api_status():
         'corner_warning': corner_warning,
         'object_detected': object_detected,
         'smart_avoidance': avoidance_info,
+        'obstacle_mapping': obstacle_info,
         'pid_params': pid_params
     })
 
@@ -1891,29 +2136,22 @@ def main():
                     else:
                         corner_detected_count = 0
                         
-                    # Enhanced status with object detection and avoidance phases
-                    if avoidance_phase == 'turning':
-                        robot_status = f"AVOIDANCE: Turning {avoidance_side} away from object"
+                    # Enhanced status with intelligent obstacle mapping phases
+                    if avoidance_phase == 'mapping':
+                        robot_status = f"🗺️ MAPPING: Analyzing obstacle geometry, gentle turn {avoidance_side}"
+                    elif avoidance_phase == 'avoiding':
+                        robot_status = f"🗺️ NAVIGATING: Smart path around obstacle ({avoidance_duration} frames)"
                     elif avoidance_phase == 'clearing':
-                        robot_status = f"AVOIDANCE: Clearing object, looking for line"
+                        robot_status = f"🗺️ CLEARING: Safe distance based on obstacle size ({avoidance_duration} frames)"
                     elif avoidance_phase == 'returning':
                         if confidence > 0.3:
-                            robot_status = f"AVOIDANCE: Line found! Steering back (offset: {line_offset:.2f})"
+                            robot_status = f"🗺️ RETURNING: Line detected! Smart transition (offset: {line_offset:.2f})"
                         else:
-                            robot_status = f" AVOIDANCE: Blind return, searching for line"
-                    elif object_detected and avoidance_phase != 'none':
-                        if avoidance_phase == 'turning':
-                            robot_status = f"🚨 PHASE 1: TURNING {avoidance_side.upper()} until object clear (frame {avoidance_duration})"
-                        elif avoidance_phase == 'clearing':
-                            robot_status = f"🚨 PHASE 2: CLEARING object area - {avoidance_duration} frames left"
-                        elif avoidance_phase == 'returning':
-                            robot_status = f"🚨 PHASE 3: RETURNING to line - {avoidance_duration} frames left"
-                        else:
-                            robot_status = f"🚨 DYNAMIC AVOIDANCE - Phase: {avoidance_phase}"
+                            robot_status = f"🗺️ RETURNING: Gentle turn {opposite_direction(avoidance_side)} to find line"
                     elif object_detected:
-                        robot_status = f"⚠️ Object detected - Starting avoidance"
+                        robot_status = f"🗺️ Object mapped - Calculating smart path"
                     elif detected_objects:
-                        robot_status = f"👀 Object candidate detected"
+                        robot_status = f"👀 Obstacle candidate detected"
                     else:
                         robot_status = f"✅ Following line (C:{confidence:.2f})"
                 

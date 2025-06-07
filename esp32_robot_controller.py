@@ -6,8 +6,8 @@ from machine import Pin, PWM
 # -----------------------------------------------------------------------------
 # --- ENHANCED WIFI CONFIGURATION ---
 # -----------------------------------------------------------------------------
-WIFI_SSID = "KPNA50F96"           # Change this
-WIFI_PASSWORD = "6CxN3rW4PNtHnNsx"   # Change this
+WIFI_SSID = ""           # Change this
+WIFI_PASSWORD = ""   # Change this
 SERVER_PORT = 1234
 
 # -----------------------------------------------------------------------------
