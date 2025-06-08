@@ -12,33 +12,47 @@ import queue
 
 # Try to import text-to-speech
 try:
-    import pyttsx3
-    TTS_AVAILABLE = True
-    print("Text-to-speech available")
+    import subprocess
+    import os
+    # Check if Piper TTS is available
+    if os.path.exists('./piper/piper') and os.path.exists('./voices/en_US-lessac-medium.onnx'):
+        TTS_AVAILABLE = True
+        TTS_ENGINE = 'piper'
+        print("Piper TTS available - High quality neural speech")
+    else:
+        # Fallback to pyttsx3 if available
+        import pyttsx3
+        TTS_AVAILABLE = True
+        TTS_ENGINE = 'pyttsx3'
+        print("pyttsx3 TTS available")
 except ImportError:
     TTS_AVAILABLE = False
-    print("Text-to-speech not available. Install with: pip install pyttsx3")
+    TTS_ENGINE = None
+    print("Text-to-speech not available. Install piper or pyttsx3")
 
 # ESP32 Connection Settings
 ESP32_IP = '192.168.2.21'
 ESP32_PORT = 1234
 
 # Camera Settings
-CAMERA_WIDTH, CAMERA_HEIGHT = 640, 480
-CAMERA_FPS = 10
+CAMERA_WIDTH, CAMERA_HEIGHT = 640, 360  # Match actual camera resolution
+CAMERA_FPS = 25  # Match camera's native FPS
 
-# Line Detection Settings - Adaptive for lighting
-LINE_THRESHOLD_LOW = 40    # Lower threshold for bright conditions
+# Line Detection Settings - More robust for stable detection
+LINE_THRESHOLD_LOW = 30    # Lower threshold for bright conditions
 LINE_THRESHOLD_HIGH = 80   # Higher threshold for dark conditions
-BLUR_SIZE = 7
-MIN_LINE_AREA = 150
+BLUR_SIZE = 5              # Smaller blur for better edge detection
+MIN_LINE_AREA = 100        # Lower minimum area to catch thinner lines
 ADAPTIVE_THRESHOLD = True  # Use adaptive thresholding for better lighting handling
 
-# Object Detection Settings - Simple OpenCV based
+# Object Detection Settings - Smart detection with line exclusion
 OBJECT_THRESHOLD = 100     # Threshold for object detection
-MIN_OBJECT_AREA = 1000     # Minimum area to be considered an object
-OBJECT_MIN_WIDTH = 60      # Minimum object width in pixels
+MIN_OBJECT_AREA = 2000     # Minimum area to be considered an object (reduced due to smart filtering)
+OBJECT_MIN_WIDTH = 50      # Minimum object width in pixels 
 OBJECT_MIN_HEIGHT = 40     # Minimum object height in pixels
+OBJECT_MAX_AREA = 25000    # Maximum area to avoid detecting walls/background
+OBJECT_CONFIDENCE_FRAMES = 3  # Number of consecutive frames to confirm object (reduced due to smart filtering)
+ENABLE_OBJECT_DETECTION = True  # Enable smart object detection
 
 # Avoidance Settings - Simple 3-step process
 AVOIDANCE_TURN_FRAMES = 8      # Frames to turn away from object
@@ -65,6 +79,7 @@ STOP = 'STOP'
 
 # Global Variables
 current_frame = None
+binary_frame_global = None  # Store binary frame for video feed
 frame_lock = threading.Lock()
 robot_status = "Starting"
 line_offset = 0.0
@@ -74,6 +89,9 @@ avoidance_phase = 'none'  # 'none', 'turning', 'forward', 'returning'
 avoidance_counter = 0
 esp_connected = False
 current_fps = 0.0
+object_detection_buffer = []  # Buffer to store recent object detections
+line_lost_counter = 0  # Counter for consecutive frames without line
+last_valid_line_center = None  # Last known good line position
 
 # Speech system variables
 speech_queue = queue.Queue()
@@ -91,22 +109,32 @@ class SpeechManager:
         self.speech_queue = queue.Queue()
         self.running = False
         self.last_announcements = {}
+        self.tts_engine_type = TTS_ENGINE
         
         if TTS_AVAILABLE and SPEECH_ENABLED:
             try:
-                self.engine = pyttsx3.init()
-                self.engine.setProperty('rate', SPEECH_RATE)
-                self.engine.setProperty('volume', SPEECH_VOLUME)
-                
-                # Try to set voice (prefer female voice if available)
-                voices = self.engine.getProperty('voices')
-                if voices:
-                    for voice in voices:
-                        if 'female' in voice.name.lower() or 'zira' in voice.name.lower():
-                            self.engine.setProperty('voice', voice.id)
-                            break
-                
-                logger.info("Speech system initialized successfully")
+                if TTS_ENGINE == 'piper':
+                    # Piper TTS setup
+                    self.piper_path = './piper/piper'
+                    self.voice_model = './voices/en_US-lessac-medium.onnx'
+                    self.engine = True  # Flag to indicate piper is ready
+                    logger.info("Piper TTS system initialized successfully")
+                elif TTS_ENGINE == 'pyttsx3':
+                    # pyttsx3 setup (fallback)
+                    import pyttsx3
+                    self.engine = pyttsx3.init()
+                    self.engine.setProperty('rate', SPEECH_RATE)
+                    self.engine.setProperty('volume', SPEECH_VOLUME)
+                    
+                    # Try to set voice (prefer female voice if available)
+                    voices = self.engine.getProperty('voices')
+                    if voices:
+                        for voice in voices:
+                            if 'female' in voice.name.lower() or 'zira' in voice.name.lower():
+                                self.engine.setProperty('voice', voice.id)
+                                break
+                    
+                    logger.info("pyttsx3 speech system initialized successfully")
             except Exception as e:
                 logger.error(f"Failed to initialize speech system: {e}")
                 self.engine = None
@@ -116,7 +144,7 @@ class SpeechManager:
             self.running = True
             self.thread = threading.Thread(target=self._speech_worker, daemon=True)
             self.thread.start()
-            logger.info("Speech system started")
+            logger.info(f"{self.tts_engine_type} speech system started")
     
     def stop(self):
         self.running = False
@@ -140,6 +168,42 @@ class SpeechManager:
         self.last_announcements[category] = current_time
         logger.info(f"Queued announcement: {message}")
     
+    def _speak_with_piper(self, message):
+        """Use Piper TTS to speak message"""
+        try:
+            # Create temporary audio file
+            temp_audio = "/tmp/robot_speech.wav"
+            
+            # Generate speech with Piper
+            process = subprocess.run([
+                self.piper_path,
+                '--model', self.voice_model,
+                '--output_file', temp_audio
+            ], input=message, text=True, capture_output=True, timeout=10)
+            
+            if process.returncode == 0:
+                # Play the generated audio
+                subprocess.run(['aplay', temp_audio], check=True, capture_output=True)
+                # Clean up temp file
+                os.remove(temp_audio)
+                return True
+            else:
+                logger.error(f"Piper TTS failed: {process.stderr}")
+                return False
+        except Exception as e:
+            logger.error(f"Piper TTS error: {e}")
+            return False
+    
+    def _speak_with_pyttsx3(self, message):
+        """Use pyttsx3 to speak message"""
+        try:
+            self.engine.say(message)
+            self.engine.runAndWait()
+            return True
+        except Exception as e:
+            logger.error(f"pyttsx3 error: {e}")
+            return False
+    
     def _speech_worker(self):
         """Background thread to handle speech synthesis"""
         while self.running:
@@ -147,13 +211,15 @@ class SpeechManager:
                 # Get message from queue with timeout
                 message = self.speech_queue.get(timeout=1.0)
                 if message and self.engine:
-                    self.engine.say(message)
-                    self.engine.runAndWait()
+                    if self.tts_engine_type == 'piper':
+                        self._speak_with_piper(message)
+                    elif self.tts_engine_type == 'pyttsx3':
+                        self._speak_with_pyttsx3(message)
                 self.speech_queue.task_done()
             except queue.Empty:
                 continue
             except Exception as e:
-                logger.error(f"Speech error: {e}")
+                logger.error(f"Speech worker error: {e}")
 
 # Initialize speech manager
 speech_manager = SpeechManager()
@@ -289,46 +355,122 @@ def find_line_center(binary_frame):
     
     return cx, confidence
 
-def detect_objects_simple(frame, binary_frame):
-    """Simple object detection using OpenCV"""
+def detect_objects_smart(frame, binary_frame, line_center):
+    """Smart object detection that distinguishes line from obstacles"""
+    global object_detection_buffer
+    
+    # Check if object detection is enabled
+    if not ENABLE_OBJECT_DETECTION:
+        return []
+    
     height, width = frame.shape[:2]
     
-    # Focus on the top 60% of the frame for object detection
-    roi_height = int(height * 0.6)
-    roi = binary_frame[0:roi_height, :]
+    # Focus on the middle portion for object detection (30-65% height)
+    roi_start = int(height * 0.3)
+    roi_end = int(height * 0.65)
     
-    # Invert the binary image for object detection (objects are usually lighter)
-    roi_inverted = cv2.bitwise_not(roi)
+    # Use original frame for better object detection
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    roi_gray = gray[roi_start:roi_end, :]
+    
+    # Apply blur to reduce noise
+    roi_blurred = cv2.GaussianBlur(roi_gray, (7, 7), 0)
+    
+    # Use edge detection to find objects
+    edges = cv2.Canny(roi_blurred, 50, 150)
+    
+    # Apply morphological operations to connect edges
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    edges_closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+    
+    # Fill contours to create solid objects
+    edges_filled = cv2.morphologyEx(edges_closed, cv2.MORPH_CLOSE, 
+                                   cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10)))
     
     # Find contours
-    contours, _ = cv2.findContours(roi_inverted, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(edges_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     objects = []
     for contour in contours:
         area = cv2.contourArea(contour)
-        if area < MIN_OBJECT_AREA:
+        
+        # Filter by area
+        if area < MIN_OBJECT_AREA or area > OBJECT_MAX_AREA:
             continue
         
         # Get bounding rectangle
         x, y, w, h = cv2.boundingRect(contour)
         
+        # Adjust y coordinate to account for ROI offset
+        y += roi_start
+        
         # Filter by size
         if w < OBJECT_MIN_WIDTH or h < OBJECT_MIN_HEIGHT:
+            continue
+        
+        # Filter by aspect ratio - objects shouldn't be too thin (like lines)
+        aspect_ratio = w / h
+        if aspect_ratio > 5.0 or aspect_ratio < 0.2:  # Exclude very thin shapes (lines)
             continue
         
         # Calculate position relative to center (-1 to 1)
         center_x = x + w // 2
         relative_pos = (center_x - width // 2) / (width // 2)
         
-        # Only consider objects somewhat near the center path
-        if abs(relative_pos) > 0.6:
+        # SMART FILTERING: Exclude objects that are likely part of the line
+        if line_center is not None:
+            # Check if object is very close to the detected line
+            line_distance = abs(center_x - line_center)
+            if line_distance < 30:  # Skip objects too close to the line (probably part of line)
+                continue
+        
+        # Only consider objects in the center area where robot travels
+        if abs(relative_pos) > 0.3:
+            continue
+        
+        # Check if object is in reasonable detection zone
+        if y + h > height * 0.8 or y < height * 0.25:
+            continue
+        
+        # Calculate solidity (area of contour / area of bounding box)
+        bbox_area = w * h
+        solidity = area / bbox_area if bbox_area > 0 else 0
+        
+        # Objects should be reasonably solid
+        if solidity < 0.4:
+            continue
+        
+        # Check if object has sufficient height (not just a line segment)
+        if h < 40:  # Minimum height to be considered an obstacle
+            continue
+        
+        # Additional validation: check object density in original image
+        object_roi = gray[y:y+h, x:x+w]
+        mean_intensity = np.mean(object_roi)
+        
+        # Objects should be significantly different from background
+        if mean_intensity > 200 or mean_intensity < 30:  # Skip very bright or very dark regions
             continue
         
         objects.append({
             'bbox': (x, y, w, h),
             'position': relative_pos,
-            'area': area
+            'area': area,
+            'solidity': solidity,
+            'mean_intensity': mean_intensity,
+            'line_distance': abs(center_x - line_center) if line_center else width
         })
+    
+    # Update detection buffer for confidence-based filtering
+    object_detection_buffer.append(len(objects) > 0)
+    if len(object_detection_buffer) > OBJECT_CONFIDENCE_FRAMES:
+        object_detection_buffer.pop(0)
+    
+    # Only report objects if they've been detected consistently (ALL frames must detect)
+    if len(object_detection_buffer) >= OBJECT_CONFIDENCE_FRAMES:
+        consistent_detection = sum(object_detection_buffer) == OBJECT_CONFIDENCE_FRAMES
+        if not consistent_detection:
+            objects = []
     
     return objects
 
@@ -394,7 +536,7 @@ def simple_avoidance_fsm(objects_detected, line_found):
 
 def get_robot_command(line_center, frame_width, steering_value, objects_detected):
     """Determine robot command based on line position and objects"""
-    global robot_status, line_detected, object_detected
+    global robot_status, line_detected, object_detected, line_lost_counter, last_valid_line_center
     
     prev_line_detected = line_detected
     line_detected = line_center is not None
@@ -407,6 +549,9 @@ def get_robot_command(line_center, frame_width, steering_value, objects_detected
     
     # Normal line following
     if line_center is not None:
+        # Reset line lost counter and update last valid position
+        line_lost_counter = 0
+        last_valid_line_center = line_center
         robot_status = "Following line"
         
         # Announce line detection if we just found it
@@ -427,13 +572,28 @@ def get_robot_command(line_center, frame_width, steering_value, objects_detected
         else:
             return FORWARD
     else:
-        robot_status = "Searching for line"
+        # Line not detected - use persistence logic
+        line_lost_counter += 1
         
-        # Announce line lost if we just lost it
-        if prev_line_detected:
-            speech_manager.announce("Line lost. Searching for path.", "line_lost")
-        
-        return STOP
+        # Don't stop immediately - allow a few frames of line loss
+        if line_lost_counter < 5:  # Allow 5 frames of line loss
+            robot_status = f"Line temporarily lost ({line_lost_counter}/5) - continuing"
+            return FORWARD  # Keep going forward briefly
+        elif line_lost_counter < 15:  # Try to find line by slight movements
+            robot_status = f"Searching for line ({line_lost_counter}/15)"
+            # Alternate between slight left and right movements
+            if line_lost_counter % 4 < 2:
+                return LEFT
+            else:
+                return RIGHT
+        else:
+            robot_status = "Line lost - stopping"
+            
+            # Announce line lost if we just lost it
+            if prev_line_detected or line_lost_counter == 15:
+                speech_manager.announce("Line lost. Stopping robot.", "line_lost")
+            
+            return STOP
 
 def draw_debug_info(frame, line_center, objects, steering_value, brightness):
     """Draw debug information on the frame"""
@@ -448,11 +608,19 @@ def draw_debug_info(frame, line_center, objects, steering_value, brightness):
     cv2.putText(frame, "LINE DETECTION", (10, roi_start + 20), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
     
-    # Draw object detection area
-    roi_end = int(height * 0.6)
-    cv2.rectangle(frame, (0, 0), (width, roi_end), (0, 0, 255), 2)
-    cv2.putText(frame, "OBJECT DETECTION", (10, 20), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+    # Draw object detection area (smart detection zone: 30-65% height)
+    roi_start = int(height * 0.3)
+    roi_end = int(height * 0.65)
+    if ENABLE_OBJECT_DETECTION:
+        cv2.rectangle(frame, (0, roi_start), (width, roi_end), (0, 0, 255), 2)
+        cv2.putText(frame, "SMART OBSTACLE DETECTION", (10, roi_start + 20), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        cv2.putText(frame, "(Excludes line path)", (10, roi_start + 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+    else:
+        cv2.rectangle(frame, (0, roi_start), (width, roi_end), (128, 128, 128), 1)
+        cv2.putText(frame, "OBJECT DETECTION (DISABLED)", (10, roi_start + 20), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
     
     # Draw detected line
     if line_center is not None:
@@ -466,11 +634,27 @@ def draw_debug_info(frame, line_center, objects, steering_value, brightness):
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
     
     # Draw detected objects
-    for obj in objects:
+    for i, obj in enumerate(objects):
         x, y, w, h = obj['bbox']
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
-        cv2.putText(frame, f"OBJECT", (x, y - 10),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        # Use different colors based on object properties
+        if 'line_distance' in obj and obj['line_distance'] < 50:
+            color = (0, 165, 255)  # Orange for objects near line
+        else:
+            color = (0, 255, 255)  # Yellow for clear obstacles
+        
+        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+        cv2.putText(frame, f"OBSTACLE {i+1}", (x, y - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+        
+        # Show distance from line
+        if 'line_distance' in obj:
+            cv2.putText(frame, f"D:{obj['line_distance']:.0f}px", (x, y + h + 15),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+        
+        # Show object intensity
+        if 'mean_intensity' in obj:
+            cv2.putText(frame, f"I:{obj['mean_intensity']:.0f}", (x + w - 40, y + h + 15),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
     
     # Draw status information
     info_y = 50
@@ -481,6 +665,8 @@ def draw_debug_info(frame, line_center, objects, steering_value, brightness):
     cv2.putText(frame, f"Brightness: {brightness:.0f}", (10, info_y + 45),
                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     cv2.putText(frame, f"FPS: {current_fps:.1f}", (10, info_y + 65),
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.putText(frame, f"Obj Confidence: {sum(object_detection_buffer)}/{len(object_detection_buffer)}", (10, info_y + 85),
                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     
     # Draw avoidance status
@@ -538,6 +724,10 @@ def index():
                          <strong>Speech:</strong><br>
                          <span id="speech-status">Disabled</span>
                      </div>
+                     <div class="stat">
+                         <strong>TTS Engine:</strong><br>
+                         <span id="tts-engine">None</span>
+                     </div>
                  </div>
              </div>
          </div>
@@ -552,6 +742,7 @@ def index():
                          document.getElementById('object-detected').textContent = data.object_detected ? 'Yes' : 'No';
                          document.getElementById('esp-status').textContent = data.esp_connected ? 'Connected' : 'Disconnected';
                          document.getElementById('speech-status').textContent = data.speech_enabled ? 'Active' : 'Disabled';
+                         document.getElementById('tts-engine').textContent = data.tts_engine;
                     })
                     .catch(error => console.error('Error:', error));
             }
@@ -568,11 +759,49 @@ def video_feed():
     def generate_frames():
         while True:
             with frame_lock:
+                if binary_frame_global is not None:
+                    # Convert binary frame to 3-channel for display
+                    binary_display = cv2.cvtColor(binary_frame_global, cv2.COLOR_GRAY2BGR)
+                    
+                    # Add some debug info to binary frame
+                    height, width = binary_display.shape[:2]
+                    cv2.putText(binary_display, "BINARY LINE DETECTION", (10, 30),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(binary_display, f"Line Lost: {line_lost_counter}", (10, 60),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    cv2.putText(binary_display, f"Status: {robot_status}", (10, 90),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+                    
+                    # Draw line detection ROI on binary image
+                    roi_start = int(height * 0.7)
+                    cv2.rectangle(binary_display, (0, roi_start), (width, height), (0, 255, 0), 2)
+                    
+                    frame = binary_display
+                else:
+                    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+                    cv2.putText(frame, "No Binary Feed", (200, 180),
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    cv2.putText(frame, "Check camera connection", (150, 220),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
+            
+            ret, jpeg = cv2.imencode('.jpg', frame)
+            if ret:
+                yield (b'--frame\r\n'
+                      b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+            time.sleep(0.1)
+    
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/color_feed')
+def color_feed():
+    def generate_frames():
+        while True:
+            with frame_lock:
                 if current_frame is not None:
                     frame = current_frame.copy()
                 else:
-                    frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                    cv2.putText(frame, "No Camera Feed", (200, 240),
+                    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+                    cv2.putText(frame, "No Camera Feed", (200, 180),
                                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
             
             ret, jpeg = cv2.imencode('.jpg', frame)
@@ -593,7 +822,8 @@ def api_status():
         'line_offset': line_offset,
         'fps': current_fps,
         'avoidance_phase': avoidance_phase,
-        'speech_enabled': SPEECH_ENABLED and TTS_AVAILABLE and speech_manager.engine is not None
+        'speech_enabled': SPEECH_ENABLED and TTS_AVAILABLE and speech_manager.engine is not None,
+        'tts_engine': TTS_ENGINE if TTS_AVAILABLE else 'None'
     })
 
 def run_web_server():
@@ -601,7 +831,7 @@ def run_web_server():
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True)
 
 def main():
-    global current_frame, line_offset, robot_status, current_fps
+    global current_frame, binary_frame_global, line_offset, robot_status, current_fps
     
     logger.info("Starting OpenCV Line Follower Robot")
     
@@ -611,12 +841,25 @@ def main():
         logger.error("Failed to open camera")
         return
     
+    # Try to set camera properties
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
     cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     
-    logger.info(f"Camera initialized: {CAMERA_WIDTH}x{CAMERA_HEIGHT}")
+    # Get actual camera settings
+    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    actual_fps = cap.get(cv2.CAP_PROP_FPS)
+    
+    logger.info(f"Camera initialized: {actual_width}x{actual_height} @ {actual_fps} FPS")
+    
+    # Test capture
+    ret, test_frame = cap.read()
+    if not ret:
+        logger.error("Failed to capture test frame from camera")
+        return
+    logger.info(f"Test frame captured successfully: {test_frame.shape}")
     
     # Initialize PID controller
     pid = SimplePID(KP, KI, KD)
@@ -653,8 +896,8 @@ def main():
             binary_frame, brightness = detect_line_adaptive(frame)
             line_center, confidence = find_line_center(binary_frame)
             
-            # Detect objects
-            detected_objects = detect_objects_simple(frame, binary_frame)
+            # Detect objects (smart detection that avoids confusing line with obstacles)
+            detected_objects = detect_objects_smart(frame, binary_frame, line_center)
             
             # Calculate steering
             if line_center is not None:
@@ -675,9 +918,10 @@ def main():
             display_frame = frame.copy()
             draw_debug_info(display_frame, line_center, detected_objects, steering_value, brightness)
             
-            # Update shared frame for web interface
+            # Update shared frames for web interface
             with frame_lock:
                 current_frame = display_frame
+                binary_frame_global = binary_frame
             
             # Calculate FPS
             frame_time = time.time() - start_time

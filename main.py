@@ -12,6 +12,7 @@ from flask import Flask, Response, render_template_string, jsonify
 import math
 
 
+# Try to import YOLO
 try:
     from ultralytics import YOLO
     YOLO_AVAILABLE = True
@@ -20,6 +21,27 @@ except ImportError:
     YOLO_AVAILABLE = False
     print("YOLO not available. Install with: pip install ultralytics")
     print("Falling back to basic computer vision detection")
+
+# Try to import text-to-speech (Piper TTS)
+try:
+    import subprocess
+    import os
+    import queue
+    # Check if Piper TTS is available
+    if os.path.exists('./piper/piper') and os.path.exists('./voices/en_US-lessac-medium.onnx'):
+        TTS_AVAILABLE = True
+        TTS_ENGINE = 'piper'
+        print("Piper TTS available - High quality neural speech")
+    else:
+        # Fallback to pyttsx3 if available
+        import pyttsx3
+        TTS_AVAILABLE = True
+        TTS_ENGINE = 'pyttsx3'
+        print("pyttsx3 TTS available")
+except ImportError:
+    TTS_AVAILABLE = False
+    TTS_ENGINE = None
+    print("Text-to-speech not available. Install piper or pyttsx3")
 
 
 ESP32_IP = '192.168.2.21'  
@@ -158,6 +180,12 @@ MAX_AVOIDANCE_ANGLE = 90   # Maximum avoidance angle in degrees
 # Frame averaging for stable distance estimation
 DISTANCE_HISTORY_SIZE = 5  # Number of frames to average distance over
 
+# Speech Settings for Piper TTS
+SPEECH_ENABLED = True          # Enable/disable speech announcements
+SPEECH_RATE = 150             # Speech rate (words per minute)
+SPEECH_VOLUME = 0.8           # Speech volume (0.0 to 1.0)
+ANNOUNCE_INTERVAL = 3.0       # Minimum seconds between similar announcements
+
 # -----------------------------------------------------------------------------
 # --- Global Variables ---
 # -----------------------------------------------------------------------------
@@ -190,6 +218,9 @@ smart_avoidance = None
 # PID controller instance (for dashboard access)
 pid_controller = None
 
+# Speech manager instance
+speech_manager = None
+
 # Count frames during clearing phase
 clearing_frame_count = 0
 # Last number of clearing frames
@@ -204,6 +235,127 @@ logging.basicConfig(level=logging.INFO,
                    format='[%(asctime)s] %(levelname)s: %(message)s', 
                    datefmt='%H:%M:%S')
 logger = logging.getLogger("SimpleLineFollower")
+
+# -----------------------------------------------------------------------------
+# --- Speech Manager (Piper TTS) ---
+# -----------------------------------------------------------------------------
+class SpeechManager:
+    def __init__(self):
+        self.engine = None
+        self.speech_queue = queue.Queue()
+        self.running = False
+        self.last_announcements = {}
+        self.tts_engine_type = TTS_ENGINE
+        
+        if TTS_AVAILABLE and SPEECH_ENABLED:
+            try:
+                if TTS_ENGINE == 'piper':
+                    # Piper TTS setup
+                    self.piper_path = './piper/piper'
+                    self.voice_model = './voices/en_US-lessac-medium.onnx'
+                    self.engine = True  # Flag to indicate piper is ready
+                    logger.info("Piper TTS system initialized successfully")
+                elif TTS_ENGINE == 'pyttsx3':
+                    # pyttsx3 setup (fallback)
+                    import pyttsx3
+                    self.engine = pyttsx3.init()
+                    self.engine.setProperty('rate', SPEECH_RATE)
+                    self.engine.setProperty('volume', SPEECH_VOLUME)
+                    
+                    # Try to set voice (prefer female voice if available)
+                    voices = self.engine.getProperty('voices')
+                    if voices:
+                        for voice in voices:
+                            if 'female' in voice.name.lower() or 'zira' in voice.name.lower():
+                                self.engine.setProperty('voice', voice.id)
+                                break
+                    
+                    logger.info("pyttsx3 speech system initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize speech system: {e}")
+                self.engine = None
+    
+    def start(self):
+        if self.engine:
+            self.running = True
+            self.thread = threading.Thread(target=self._speech_worker, daemon=True)
+            self.thread.start()
+            logger.info(f"{self.tts_engine_type} speech system started")
+    
+    def stop(self):
+        self.running = False
+        if hasattr(self, 'thread'):
+            self.thread.join(timeout=2)
+    
+    def announce(self, message, category="general", force=False):
+        """Add announcement to queue with category-based throttling"""
+        if not self.engine or not SPEECH_ENABLED:
+            return
+        
+        current_time = time.time()
+        
+        # Check if we should throttle this announcement
+        if not force and category in self.last_announcements:
+            if current_time - self.last_announcements[category] < ANNOUNCE_INTERVAL:
+                return
+        
+        # Add to queue and update last announcement time
+        self.speech_queue.put(message)
+        self.last_announcements[category] = current_time
+        logger.info(f"Queued announcement: {message}")
+    
+    def _speak_with_piper(self, message):
+        """Use Piper TTS to speak message"""
+        try:
+            # Create temporary audio file
+            temp_audio = "/tmp/robot_speech.wav"
+            
+            # Generate speech with Piper
+            process = subprocess.run([
+                self.piper_path,
+                '--model', self.voice_model,
+                '--output_file', temp_audio
+            ], input=message, text=True, capture_output=True, timeout=10)
+            
+            if process.returncode == 0:
+                # Play the generated audio
+                subprocess.run(['aplay', temp_audio], check=True, capture_output=True)
+                # Clean up temp file
+                os.remove(temp_audio)
+                return True
+            else:
+                logger.error(f"Piper TTS failed: {process.stderr}")
+                return False
+        except Exception as e:
+            logger.error(f"Piper TTS error: {e}")
+            return False
+    
+    def _speak_with_pyttsx3(self, message):
+        """Use pyttsx3 to speak message"""
+        try:
+            self.engine.say(message)
+            self.engine.runAndWait()
+            return True
+        except Exception as e:
+            logger.error(f"pyttsx3 error: {e}")
+            return False
+    
+    def _speech_worker(self):
+        """Background thread to handle speech synthesis"""
+        while self.running:
+            try:
+                # Get message from queue with timeout
+                message = self.speech_queue.get(timeout=1.0)
+                if message and self.engine:
+                    if self.tts_engine_type == 'piper':
+                        self._speak_with_piper(message)
+                    elif self.tts_engine_type == 'pyttsx3':
+                        self._speak_with_pyttsx3(message)
+                self.speech_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Speech worker error: {e}")
 
 # -----------------------------------------------------------------------------
 # --- PID Controller ---
@@ -1237,60 +1389,114 @@ obstacle_mapper = ObstacleMapper()
 distance_estimator = DistanceEstimator()
 
 def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected_now=False, line_offset_now=0.0, detected_objects_list=None):
-    """SIMPLE 3-STEP AVOIDANCE: Turn right → Go forward → Turn left back to line"""
+    """SMOOTH FORWARD CURVE AVOIDANCE: Curve right while forward → Curve left while forward → Return to line"""
     global avoidance_phase, avoidance_side, avoidance_frame_count, avoidance_duration
     
-    # SIMPLE OBSTACLE AVOIDANCE - NO COMPLEX MAPPING
+    # SMOOTH FORWARD CURVE AVOIDANCE
     if avoid_objects and (detected_objects_list or avoidance_phase != 'none'):
         
-        # START SIMPLE AVOIDANCE
+        # START SMOOTH CURVE AVOIDANCE
         if avoidance_phase == 'none' and detected_objects_list:
-            logger.info("🚨 OBSTACLE DETECTED - Starting simple avoidance: RIGHT → FORWARD → LEFT")
-            avoidance_phase = 'turning_right'
-            avoidance_duration = 3  # Turn right for 3 frames (0.6 seconds)
-            return COMMANDS['AVOID_RIGHT']
+            logger.info("🚨 OBSTACLE DETECTED - Starting BIG smooth curve avoidance")
+            avoidance_phase = 'curve_right'
+            avoidance_duration = 25  # BIGGER curve right while moving forward
+            return COMMANDS['RIGHT']  # Start curving right
         
-        # STEP 1: Turn RIGHT away from obstacle  
-        elif avoidance_phase == 'turning_right':
+        # PHASE 1: BIG Curve RIGHT while moving forward
+        elif avoidance_phase == 'curve_right':
             avoidance_duration -= 1
-            if avoidance_duration > 0:
-                logger.info(f"STEP 1: Turning RIGHT away from obstacle ({avoidance_duration} frames left)")
-                return COMMANDS['AVOID_RIGHT']
-            else:
-                # Go to step 2
-                avoidance_phase = 'going_forward'
-                avoidance_duration = 6  # Go forward for 6 frames (~1.2 seconds)
-                logger.info("STEP 2: Going FORWARD to clear obstacle")
+            if avoidance_duration > 18:
+                # Strong right curve initially - LONGER for bigger curve
+                logger.info(f"BIG CURVE 1: Strong right curve forward ({avoidance_duration} frames left)")
+                return COMMANDS['RIGHT']
+            elif avoidance_duration > 10:
+                # Medium right curve, mostly forward
+                logger.info(f"BIG CURVE 1: Medium right curve forward ({avoidance_duration} frames left)")
+                # Alternate between forward and right for smooth curve
+                return COMMANDS['FORWARD'] if avoidance_duration % 2 == 0 else COMMANDS['RIGHT']
+            elif avoidance_duration > 3:
+                # Gentle right curve, mostly forward
+                logger.info(f"BIG CURVE 1: Gentle right curve forward ({avoidance_duration} frames left)")
+                # More forward motion for smoother curve
+                return COMMANDS['FORWARD'] if avoidance_duration % 3 != 0 else COMMANDS['RIGHT']
+            elif avoidance_duration > 0:
+                # Pure forward to clear obstacle
+                logger.info(f"BIG CURVE 1: Forward clear ({avoidance_duration} frames left)")
                 return COMMANDS['FORWARD']
-        
-        # STEP 2: Go FORWARD past obstacle
-        elif avoidance_phase == 'going_forward':
-            avoidance_duration -= 1
-            if avoidance_duration > 0:
-                logger.info(f"STEP 2: Going FORWARD past obstacle ({avoidance_duration} frames left)")
-                return COMMANDS['FORWARD']
             else:
-                # Go to step 3
-                avoidance_phase = 'turning_left'
-                avoidance_duration = 6  # Turn left for 6 frames to get back to line
-                logger.info("STEP 3: Turning LEFT back to line")
-                return COMMANDS['AVOID_LEFT']
+                # Start return curve - BIGGER return curve
+                avoidance_phase = 'curve_left'
+                avoidance_duration = 30  # MUCH longer return curve for bigger sweep
+                logger.info("BIG CURVE 2: Starting big left return curve")
+                return COMMANDS['LEFT']
         
-        # STEP 3: Turn LEFT back to line
-        elif avoidance_phase == 'turning_left':
+        # PHASE 2: BIG Curve LEFT to return to line while moving forward
+        elif avoidance_phase == 'curve_left':
             # Check if we found the line early
-            if line_detected_now and abs(line_offset_now) < 0.4:
-                logger.info("✅ LINE FOUND! Avoidance complete - back to line following")
+            if line_detected_now and abs(line_offset_now) < 0.3:
+                logger.info("✅ LINE FOUND DURING BIG CURVE! Avoidance complete")
                 avoidance_phase = 'none'
+                # Gentle steering toward line center
+                if abs(line_offset_now) < 0.1:
+                    return COMMANDS['FORWARD']
+                else:
+                    return COMMANDS['LEFT'] if line_offset_now > 0 else COMMANDS['RIGHT']
+            
+            avoidance_duration -= 1
+            if avoidance_duration > 22:
+                # Strong left curve initially - LONGER for bigger curve
+                logger.info(f"BIG CURVE 2: Strong left curve forward ({avoidance_duration} frames left)")
+                return COMMANDS['LEFT']
+            elif avoidance_duration > 15:
+                # Medium left curve
+                logger.info(f"BIG CURVE 2: Medium left curve forward ({avoidance_duration} frames left)")
+                # Alternate between forward and left for smooth curve
+                return COMMANDS['FORWARD'] if avoidance_duration % 2 == 0 else COMMANDS['LEFT']
+            elif avoidance_duration > 8:
+                # Gentle left curve, mostly forward
+                logger.info(f"BIG CURVE 2: Gentle left curve forward ({avoidance_duration} frames left)")
+                # More forward motion for smoother curve
+                return COMMANDS['FORWARD'] if avoidance_duration % 3 != 0 else COMMANDS['LEFT']
+            elif avoidance_duration > 0:
+                # Search pattern while moving forward
+                logger.info(f"BIG CURVE 2: Search forward ({avoidance_duration} frames left)")
+                # Gentle search oscillation
+                return COMMANDS['LEFT'] if avoidance_duration % 4 < 2 else COMMANDS['RIGHT']
+            else:
+                # Final search phase if still no line
+                avoidance_phase = 'final_search'
+                avoidance_duration = 25  # Longer final search too
+                logger.info("PHASE 3: Final BIG search pattern")
+                speech_manager.announce("Searching for line after big curve.", "searching")
                 return COMMANDS['FORWARD']
+        
+        # PHASE 3: Final search while moving forward
+        elif avoidance_phase == 'final_search':
+            # Found the line!
+            if line_detected_now:
+                logger.info("✅ LINE FOUND DURING FINAL SEARCH! Avoidance complete")
+                avoidance_phase = 'none'
+                if abs(line_offset_now) < 0.2:
+                    return COMMANDS['FORWARD']
+                else:
+                    # Steer toward line
+                    return COMMANDS['LEFT'] if line_offset_now > 0 else COMMANDS['RIGHT']
             
             avoidance_duration -= 1
             if avoidance_duration > 0:
-                logger.info(f"STEP 3: Turning LEFT back to line ({avoidance_duration} frames left)")
-                return COMMANDS['AVOID_LEFT']
+                # Wide search pattern while moving forward
+                if avoidance_duration > 15:
+                    logger.info(f"SEARCH: Left search forward ({avoidance_duration} frames left)")
+                    return COMMANDS['LEFT'] if avoidance_duration % 3 == 0 else COMMANDS['FORWARD']
+                elif avoidance_duration > 5:
+                    logger.info(f"SEARCH: Right search forward ({avoidance_duration} frames left)")
+                    return COMMANDS['RIGHT'] if avoidance_duration % 3 == 0 else COMMANDS['FORWARD']
+                else:
+                    logger.info(f"SEARCH: Pure forward ({avoidance_duration} frames left)")
+                    return COMMANDS['FORWARD']
             else:
-                # Avoidance complete
-                logger.info("✅ Simple avoidance complete - resuming line search")
+                # Complete timeout - resume normal operation
+                logger.info("⚠️ Curve avoidance timeout - resuming normal operation")
                 avoidance_phase = 'none'
                 return COMMANDS['FORWARD']
     
@@ -1448,7 +1654,14 @@ def draw_debug_info(frame, detection_data):
     
     # Draw avoidance status
     if avoidance_phase != 'none':
-        phase_text = f"AVOIDANCE: {avoidance_phase.upper()} {avoidance_side.upper()}"
+        if avoidance_phase == 'curve_right':
+            phase_text = f"AVOIDANCE: CURVE RIGHT"
+        elif avoidance_phase == 'curve_left':
+            phase_text = f"AVOIDANCE: CURVE LEFT"
+        elif avoidance_phase == 'final_search':
+            phase_text = f"AVOIDANCE: SEARCHING FOR LINE"
+        else:
+            phase_text = f"AVOIDANCE: {avoidance_phase.upper()}"
         cv2.putText(frame, phase_text, (width//2 - 120, 110),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
     
@@ -2150,7 +2363,9 @@ def api_status():
             'kp': float(pid_params['kp']),
             'ki': float(pid_params['ki']),
             'kd': float(pid_params['kd'])
-        }
+        },
+        'speech_enabled': bool(SPEECH_ENABLED and TTS_AVAILABLE and speech_manager and speech_manager.engine is not None),
+        'tts_engine': TTS_ENGINE if TTS_AVAILABLE else 'None'
     }
     return jsonify(response)
 
@@ -2216,7 +2431,7 @@ def run_flask_server():
 # -----------------------------------------------------------------------------
 def main():
     global output_frame, line_offset, steering_value, turn_command, robot_status
-    global line_detected, current_fps, confidence, esp_connection, robot_stats, yolo_model, smart_avoidance
+    global line_detected, current_fps, confidence, esp_connection, robot_stats, yolo_model, smart_avoidance, speech_manager
     
     logger.info("Starting Smart Line Follower Robot")
     robot_status = "Starting camera"
@@ -2281,6 +2496,10 @@ def main():
     robot_status = "Connecting to ESP32"
     esp_connection = ESP32Connection(ESP32_IP, ESP32_PORT)
     
+    # Initialize and start speech system
+    speech_manager = SpeechManager()
+    speech_manager.start()
+    
     # Start web interface in a separate thread
     flask_thread = threading.Thread(target=run_flask_server, daemon=True)
     flask_thread.start()
@@ -2296,8 +2515,13 @@ def main():
     last_known_good_offset = 0.0
     corner_detected_count = 0
     
+    # Speech announcement tracking
+    last_line_detected = False
+    last_avoidance_announced = None
+    
     logger.info("✅ Robot ready! Starting line detection...")
     robot_status = "Ready - Searching for line"
+    speech_manager.announce("Smart Line Follower Robot initialized and ready!", "startup", force=True)
     
     try:
         frame_count = 0
@@ -2334,6 +2558,11 @@ def main():
                 # Line detected
                 line_detected = True
                 search_counter = 0
+                
+                # Announce line detection if just found
+                if not last_line_detected:
+                    speech_manager.announce("Line detected. Following path.", "line_found")
+                last_line_detected = True
                 
                 # Calculate line position relative to center (-1.0 to 1.0)
                 center_x = frame.shape[1] / 2
@@ -2376,8 +2605,14 @@ def main():
                     else:
                         corner_detected_count = 0
                         
-                    # Enhanced status with intelligent obstacle mapping phases
-                    if avoidance_phase == 'mapping':
+                    # Enhanced status with smooth curve avoidance phases
+                    if avoidance_phase == 'curve_right':
+                        robot_status = f"CURVE AVOIDANCE: Right curve around obstacle ({avoidance_duration} frames)"
+                    elif avoidance_phase == 'curve_left':
+                        robot_status = f"CURVE AVOIDANCE: Left curve back to line ({avoidance_duration} frames)"
+                    elif avoidance_phase == 'final_search':
+                        robot_status = f"CURVE AVOIDANCE: Searching for line ({avoidance_duration} frames)"
+                    elif avoidance_phase == 'mapping':
                         robot_status = f"MAPPING: Analyzing obstacle geometry, gentle turn {avoidance_side}"
                     elif avoidance_phase == 'clearing':
                         robot_status = f"ROUNDABOUT: Initial curve forward ({avoidance_duration} frames)"
@@ -2388,10 +2623,16 @@ def main():
                     elif avoidance_phase == 'returning':
                         if confidence > 0.3:
                             robot_status = f"RETURNING: Line detected! Smart transition (offset: {line_offset:.2f})"
+                            if last_avoidance_announced != 'completed':
+                                speech_manager.announce("Line reacquired! Resuming line following.", "success", force=True)
+                                last_avoidance_announced = 'completed'
                         else:
                             robot_status = f"RETURNING: Gentle turn {opposite_direction(avoidance_side)} to find line"
                     elif object_detected:
                         robot_status = f"Object mapped - Calculating smart path"
+                        if last_avoidance_announced != 'detected':
+                            speech_manager.announce("Obstacle detected! Starting avoidance maneuver.", "obstacle", force=True)
+                            last_avoidance_announced = 'detected'
                     elif detected_objects:
                         robot_status = f"Obstacle candidate detected"
                     else:
@@ -2438,6 +2679,12 @@ def main():
             else:
                 # Line not detected
                 line_detected = False
+                
+                # Announce line loss if just lost
+                if last_line_detected:
+                    speech_manager.announce("Line lost. Searching for path.", "line_lost")
+                last_line_detected = False
+                
                 # If we're in an avoidance sequence, always defer to FSM
                 if avoidance_phase != 'none':
                     turn_command = get_turn_command_with_avoidance(
@@ -2538,6 +2785,7 @@ def main():
     except KeyboardInterrupt:
         logger.info(" Stopping robot (Ctrl+C pressed)")
         robot_status = "Shutting down"
+        speech_manager.announce("Shutting down robot.", "shutdown", force=True)
     except Exception as e:
         logger.error(f" Unexpected error: {e}", exc_info=True)
         robot_status = f"Error: {str(e)}"
@@ -2554,6 +2802,10 @@ def main():
         if 'cap' in locals() and cap.isOpened():
             cap.release()
             logger.info("Camera released")
+        
+        if speech_manager:
+            speech_manager.stop()
+            logger.info("Speech system stopped")
         
         logger.info(" Robot stopped cleanly")
 
