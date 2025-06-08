@@ -2,11 +2,11 @@
 # ===================================================
 
 # Computer Vision & Image Processing
-opencv-python>=4.5.0
-numpy>=1.21.0
+opencv-python==4.8.1.78
+numpy==1.24.3
 
 # Web Framework & Dashboard
-Flask>=2.0.0
+Flask==2.3.3
 Jinja2>=3.0.0
 
 # AI & Machine Learning  
@@ -34,4 +34,11 @@ flake8>=3.9.0
 # Platform Specific (Raspberry Pi)
 # Uncomment if running on Raspberry Pi
 # RPi.GPIO>=0.7.0
-# picamera>=1.13 
+# picamera>=1.13
+
+# Speech Support
+pyttsx3==2.90
+
+# Optional: For better audio support on Linux
+# espeak
+# espeak-data 
