@@ -10,7 +10,7 @@ import json
 from collections import deque
 from flask import Flask, Response, render_template_string, jsonify
 
-# YOLO11n for object detection
+
 try:
     from ultralytics import YOLO
     YOLO_AVAILABLE = True
@@ -20,18 +20,12 @@ except ImportError:
     print("YOLO not available. Install with: pip install ultralytics")
     print("Falling back to basic computer vision detection")
 
-# Smart avoidance system integrated below
 
-# -----------------------------------------------------------------------------
-# --- CONFIGURATION FOR BLACK LINE FOLLOWING ---
-# -----------------------------------------------------------------------------
-# ESP32 Configuration - UPDATE THIS TO MATCH YOUR ESP32's IP
-ESP32_IP = '192.168.2.21'  # Change this to your ESP32's IP address
+ESP32_IP = '192.168.2.21'  
 ESP32_PORT = 1234
 CAMERA_WIDTH, CAMERA_HEIGHT = 320, 240
 CAMERA_FPS = 5
 
-# Image processing parameters
 BLACK_THRESHOLD = 60  # Higher values detect darker lines
 BLUR_SIZE = 5
 MIN_CONTOUR_AREA = 100  # Minimum area to be considered a line
@@ -81,6 +75,7 @@ PERFORMANCE_THRESHOLD = 0.12  # Tighter performance target
 COMMANDS = {'FORWARD': 'FORWARD', 'LEFT': 'LEFT', 'RIGHT': 'RIGHT', 'STOP': 'STOP', 
            'AVOID_LEFT': 'LEFT', 'AVOID_RIGHT': 'RIGHT'}  # Use gentle turns for avoidance
 SPEED = 'SLOW'  # Default speed
+ROBOT_SPEED_M_S = 0.1  # Approximate robot speed in m/s for distance estimation
 
 # Enhanced obstacle mapping parameters
 OBSTACLE_MAP_SIZE = 50  # Remember last 50 obstacles
@@ -163,6 +158,13 @@ smart_avoidance = None
 
 # PID controller instance (for dashboard access)
 pid_controller = None
+
+# Count frames during clearing phase
+clearing_frame_count = 0
+# Last number of clearing frames
+last_avoidance_clear_frames = 0
+# Last estimated distance (m) cleared during avoidance
+last_avoidance_clear_distance = 0.0
 
 # -----------------------------------------------------------------------------
 # --- Logging Setup ---
@@ -287,13 +289,13 @@ class ESP32Connection:
             self.socket.settimeout(0.2)
             esp_connected = True
             self.connection_attempts = 0
-            logger.info(f"✅ Connected to ESP32 at {self.ip}:{self.port}")
+            logger.info(f"Connected to ESP32 at {self.ip}:{self.port}")
             return True
         except Exception as e:
             esp_connected = False
             self.connection_attempts += 1
             if self.connection_attempts % 10 == 1:  # Log every 10 attempts
-                logger.error(f"❌ Failed to connect to ESP32 (attempt {self.connection_attempts}): {e}")
+                logger.error(f"Failed to connect to ESP32 (attempt {self.connection_attempts}): {e}")
             self.socket = None
             return False
     
@@ -468,7 +470,7 @@ def detect_objects_with_yolo(frame, top_zone_bbox, line_position=None):
         return objects
         
     except Exception as e:
-        print(f"❌ YOLO detection error: {e}")
+        print(f"YOLO detection error: {e}")
         return []
 
 def detect_objects_in_zone(binary_roi, width, line_position=None):
@@ -871,7 +873,7 @@ class ObstacleMapper:
             'confidence': min(obstacle_data.get('confidence', 0.5) * 1.2, 1.0)
         }
         
-        logger.info(f"🗺️ PATH CALCULATED: {side} side, magnitude: {turn_magnitude:.2f}, "
+        logger.info(f"PATH CALCULATED: {side} side, magnitude: {turn_magnitude:.2f}, "
                    f"clear frames: {estimated_clear_frames}, obstacle size: {width:.2f}x{height:.2f}")
         
         return path_plan
@@ -1041,15 +1043,25 @@ def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected
                 return COMMANDS['AVOID_RIGHT'] if avoidance_side == 'right' else COMMANDS['AVOID_LEFT']
         
         elif avoidance_phase == 'clearing':
+            global clearing_frame_count, last_avoidance_clear_frames, last_avoidance_clear_distance
+            clearing_frame_count += 1
             # PHASE 3: Move forward calculated distance based on obstacle size
             avoidance_duration -= 1
             if line_detected_now and abs(line_offset_now) < 0.3:
+                # Record clearing metrics before transition
+                last_avoidance_clear_frames = clearing_frame_count
+                last_avoidance_clear_distance = (clearing_frame_count / CAMERA_FPS) * ROBOT_SPEED_M_S
+                clearing_frame_count = 0
                 # Line found during clearing! Smart early transition
                 avoidance_phase = 'returning'
                 avoidance_duration = GENTLE_RETURN_DURATION // 2  # Shorter return since line found
                 logger.info(f"🗺️ PHASE 4: LINE FOUND during clearing! Smart transition to return phase")
                 return COMMANDS['FORWARD']
             elif avoidance_duration <= 0:
+                # Record clearing metrics before transition
+                last_avoidance_clear_frames = clearing_frame_count
+                last_avoidance_clear_distance = (clearing_frame_count / CAMERA_FPS) * ROBOT_SPEED_M_S
+                clearing_frame_count = 0
                 # Switch to Phase 4: Smart return to line
                 avoidance_phase = 'returning'
                 avoidance_duration = GENTLE_RETURN_DURATION
@@ -1843,11 +1855,11 @@ def index():
         // Handle image load events
         const videoFeed = document.querySelector('.video-feed');
         videoFeed.addEventListener('load', () => {
-            document.getElementById('camera-status').innerHTML = '✅ Active';
+            document.getElementById('camera-status').innerHTML = 'Active';
         });
         
         videoFeed.addEventListener('error', () => {
-            document.getElementById('camera-status').innerHTML = '❌ Error';
+            document.getElementById('camera-status').innerHTML = 'Error';
         });
     </script>
 </body>
@@ -1891,7 +1903,9 @@ def api_status():
         'recent_obstacles': obstacle_stats['recent_obstacles'],
         'avg_significance': obstacle_stats['avg_significance'],
         'current_phase': avoidance_phase,
-        'planned_path': planned_path.get('side', 'none') if planned_path else 'none'
+        'planned_path_side': planned_path.get('side', 'none') if planned_path else 'none',
+        'planned_path_estimated_clear_frames': planned_path.get('estimated_clear_frames', 0) if planned_path else 0,
+        'last_avoidance_clear_distance': last_avoidance_clear_distance
     }
     
     return jsonify({
@@ -1985,21 +1999,21 @@ def main():
     # Initialize YOLO model if available and enabled
     if USE_YOLO and YOLO_AVAILABLE and OBJECT_DETECTION_ENABLED:
         try:
-            logger.info(f"🤖 Loading YOLO11n model: {YOLO_MODEL_SIZE}")
+            logger.info(f"Loading YOLO11n model: {YOLO_MODEL_SIZE}")
             robot_status = "Loading YOLO model"
             yolo_model = YOLO(YOLO_MODEL_SIZE)
-            logger.info("✅ YOLO11n model loaded successfully")
+            logger.info("YOLO11n model loaded successfully")
         except Exception as e:
-            logger.error(f"❌ Failed to load YOLO model: {e}")
-            logger.info("📉 Falling back to traditional computer vision detection")
+            logger.error(f"Failed to load YOLO model: {e}")
+            logger.info("Falling back to traditional computer vision detection")
             yolo_model = None
     else:
         if not OBJECT_DETECTION_ENABLED:
-            logger.info("🚫 Object detection disabled")
+            logger.info("Object detection disabled")
         elif not USE_YOLO:
-            logger.info("📉 Using traditional computer vision detection")
+            logger.info("Using traditional computer vision detection")
         elif not YOLO_AVAILABLE:
-            logger.info("⚠️ YOLO not available, using traditional detection")
+            logger.info("YOLO not available, using traditional detection")
     
     # Initialize smart avoidance system
     if OBJECT_DETECTION_ENABLED:
@@ -2014,7 +2028,7 @@ def main():
         logger.warning("Camera 0 failed, trying camera 1")
         cap = cv2.VideoCapture(1)
         if not cap.isOpened():
-            logger.error("❌ Failed to open any camera")
+            logger.error("Failed to open any camera")
             robot_status = "Camera Error"
             # Start web server anyway for status monitoring
             run_flask_server()
@@ -2121,15 +2135,15 @@ def main():
                     
                     # Adjust status based on corner detection duration
                     if corner_detected_count > 5:
-                        robot_status = f"🔄 Taking corner ({corner_detected_count})"
+                        robot_status = f"Taking corner ({corner_detected_count})"
                         
                         # For sharp corners, exaggerate the steering to make tighter turns
                         if abs(line_offset) > 0.5:
                             line_offset *= 1.5  # Increase turning response
                     else:
-                        robot_status = f"⚠️ Corner detected ({corner_detected_count})"
+                        robot_status = f" Corner detected ({corner_detected_count})"
                 elif corner_warning:
-                    robot_status = f"🔮 Corner predicted ahead"
+                    robot_status = f"Corner predicted ahead"
                 else:
                     if corner_detected_count > 0:
                         corner_detected_count -= 1
@@ -2138,22 +2152,22 @@ def main():
                         
                     # Enhanced status with intelligent obstacle mapping phases
                     if avoidance_phase == 'mapping':
-                        robot_status = f"🗺️ MAPPING: Analyzing obstacle geometry, gentle turn {avoidance_side}"
+                        robot_status = f"MAPPING: Analyzing obstacle geometry, gentle turn {avoidance_side}"
                     elif avoidance_phase == 'avoiding':
-                        robot_status = f"🗺️ NAVIGATING: Smart path around obstacle ({avoidance_duration} frames)"
+                        robot_status = f"NAVIGATING: Smart path around obstacle ({avoidance_duration} frames)"
                     elif avoidance_phase == 'clearing':
-                        robot_status = f"🗺️ CLEARING: Safe distance based on obstacle size ({avoidance_duration} frames)"
+                        robot_status = f"CLEARING: Safe distance based on obstacle size ({avoidance_duration} frames)"
                     elif avoidance_phase == 'returning':
                         if confidence > 0.3:
-                            robot_status = f"🗺️ RETURNING: Line detected! Smart transition (offset: {line_offset:.2f})"
+                            robot_status = f"RETURNING: Line detected! Smart transition (offset: {line_offset:.2f})"
                         else:
-                            robot_status = f"🗺️ RETURNING: Gentle turn {opposite_direction(avoidance_side)} to find line"
+                            robot_status = f"RETURNING: Gentle turn {opposite_direction(avoidance_side)} to find line"
                     elif object_detected:
-                        robot_status = f"🗺️ Object mapped - Calculating smart path"
+                        robot_status = f"Object mapped - Calculating smart path"
                     elif detected_objects:
-                        robot_status = f"👀 Obstacle candidate detected"
+                        robot_status = f"Obstacle candidate detected"
                     else:
-                        robot_status = f"✅ Following line (C:{confidence:.2f})"
+                        robot_status = f"Following line (C:{confidence:.2f})"
                 
                 # Calculate steering using PID controller
                 # Negative offset means line is to the left, so invert for steering
@@ -2181,9 +2195,9 @@ def main():
                 should_avoid = OBJECT_DETECTION_ENABLED and object_detected
                 if should_avoid and avoidance_phase != 'none':
                     if avoidance_phase == 'turning':
-                        logger.info(f"🚨 DYNAMIC NAVIGATION! Phase: {avoidance_phase.upper()} - frame {avoidance_duration}")
+                        logger.info(f"DYNAMIC NAVIGATION! Phase: {avoidance_phase.upper()} - frame {avoidance_duration}")
                     else:
-                        logger.info(f"🚨 DYNAMIC NAVIGATION! Phase: {avoidance_phase.upper()} - {avoidance_duration} frames left")
+                        logger.info(f"DYNAMIC NAVIGATION! Phase: {avoidance_phase.upper()} - {avoidance_duration} frames left")
                 
                 turn_command = get_turn_command_with_avoidance(avg_steering, 
                                                              avoid_objects=should_avoid,
@@ -2220,18 +2234,18 @@ def main():
                     # Try moving forward a bit, but ALWAYS check for avoidance first
                     should_avoid = OBJECT_DETECTION_ENABLED and object_detected
                     if should_avoid:
-                        logger.info(f"🚨 AVOIDANCE DURING SEARCH! Duration: {avoidance_duration} frames")
+                        logger.info(f"AVOIDANCE DURING SEARCH! Duration: {avoidance_duration} frames")
                     turn_command = get_turn_command_with_avoidance(0.0,
                                                                  avoid_objects=should_avoid,
                                                                  line_detected_now=False,
                                                                  line_offset_now=0.0,
                                                                  detected_objects_list=detected_objects if 'detected_objects' in locals() else [])
                     if turn_command in [COMMANDS['AVOID_LEFT'], COMMANDS['AVOID_RIGHT']]:
-                        robot_status = f"🚨 AVOIDING while searching - {avoidance_duration} frames left"
+                        robot_status = f"AVOIDING while searching - {avoidance_duration} frames left"
                     elif turn_command == COMMANDS['FORWARD']:
-                        robot_status = "⬆️ Moving forward to find line"
+                        robot_status = "Moving forward to find line"
                     else:
-                        robot_status = f"🔍 Searching for line"
+                        robot_status = f"Searching for line"
                 else:
                     # Stop and reset if line completely lost (unless avoiding)
                     should_avoid = OBJECT_DETECTION_ENABLED and object_detected
@@ -2244,7 +2258,7 @@ def main():
                         robot_status = "🔍 Line lost but still avoiding object"
                     else:
                         turn_command = COMMANDS['STOP']
-                        robot_status = "🛑 Line lost - stopped"
+                        robot_status = "Line lost - stopped"
                     
                     # Reset search after a pause
                     if search_counter > 60:
@@ -2257,7 +2271,7 @@ def main():
             
             # Send command to ESP32 with avoidance logging
             if turn_command in [COMMANDS['AVOID_LEFT'], COMMANDS['AVOID_RIGHT']]:
-                logger.info(f"🚨 SENDING AVOIDANCE COMMAND: {turn_command}")
+                logger.info(f"SENDING AVOIDANCE COMMAND: {turn_command}")
             
             if esp_connection:
                 success = esp_connection.send_command(turn_command)
@@ -2310,9 +2324,9 @@ def main():
         
         if 'cap' in locals() and cap.isOpened():
             cap.release()
-            logger.info("📷 Camera released")
+            logger.info("Camera released")
         
-        logger.info("✅ Robot stopped cleanly")
+        logger.info(" Robot stopped cleanly")
 
 if __name__ == "__main__":
     main()
