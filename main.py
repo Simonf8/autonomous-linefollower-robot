@@ -9,6 +9,7 @@ import threading
 import json
 from collections import deque
 from flask import Flask, Response, render_template_string, jsonify
+import math
 
 
 try:
@@ -23,7 +24,7 @@ except ImportError:
 
 ESP32_IP = '192.168.2.21'  
 ESP32_PORT = 1234
-CAMERA_WIDTH, CAMERA_HEIGHT = 320, 240
+CAMERA_WIDTH, CAMERA_HEIGHT = 730, 420
 CAMERA_FPS = 5
 
 BLACK_THRESHOLD = 60  # Higher values detect darker lines
@@ -31,8 +32,8 @@ BLUR_SIZE = 5
 MIN_CONTOUR_AREA = 100  # Minimum area to be considered a line
 
 # Multi-zone detection parameters
-ZONE_BOTTOM_HEIGHT = 0.20   # Bottom 20% for primary line following
-ZONE_MIDDLE_HEIGHT = 0.25   # Middle 25% for corner prediction
+ZONE_BOTTOM_HEIGHT = 0.25   # Bottom 20% for primary line following
+ZONE_MIDDLE_HEIGHT = 0.20   # Middle 25% for corner prediction
 ZONE_TOP_HEIGHT = 0.45      # Top 45% for early object detection (much larger!)
 
 # Corner detection parameters
@@ -41,7 +42,7 @@ CORNER_CONFIDENCE_BOOST = 1.2
 CORNER_CIRCULARITY_THRESHOLD = 0.4  # Lower values indicate corners
 CORNER_PREDICTION_THRESHOLD = 0.3   # Confidence needed for corner warning
 
-# Object detection parameters
+# Object detection parameters1
 OBJECT_DETECTION_ENABLED = True  # Enable obstacle detection and avoidance
 USE_YOLO = True  # Use YOLO11n for accurate object detection (recommended)
 USE_SMART_AVOIDANCE = True  # Use smart avoidance with live mapping and learning
@@ -55,7 +56,7 @@ YOLO_CLASSES_TO_AVOID = [0, 39, 41, 43, 44, 45, 46, 47, 56, 57, 58, 59, 60, 61, 
 OBJECT_SIZE_THRESHOLD = 800    # Minimum contour area 
 OBJECT_WIDTH_THRESHOLD = 0.20  # Object width ratio to trigger avoidance
 OBJECT_HEIGHT_THRESHOLD = 0.15  # Object height ratio to trigger avoidance
-OBJECT_AVOIDANCE_DISTANCE = 15  # How many frames to remember object position (much longer avoidance)
+OBJECT_AVOIDANCE_DISTANCE = 35  # How many frames to remember object position (much longer avoidance)
 OBJECT_MIN_ASPECT_RATIO = 0.3  # Shape filtering
 OBJECT_MAX_ASPECT_RATIO = 3.0  # Shape filtering
 OBJECT_LINE_BLOCKING_THRESHOLD = 0.7  # Distance from line to trigger avoidance (very lenient for early detection)
@@ -83,10 +84,11 @@ OBSTACLE_MEMORY_TIMEOUT = 30.0  # Forget obstacles after 30 seconds
 MIN_OBSTACLE_WIDTH = 0.1  # Minimum width ratio to be significant
 MIN_OBSTACLE_HEIGHT = 0.08  # Minimum height ratio to be significant
 
-# Gentle avoidance parameters - much more conservative
-GENTLE_TURN_DURATION = 8      # Longer, gentler turns
-GENTLE_CLEAR_DURATION = 15    # More time to clear obstacle safely  
-GENTLE_RETURN_DURATION = 12   # Measured return to line
+# Gentle avoidance parameters - roundabout style smooth curve
+GENTLE_TURN_DURATION = 6     # Shorter turns to stay closer to line
+GENTLE_CLEAR_DURATION = 2    # About 1 second forward movement
+GENTLE_RETURN_DURATION = 4   # Shorter return - less time turning backls
+
 
 # Dynamic path calculation
 SAFETY_MARGIN = 1.5           # Multiply obstacle size by this for safety
@@ -94,7 +96,7 @@ PATH_CALCULATION_ENABLED = True
 
 # Steering parameters
 STEERING_DEADZONE = 0.12  # Ignore small errors (slightly reduced for more responsiveness)
-MAX_STEERING = 0.95 # Maximum steering value (slightly increased for better responsiveness)
+MAX_STEERING = 0.96 # Maximum steering value (slightly increased for better responsiveness)
 
 # Learning state
 obstacle_memory = {}  # Learning-based obstacle memory
@@ -126,6 +128,35 @@ OBJECT_CLEAR_THRESHOLD = 3      # Frames without seeing object to consider it cl
 AVOIDANCE_TURN_FRAMES = 8      # Frames to turn away from object
 AVOIDANCE_CLEAR_FRAMES = 12    # Frames to go around object  
 AVOIDANCE_RETURN_FRAMES = 10   # Frames to turn back toward line
+
+# Add distance estimation parameters near the top with other parameters
+# Distance estimation using monocular vision
+CAMERA_FOCAL_LENGTH = 200.0  # Estimated focal length in pixels (you may need to calibrate this)
+CAMERA_HEIGHT = 0.12  # Camera height from ground in meters (adjust for your robot)
+CAMERA_ANGLE = 5  # Camera tilt angle in degrees (positive = looking down)
+
+# Known object sizes for distance estimation (in meters)
+KNOWN_OBJECT_SIZES = {
+    'person': 1.7,      # Average person height
+    'car': 1.5,         # Average car height  
+    'bicycle': 1.0,     # Average bicycle height
+    'bottle': 0.25,     # Average bottle height
+    'cup': 0.10,        # Average cup height
+    'chair': 0.85,      # Average chair height
+    'default': 0.3      # Default object height for unknown objects
+}
+
+# Distance-based avoidance thresholds
+SAFE_DISTANCE = 2.0       # Minimum safe distance in meters - start avoidance earlier
+WARNING_DISTANCE = 3.0    # Warning distance in meters - detect threats earlier
+EMERGENCY_DISTANCE = 1.2  # Emergency stop distance - increased to avoid getting too close
+
+# Avoidance path planning
+MIN_AVOIDANCE_ANGLE = 30   # Minimum avoidance angle in degrees
+MAX_AVOIDANCE_ANGLE = 90   # Maximum avoidance angle in degrees
+
+# Frame averaging for stable distance estimation
+DISTANCE_HISTORY_SIZE = 5  # Number of frames to average distance over
 
 # -----------------------------------------------------------------------------
 # --- Global Variables ---
@@ -454,7 +485,8 @@ def detect_objects_with_yolo(frame, top_zone_bbox, line_position=None):
                     # Get class name for debugging
                     class_name = yolo_model.names[class_id] if hasattr(yolo_model, 'names') else f"class_{class_id}"
                     
-                    objects.append({
+                    # Create object data for distance estimation
+                    object_data = {
                         'position': relative_pos,
                         'width_ratio': width_ratio,
                         'height_ratio': height_ratio,
@@ -463,9 +495,35 @@ def detect_objects_with_yolo(frame, top_zone_bbox, line_position=None):
                         'class_name': class_name,
                         'bbox': (int(x - w/2), int(y - h/2), int(w), int(h)),
                         'distance_from_line': distance_from_line if line_position is not None else abs(relative_pos)
+                    }
+                    
+                    # Calculate distance using distance estimator (higher confidence for YOLO)
+                    estimated_distance = distance_estimator.get_object_distance(
+                        object_data, frame_height, frame_width, object_id=f"yolo_{class_id}_{int(center_x)}_{int(y)}"
+                    )
+                    
+                    # Assess threat level
+                    threat_level = distance_estimator.assess_threat_level(estimated_distance, relative_pos)
+                    
+                    # Add distance and threat info to object data
+                    object_data.update({
+                        'estimated_distance': estimated_distance,
+                        'threat_level': threat_level,
+                        'distance_confidence': 0.8  # Higher confidence for YOLO detection
                     })
                     
                     print(f"🔍 YOLO detected: {class_name} (conf: {confidence:.2f}, pos: {relative_pos:.2f})")
+                    
+                    # Enhanced logging with distance info
+                    if estimated_distance:
+                        print(f"    Distance: {estimated_distance:.2f}m, Threat: {threat_level}")
+                    
+                    # Only add objects that pose some threat or are close
+                    if threat_level in ['warning', 'danger', 'emergency'] or (estimated_distance and estimated_distance < WARNING_DISTANCE):
+                        objects.append(object_data)
+                    elif estimated_distance is None:
+                        # Keep objects where we can't estimate distance (safety fallback)
+                        objects.append(object_data)
         
         return objects
         
@@ -507,10 +565,10 @@ def detect_objects_in_zone(binary_roi, width, line_position=None):
         # 2. Check aspect ratio (allow wide range for containers, boxes, etc.)
         if aspect_ratio < OBJECT_MIN_ASPECT_RATIO or aspect_ratio > OBJECT_MAX_ASPECT_RATIO:
             continue
-            
+        
         # 3. Calculate object center position
-            center_x = x + w/2
-            relative_pos = (center_x - width/2) / (width/2)
+        center_x = x + w/2
+        relative_pos = (center_x - width/2) / (width/2)
         
         # 4. Check if object is in the robot's path (more lenient)
         if line_position is not None:
@@ -543,7 +601,8 @@ def detect_objects_in_zone(binary_roi, width, line_position=None):
         # Log detected object for debugging
         print(f"DEBUG: Valid object - Area: {area}, Width: {width_ratio:.2f}, Height: {height_ratio:.2f}, Aspect: {aspect_ratio:.2f}, Pos: {relative_pos:.2f}, Compact: {compactness:.2f}")
         
-        objects.append({
+        # Create object data for distance estimation
+        object_data = {
             'position': relative_pos,
             'width_ratio': width_ratio,
             'height_ratio': height_ratio,
@@ -551,8 +610,33 @@ def detect_objects_in_zone(binary_roi, width, line_position=None):
             'area': area,
             'contour': contour,
             'bbox': (x, y, w, h),
-            'distance_from_line': distance_from_line if line_position is not None else abs(relative_pos)
+            'distance_from_line': distance_from_line if line_position is not None else abs(relative_pos),
+            'class_name': 'default'  # Traditional CV doesn't have class info
+        }
+        
+        # Calculate distance using distance estimator
+        estimated_distance = distance_estimator.get_object_distance(
+            object_data, height, width, object_id=f"cv_{center_x}_{y}"
+        )
+        
+        # Assess threat level
+        threat_level = distance_estimator.assess_threat_level(estimated_distance, relative_pos)
+        
+        # Add distance and threat info to object data
+        object_data.update({
+            'estimated_distance': estimated_distance,
+            'threat_level': threat_level,
+            'distance_confidence': 0.6  # Medium confidence for CV-based detection
         })
+        
+        # Only add objects that pose some threat or are close enough to matter
+        if threat_level in ['warning', 'danger', 'emergency'] or (estimated_distance and estimated_distance < WARNING_DISTANCE):
+            print(f"DEBUG: Threat object - Distance: {estimated_distance:.2f}m, Threat: {threat_level}")
+            objects.append(object_data)
+        elif estimated_distance is None:
+            # Keep objects where we can't estimate distance (safety fallback)
+            print(f"DEBUG: Unknown distance object - keeping for safety")
+            objects.append(object_data)
     
     return objects
 
@@ -677,27 +761,45 @@ def process_image_multi_zone(frame):
     # During avoidance phases, keep object_detected True to maintain avoidance
     elif avoidance_phase != 'none':
         object_detected = True  # Keep avoidance active during navigation phases
+    else:
+        # When not in avoidance and no objects detected, ensure object_detected is False
+        if not detected_objects:
+            object_detected = False
     
     # Determine primary line position
     line_x = None
     confidence = 0.0
     primary_roi = None
     
-    if bottom_confidence > 0.3:
-        # Strong bottom detection - use it
-        line_x = bottom_x
-        confidence = bottom_confidence
-        primary_roi = bottom_roi
-    elif middle_confidence > 0.4 and corner_warning:
-        # Corner prediction mode - use middle detection
-        line_x = middle_x
-        confidence = middle_confidence * 0.8  # Reduce confidence for prediction
-        primary_roi = middle_roi
-    elif bottom_confidence > 0.1:
-        # Weak bottom detection - still usable
-        line_x = bottom_x
-        confidence = bottom_confidence
-        primary_roi = bottom_roi
+    # During avoidance, use whole frame for line detection
+    if avoidance_phase != 'none':
+        # Check all zones for line during avoidance
+        if bottom_confidence > 0.1:
+            line_x = bottom_x
+            confidence = bottom_confidence
+            primary_roi = bottom_roi
+        elif middle_confidence > 0.1:
+            line_x = middle_x
+            confidence = middle_confidence * 0.9
+            primary_roi = middle_roi
+        # Could add top zone line detection here if needed
+    else:
+        # Normal mode - use zone priorities
+        if bottom_confidence > 0.3:
+            # Strong bottom detection - use it
+            line_x = bottom_x
+            confidence = bottom_confidence
+            primary_roi = bottom_roi
+        elif middle_confidence > 0.4 and corner_warning:
+            # Corner prediction mode - use middle detection
+            line_x = middle_x
+            confidence = middle_confidence * 0.8  # Reduce confidence for prediction
+            primary_roi = middle_roi
+        elif bottom_confidence > 0.1:
+            # Weak bottom detection - still usable
+            line_x = bottom_x
+            confidence = bottom_confidence
+            primary_roi = bottom_roi
     
     return {
         'line_x': line_x,
@@ -796,6 +898,159 @@ class SmartAvoidanceSystem:
         return True  # Simplified - always assume clear
 
 smart_avoidance = SmartAvoidanceSystem()
+
+# -----------------------------------------------------------------------------
+# --- Distance Estimation System ---
+# -----------------------------------------------------------------------------
+class DistanceEstimator:
+    def __init__(self):
+        self.distance_history = {}  # Store distance history for each object
+        self.focal_length = CAMERA_FOCAL_LENGTH
+        self.camera_height = CAMERA_HEIGHT
+        self.camera_angle = math.radians(CAMERA_ANGLE)
+        
+    def estimate_distance_by_height(self, object_data, frame_height):
+        """
+        Estimate distance using known object height and pinhole camera model
+        Distance = (Known_Height * Focal_Length) / Pixel_Height
+        """
+        if 'bbox' not in object_data:
+            return None
+            
+        # Get object class name for height lookup
+        class_name = object_data.get('class_name', 'default')
+        known_height = KNOWN_OBJECT_SIZES.get(class_name, KNOWN_OBJECT_SIZES['default'])
+        
+        # Get pixel height of object
+        if 'height_ratio' in object_data:
+            pixel_height = object_data['height_ratio'] * frame_height
+        elif 'bbox' in object_data:
+            bbox = object_data['bbox']
+            pixel_height = bbox[3]  # Height from bbox
+        else:
+            return None
+            
+        if pixel_height <= 0:
+            return None
+            
+        # Calculate distance using pinhole camera model
+        distance = (known_height * self.focal_length) / pixel_height
+        
+        # Apply camera height and angle corrections for ground-based objects
+        if class_name in ['person', 'car', 'bicycle', 'chair']:
+            # Correct for camera height and viewing angle
+            distance = distance * math.cos(self.camera_angle)
+            
+        return max(distance, 0.1)  # Minimum 10cm distance
+    
+    def estimate_distance_by_ground_plane(self, object_data, frame_height, frame_width):
+        """
+        Estimate distance using ground plane assumption
+        For objects on the ground, y-coordinate relates to distance
+        """
+        if 'bbox' not in object_data:
+            return None
+            
+        bbox = object_data['bbox']
+        x, y, w, h = bbox
+        
+        # Object bottom y-coordinate (where it touches ground)
+        object_bottom_y = y + h
+        
+        # Convert to normalized coordinates
+        bottom_ratio = object_bottom_y / frame_height
+        
+        # Objects lower in frame are closer
+        # This is a simplified model - you may need to calibrate
+        if bottom_ratio > 0.8:  # Very bottom of frame
+            return 0.5 + (1.0 - bottom_ratio) * 2.0  # 0.5-0.9m
+        elif bottom_ratio > 0.6:  # Middle-bottom
+            return 1.0 + (0.8 - bottom_ratio) * 5.0  # 1.0-2.0m
+        else:  # Upper part of frame
+            return 3.0 + (0.6 - bottom_ratio) * 10.0  # 3.0+m
+    
+    def estimate_distance_combined(self, object_data, frame_height, frame_width):
+        """
+        Combine multiple distance estimation methods for better accuracy
+        """
+        distances = []
+        
+        # Method 1: Height-based estimation
+        dist_height = self.estimate_distance_by_height(object_data, frame_height)
+        if dist_height and 0.1 < dist_height < 50.0:  # Reasonable range
+            distances.append(dist_height)
+            
+        # Method 2: Ground plane estimation
+        dist_ground = self.estimate_distance_by_ground_plane(object_data, frame_height, frame_width)
+        if dist_ground and 0.1 < dist_ground < 50.0:
+            distances.append(dist_ground)
+            
+        if not distances:
+            return None
+            
+        # Take weighted average (prefer height-based if available)
+        if len(distances) == 1:
+            return distances[0]
+        else:
+            # Weight height-based method more heavily for known objects
+            class_name = object_data.get('class_name', 'default')
+            if class_name in KNOWN_OBJECT_SIZES:
+                return 0.7 * distances[0] + 0.3 * distances[1]  # Height weighted
+            else:
+                return 0.4 * distances[0] + 0.6 * distances[1]  # Ground weighted
+    
+    def update_distance_history(self, object_id, distance):
+        """
+        Maintain rolling average of distances for stability
+        """
+        if object_id not in self.distance_history:
+            self.distance_history[object_id] = deque(maxlen=DISTANCE_HISTORY_SIZE)
+            
+        self.distance_history[object_id].append(distance)
+        
+        # Return smoothed distance
+        return sum(self.distance_history[object_id]) / len(self.distance_history[object_id])
+    
+    def get_object_distance(self, object_data, frame_height, frame_width, object_id=None):
+        """
+        Main method to get distance to an object
+        """
+        distance = self.estimate_distance_combined(object_data, frame_height, frame_width)
+        
+        if distance is None:
+            return None
+            
+        # Apply smoothing if object ID provided
+        if object_id is not None:
+            distance = self.update_distance_history(object_id, distance)
+            
+        return distance
+    
+    def assess_threat_level(self, distance, object_position):
+        """
+        Assess threat level based on distance and position
+        Returns: 'safe', 'warning', 'danger', 'emergency'
+        """
+        if distance is None:
+            return 'unknown'
+            
+        # Consider both distance and lateral position
+        lateral_threat = abs(object_position)  # How much in path (0=center, 1=edge)
+        
+        if distance > WARNING_DISTANCE:
+            return 'safe'
+        elif distance > SAFE_DISTANCE:
+            if lateral_threat < 0.3:  # Directly in path
+                return 'warning'
+            else:
+                return 'safe'
+        elif distance > EMERGENCY_DISTANCE:
+            if lateral_threat < 0.5:
+                return 'danger'
+            else:
+                return 'warning'
+        else:
+            return 'emergency'
 
 # -----------------------------------------------------------------------------
 # --- Intelligent Obstacle Mapping and Path Planning System ---
@@ -979,138 +1234,65 @@ class ObstacleMapper:
 
 # Initialize obstacle mapper
 obstacle_mapper = ObstacleMapper()
+distance_estimator = DistanceEstimator()
 
 def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected_now=False, line_offset_now=0.0, detected_objects_list=None):
-    """Convert steering value to turn command with INTELLIGENT OBSTACLE MAPPING"""
-    global avoidance_phase, avoidance_side, avoidance_frame_count, avoidance_duration, current_obstacle, planned_path
+    """SIMPLE 3-STEP AVOIDANCE: Turn right → Go forward → Turn left back to line"""
+    global avoidance_phase, avoidance_side, avoidance_frame_count, avoidance_duration
     
-    # Clean up old obstacles periodically
-    obstacle_mapper.cleanup_old_obstacles()
-    
-    # INTELLIGENT OBSTACLE NAVIGATION SYSTEM
+    # SIMPLE OBSTACLE AVOIDANCE - NO COMPLEX MAPPING
     if avoid_objects and (detected_objects_list or avoidance_phase != 'none'):
         
-        # START NEW AVOIDANCE SEQUENCE WITH MAPPING
+        # START SIMPLE AVOIDANCE
         if avoidance_phase == 'none' and detected_objects_list:
-            main_object = detected_objects_list[0]
-            
-            # Add obstacle to memory and calculate optimal path
-            obstacle_id = obstacle_mapper.add_obstacle(main_object, line_offset_now)
-            planned_path = obstacle_mapper.calculate_avoidance_path(main_object, line_offset_now)
-            current_obstacle = main_object
-            
-            # Use calculated path parameters
-            avoidance_side = planned_path['side']
-            avoidance_phase = 'mapping'  # Start with mapping phase
-            avoidance_frame_count = 0
-            avoidance_duration = GENTLE_TURN_DURATION  # Use gentle parameters
-            
-            logger.info(f"🗺️ SMART AVOIDANCE STARTED: {main_object.get('class_name', 'object')} "
-                       f"({main_object['width_ratio']:.2f}x{main_object['height_ratio']:.2f}) "
-                       f"at {main_object['position']:.2f} - Path: {avoidance_side} side")
+            logger.info("🚨 OBSTACLE DETECTED - Starting simple avoidance: RIGHT → FORWARD → LEFT")
+            avoidance_phase = 'turning_right'
+            avoidance_duration = 3  # Turn right for 3 frames (0.6 seconds)
+            return COMMANDS['AVOID_RIGHT']
         
-        # EXECUTE INTELLIGENT AVOIDANCE PHASES
-        avoidance_frame_count += 1
-        
-        if avoidance_phase == 'mapping':
-            # PHASE 1: Gentle initial turn based on calculated path
+        # STEP 1: Turn RIGHT away from obstacle  
+        elif avoidance_phase == 'turning_right':
             avoidance_duration -= 1
-            if avoidance_duration <= 0:
-                avoidance_phase = 'avoiding'
-                avoidance_duration = GENTLE_TURN_DURATION
-                logger.info(f"🗺️ PHASE 2: GENTLE NAVIGATION around {planned_path['obstacle_width']:.2f}x{planned_path['obstacle_height']:.2f} obstacle")
-            
-            logger.info(f"🗺️ PHASE 1: Mapping obstacle, gentle turn {avoidance_side} ({avoidance_duration} frames left)")
-            return COMMANDS['AVOID_RIGHT'] if avoidance_side == 'right' else COMMANDS['AVOID_LEFT']
+            if avoidance_duration > 0:
+                logger.info(f"STEP 1: Turning RIGHT away from obstacle ({avoidance_duration} frames left)")
+                return COMMANDS['AVOID_RIGHT']
+            else:
+                # Go to step 2
+                avoidance_phase = 'going_forward'
+                avoidance_duration = 6  # Go forward for 6 frames (~1.2 seconds)
+                logger.info("STEP 2: Going FORWARD to clear obstacle")
+                return COMMANDS['FORWARD']
         
-        elif avoidance_phase == 'avoiding':
-            # PHASE 2: Gentle turn until obstacle cleared from path
-            if obstacle_mapper.is_obstacle_cleared(current_obstacle, detected_objects_list):
-                # Obstacle cleared! Switch to clearing phase
-                avoidance_phase = 'clearing'
-                avoidance_duration = planned_path.get('estimated_clear_frames', GENTLE_CLEAR_DURATION)
-                logger.info(f"🗺️ PHASE 3: Obstacle cleared, moving forward {avoidance_duration} frames")
+        # STEP 2: Go FORWARD past obstacle
+        elif avoidance_phase == 'going_forward':
+            avoidance_duration -= 1
+            if avoidance_duration > 0:
+                logger.info(f"STEP 2: Going FORWARD past obstacle ({avoidance_duration} frames left)")
                 return COMMANDS['FORWARD']
             else:
-                avoidance_duration -= 1
-                if avoidance_duration <= 0:
-                    # Continue avoiding but reset duration
-                    avoidance_duration = GENTLE_TURN_DURATION // 2  # Shorter subsequent turns
-                    logger.info(f"🗺️ PHASE 2: Continue gentle navigation {avoidance_side}")
-                else:
-                    logger.info(f"🗺️ PHASE 2: Gentle turn {avoidance_side} ({avoidance_duration} frames left)")
-                
-                return COMMANDS['AVOID_RIGHT'] if avoidance_side == 'right' else COMMANDS['AVOID_LEFT']
+                # Go to step 3
+                avoidance_phase = 'turning_left'
+                avoidance_duration = 6  # Turn left for 6 frames to get back to line
+                logger.info("STEP 3: Turning LEFT back to line")
+                return COMMANDS['AVOID_LEFT']
         
-        elif avoidance_phase == 'clearing':
-            global clearing_frame_count, last_avoidance_clear_frames, last_avoidance_clear_distance
-            clearing_frame_count += 1
-            # PHASE 3: Move forward calculated distance based on obstacle size
-            avoidance_duration -= 1
-            if line_detected_now and abs(line_offset_now) < 0.3:
-                # Record clearing metrics before transition
-                last_avoidance_clear_frames = clearing_frame_count
-                last_avoidance_clear_distance = (clearing_frame_count / CAMERA_FPS) * ROBOT_SPEED_M_S
-                clearing_frame_count = 0
-                # Line found during clearing! Smart early transition
-                avoidance_phase = 'returning'
-                avoidance_duration = GENTLE_RETURN_DURATION // 2  # Shorter return since line found
-                logger.info(f"🗺️ PHASE 4: LINE FOUND during clearing! Smart transition to return phase")
-                return COMMANDS['FORWARD']
-            elif avoidance_duration <= 0:
-                # Record clearing metrics before transition
-                last_avoidance_clear_frames = clearing_frame_count
-                last_avoidance_clear_distance = (clearing_frame_count / CAMERA_FPS) * ROBOT_SPEED_M_S
-                clearing_frame_count = 0
-                # Switch to Phase 4: Smart return to line
-                avoidance_phase = 'returning'
-                avoidance_duration = GENTLE_RETURN_DURATION
-                logger.info(f"🗺️ PHASE 4: SMART RETURN - Gentle turn {opposite_direction(avoidance_side)} to find line")
-                return COMMANDS['AVOID_LEFT'] if avoidance_side == 'right' else COMMANDS['AVOID_RIGHT']
-            else:
-                # Continue clearing calculated distance
-                logger.info(f"🗺️ PHASE 3: Clearing obstacle safely - {avoidance_duration} frames left")
-                return COMMANDS['FORWARD']
-        
-        elif avoidance_phase == 'returning':
-            # PHASE 4: Gentle turn back toward line
-            avoidance_duration -= 1
-            if line_detected_now and abs(line_offset_now) < 0.2:
-                # Line found! Complete smart avoidance
-                logger.info(f"🗺️ SUCCESS: Line reacquired! Smart avoidance complete - resuming precise following")
-                
-                # Mark successful avoidance in memory
-                if current_obstacle:
-                    obstacle_id = obstacle_mapper._generate_obstacle_id(current_obstacle)
-                    if obstacle_id in obstacle_mapper.obstacle_memory:
-                        obstacle_mapper.obstacle_memory[obstacle_id]['avoidance_count'] += 1
-                
-                # Reset all avoidance state
+        # STEP 3: Turn LEFT back to line
+        elif avoidance_phase == 'turning_left':
+            # Check if we found the line early
+            if line_detected_now and abs(line_offset_now) < 0.4:
+                logger.info("✅ LINE FOUND! Avoidance complete - back to line following")
                 avoidance_phase = 'none'
-                avoidance_side = 'none'
-                avoidance_frame_count = 0
-                avoidance_duration = 0
-                current_obstacle = None
-                planned_path = None
-                
-                # Return to normal line following
-                if abs(steering) < STEERING_DEADZONE:
-                    return COMMANDS['FORWARD']
-                return COMMANDS['RIGHT'] if steering < 0 else COMMANDS['LEFT']
-            elif avoidance_duration <= 0:
-                # Return phase complete - end smart avoidance
-                logger.info(f"🗺️ RETURN COMPLETE: Resuming forward search with obstacle memory")
-                avoidance_phase = 'none'
-                avoidance_side = 'none'
-                avoidance_frame_count = 0
-                avoidance_duration = 0
-                current_obstacle = None
-                planned_path = None
-                return COMMANDS['FORWARD']  # Move forward to search
+                return COMMANDS['FORWARD']
+            
+            avoidance_duration -= 1
+            if avoidance_duration > 0:
+                logger.info(f"STEP 3: Turning LEFT back to line ({avoidance_duration} frames left)")
+                return COMMANDS['AVOID_LEFT']
             else:
-                # Continue gentle return toward line
-                logger.info(f"🗺️ PHASE 4: Gentle return {opposite_direction(avoidance_side)} - {avoidance_duration} frames left")
-                return COMMANDS['AVOID_LEFT'] if avoidance_side == 'right' else COMMANDS['AVOID_RIGHT']
+                # Avoidance complete
+                logger.info("✅ Simple avoidance complete - resuming line search")
+                avoidance_phase = 'none'
+                return COMMANDS['FORWARD']
     
     # NORMAL LINE FOLLOWING BEHAVIOR
     if abs(steering) < STEERING_DEADZONE:
@@ -1124,6 +1306,16 @@ def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected
 def opposite_direction(direction):
     """Helper function to get opposite direction"""
     return 'left' if direction == 'right' else 'right'
+
+def get_turn_command_without_avoidance(steering):
+    """Get normal turn command without avoidance logic"""
+    if abs(steering) < STEERING_DEADZONE:
+        return COMMANDS['FORWARD']
+    
+    if abs(steering) > 0.45:
+        return COMMANDS['RIGHT'] if steering < 0 else COMMANDS['LEFT']
+    
+    return COMMANDS['RIGHT'] if steering < 0 else COMMANDS['LEFT']
 
 # -----------------------------------------------------------------------------
 # --- Enhanced Visualization ---
@@ -1171,17 +1363,33 @@ def draw_debug_info(frame, detection_data):
         # Adjust y coordinate for top zone
         y_adjusted = zones.get('top', (0, 0))[0] + y
         
-        # Draw bounding box
-        cv2.rectangle(frame, (x, y_adjusted), (x + w, y_adjusted + h), (0, 0, 255), 2)
-        
         # Draw object label (YOLO class name if available, otherwise generic)
         if 'class_name' in obj:
             label = f"{obj['class_name']} ({obj['confidence']:.2f})"
         else:
             label = "OBJECT"
         
+        # Add distance and threat level to label
+        if 'estimated_distance' in obj and obj['estimated_distance']:
+            label += f" {obj['estimated_distance']:.1f}m"
+        if 'threat_level' in obj:
+            threat = obj['threat_level']
+            threat_colors = {
+                'safe': (0, 255, 0),       # Green
+                'warning': (0, 255, 255),  # Yellow  
+                'danger': (0, 165, 255),   # Orange
+                'emergency': (0, 0, 255)   # Red
+            }
+            label += f" [{threat.upper()}]"
+            bbox_color = threat_colors.get(threat, (0, 0, 255))
+        else:
+            bbox_color = (0, 0, 255)
+        
+        # Draw bounding box with threat-level color
+        cv2.rectangle(frame, (x, y_adjusted), (x + w, y_adjusted + h), bbox_color, 2)
+        
         cv2.putText(frame, label, (x, y_adjusted - 5), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, bbox_color, 1)
         
         # Draw warning indicator
         cv2.putText(frame, "OBSTACLE DETECTED", (width//2 - 100, 50),
@@ -1908,25 +2116,43 @@ def api_status():
         'last_avoidance_clear_distance': last_avoidance_clear_distance
     }
     
-    return jsonify({
+    # Cast values to native types to ensure JSON serializability
+    response = {
         'status': robot_status,
         'command': turn_command,
-        'offset': line_offset,
-        'fps': current_fps,
-        'confidence': confidence,
-        'line_detected': line_detected,
-        'esp_connected': esp_connected,
-        'uptime': uptime,
-        'total_frames': robot_stats.get('total_frames', 0),
-        'corner_count': robot_stats.get('corner_count', 0),
-        'objects_detected': robot_stats.get('objects_detected', 0),
-        'avoidance_maneuvers': robot_stats.get('avoidance_maneuvers', 0),
-        'corner_warning': corner_warning,
-        'object_detected': object_detected,
-        'smart_avoidance': avoidance_info,
-        'obstacle_mapping': obstacle_info,
-        'pid_params': pid_params
-    })
+        'offset': float(line_offset),
+        'fps': float(current_fps),
+        'confidence': float(confidence),
+        'line_detected': bool(line_detected),
+        'esp_connected': bool(esp_connected),
+        'uptime': float(uptime),
+        'total_frames': int(robot_stats.get('total_frames', 0)),
+        'corner_count': int(robot_stats.get('corner_count', 0)),
+        'objects_detected': int(robot_stats.get('objects_detected', 0)),
+        'avoidance_maneuvers': int(robot_stats.get('avoidance_maneuvers', 0)),
+        'corner_warning': bool(corner_warning),
+        'object_detected': bool(object_detected),
+        'smart_avoidance': {
+            'strategy': avoidance_info['strategy'],
+            'learned_maneuvers': int(avoidance_info['learned_maneuvers']),
+            'performance_avg': float(avoidance_info['performance_avg'])
+        },
+        'obstacle_mapping': {
+            'total_mapped': int(obstacle_info['total_mapped']),
+            'recent_obstacles': int(obstacle_info['recent_obstacles']),
+            'avg_significance': float(obstacle_info['avg_significance']),
+            'current_phase': obstacle_info['current_phase'],
+            'planned_path_side': obstacle_info['planned_path_side'],
+            'planned_path_estimated_clear_frames': int(obstacle_info['planned_path_estimated_clear_frames']),
+            'last_avoidance_clear_distance': float(obstacle_info['last_avoidance_clear_distance'])
+        },
+        'pid_params': {
+            'kp': float(pid_params['kp']),
+            'ki': float(pid_params['ki']),
+            'kd': float(pid_params['kd'])
+        }
+    }
+    return jsonify(response)
 
 @app.route('/api/learning')
 def api_learning():
@@ -2153,10 +2379,12 @@ def main():
                     # Enhanced status with intelligent obstacle mapping phases
                     if avoidance_phase == 'mapping':
                         robot_status = f"MAPPING: Analyzing obstacle geometry, gentle turn {avoidance_side}"
-                    elif avoidance_phase == 'avoiding':
-                        robot_status = f"NAVIGATING: Smart path around obstacle ({avoidance_duration} frames)"
                     elif avoidance_phase == 'clearing':
-                        robot_status = f"CLEARING: Safe distance based on obstacle size ({avoidance_duration} frames)"
+                        robot_status = f"ROUNDABOUT: Initial curve forward ({avoidance_duration} frames)"
+                    elif avoidance_phase == 'curving':
+                        robot_status = f"ROUNDABOUT: Continuing curve around obstacle ({avoidance_duration} frames)"
+                    elif avoidance_phase == 'completing':
+                        robot_status = f"ROUNDABOUT: Completing curve forward ({avoidance_duration} frames)"
                     elif avoidance_phase == 'returning':
                         if confidence > 0.3:
                             robot_status = f"RETURNING: Line detected! Smart transition (offset: {line_offset:.2f})"
@@ -2208,66 +2436,67 @@ def main():
                 logger.debug(f"Line at x={line_x}, offset={line_offset:.2f}, steering={steering_value:.2f}")
                 
             else:
-                # Line not detected - search mode
+                # Line not detected
                 line_detected = False
-                search_counter += 1
-                
-                if search_counter < 5:
-                    # Keep last command briefly (helps with short line gaps)
-                    robot_status = "🔍 Searching for line (brief gap)"
-                elif search_counter < 15:
-                    # Try turning based on last known position
-                    if last_known_good_offset < 0:
-                        turn_command = COMMANDS['RIGHT']
-                        robot_status = "Searching right (last seen left)"
-                    else:
-                        turn_command = COMMANDS['LEFT']
-                        robot_status = "Searching left (last seen right)"
-                elif search_counter < 30:
-                    # Switch direction
-                    if turn_command == COMMANDS['LEFT']:
-                        turn_command = COMMANDS['RIGHT']
-                    else:
-                        turn_command = COMMANDS['LEFT']
-                    robot_status = f"Searching opposite direction ({search_counter})"
-                elif search_counter < 45:
-                    # Try moving forward a bit, but ALWAYS check for avoidance first
-                    should_avoid = OBJECT_DETECTION_ENABLED and object_detected
-                    if should_avoid:
-                        logger.info(f"AVOIDANCE DURING SEARCH! Duration: {avoidance_duration} frames")
-                    turn_command = get_turn_command_with_avoidance(0.0,
-                                                                 avoid_objects=should_avoid,
-                                                                 line_detected_now=False,
-                                                                 line_offset_now=0.0,
-                                                                 detected_objects_list=detected_objects if 'detected_objects' in locals() else [])
-                    if turn_command in [COMMANDS['AVOID_LEFT'], COMMANDS['AVOID_RIGHT']]:
-                        robot_status = f"AVOIDING while searching - {avoidance_duration} frames left"
-                    elif turn_command == COMMANDS['FORWARD']:
-                        robot_status = "Moving forward to find line"
-                    else:
-                        robot_status = f"Searching for line"
+                # If we're in an avoidance sequence, always defer to FSM
+                if avoidance_phase != 'none':
+                    turn_command = get_turn_command_with_avoidance(
+                        0.0,
+                        avoid_objects=True,
+                        line_detected_now=False,
+                        line_offset_now=0.0,
+                        detected_objects_list=detected_objects if 'detected_objects' in locals() else []
+                    )
+                    robot_status = f"AVOIDING: {avoidance_phase}"
                 else:
-                    # Stop and reset if line completely lost (unless avoiding)
-                    should_avoid = OBJECT_DETECTION_ENABLED and object_detected
-                    if should_avoid:
-                        turn_command = get_turn_command_with_avoidance(0.0,
-                                                                     avoid_objects=should_avoid,
-                                                                     line_detected_now=False,
-                                                                     line_offset_now=0.0,
-                                                                     detected_objects_list=detected_objects if 'detected_objects' in locals() else [])
-                        robot_status = "🔍 Line lost but still avoiding object"
+                    # Regular search mode
+                    search_counter += 1
+                    if search_counter < 5:
+                        robot_status = "🔍 Searching for line (brief gap)"
+                    elif search_counter < 15:
+                        if last_known_good_offset < 0:
+                            turn_command = COMMANDS['RIGHT']
+                            robot_status = "Searching right (last seen left)"
+                        else:
+                            turn_command = COMMANDS['LEFT']
+                            robot_status = "Searching left (last seen right)"
+                    elif search_counter < 30:
+                        turn_command = COMMANDS['RIGHT'] if turn_command == COMMANDS['LEFT'] else COMMANDS['LEFT']
+                        robot_status = f"Searching opposite direction ({search_counter})"
+                    elif search_counter < 45:
+                        should_avoid = OBJECT_DETECTION_ENABLED and object_detected
+                        if should_avoid:
+                            logger.info(f"AVOIDANCE DURING SEARCH! Duration: {avoidance_duration} frames")
+                        turn_command = get_turn_command_with_avoidance(
+                            0.0, avoid_objects=should_avoid,
+                            line_detected_now=False, line_offset_now=0.0,
+                            detected_objects_list=detected_objects if 'detected_objects' in locals() else []
+                        )
+                        if turn_command in [COMMANDS['AVOID_LEFT'], COMMANDS['AVOID_RIGHT']]:
+                            robot_status = f"AVOIDING while searching - {avoidance_duration} frames left"
+                        elif turn_command == COMMANDS['FORWARD']:
+                            robot_status = "Moving forward to find line"
+                        else:
+                            robot_status = "Searching for line"
                     else:
-                        turn_command = COMMANDS['STOP']
-                        robot_status = "Line lost - stopped"
-                    
-                    # Reset search after a pause
-                    if search_counter > 60:
-                        search_counter = 0
-                        last_known_good_offset = 0.0
-                        pid.reset()
-                        offset_history.clear()
-                        steering_history.clear()
-                        logger.info("Search pattern reset")
+                        should_avoid = OBJECT_DETECTION_ENABLED and object_detected
+                        if should_avoid:
+                            turn_command = get_turn_command_with_avoidance(
+                                0.0, avoid_objects=should_avoid,
+                                line_detected_now=False, line_offset_now=0.0,
+                                detected_objects_list=detected_objects if 'detected_objects' in locals() else []
+                            )
+                            robot_status = "🔍 Line lost but still avoiding object"
+                        else:
+                            turn_command = COMMANDS['STOP']
+                            robot_status = "Line lost - stopped"
+                        if search_counter > 60:
+                            search_counter = 0
+                            last_known_good_offset = 0.0
+                            pid.reset()
+                            offset_history.clear()
+                            steering_history.clear()
+                            logger.info("Search pattern reset")
             
             # Send command to ESP32 with avoidance logging
             if turn_command in [COMMANDS['AVOID_LEFT'], COMMANDS['AVOID_RIGHT']]:
