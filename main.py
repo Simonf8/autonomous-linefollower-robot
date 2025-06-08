@@ -1397,44 +1397,44 @@ def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected
         
         # START SMOOTH CURVE AVOIDANCE
         if avoidance_phase == 'none' and detected_objects_list:
-            logger.info("🚨 OBSTACLE DETECTED - Starting BIG smooth curve avoidance")
+            logger.info("🚨 OBSTACLE DETECTED - Starting smooth curve avoidance")
             avoidance_phase = 'curve_right'
-            avoidance_duration = 25  # BIGGER curve right while moving forward
+            avoidance_duration = 18  # Nice sized curve right while moving forward
             return COMMANDS['RIGHT']  # Start curving right
         
-        # PHASE 1: BIG Curve RIGHT while moving forward
+        # PHASE 1: Smooth Curve RIGHT while moving forward
         elif avoidance_phase == 'curve_right':
             avoidance_duration -= 1
-            if avoidance_duration > 18:
-                # Strong right curve initially - LONGER for bigger curve
-                logger.info(f"BIG CURVE 1: Strong right curve forward ({avoidance_duration} frames left)")
+            if avoidance_duration > 12:
+                # Strong right curve initially
+                logger.info(f"CURVE 1: Strong right curve forward ({avoidance_duration} frames left)")
                 return COMMANDS['RIGHT']
-            elif avoidance_duration > 10:
+            elif avoidance_duration > 6:
                 # Medium right curve, mostly forward
-                logger.info(f"BIG CURVE 1: Medium right curve forward ({avoidance_duration} frames left)")
+                logger.info(f"CURVE 1: Medium right curve forward ({avoidance_duration} frames left)")
                 # Alternate between forward and right for smooth curve
                 return COMMANDS['FORWARD'] if avoidance_duration % 2 == 0 else COMMANDS['RIGHT']
-            elif avoidance_duration > 3:
+            elif avoidance_duration > 2:
                 # Gentle right curve, mostly forward
-                logger.info(f"BIG CURVE 1: Gentle right curve forward ({avoidance_duration} frames left)")
+                logger.info(f"CURVE 1: Gentle right curve forward ({avoidance_duration} frames left)")
                 # More forward motion for smoother curve
                 return COMMANDS['FORWARD'] if avoidance_duration % 3 != 0 else COMMANDS['RIGHT']
             elif avoidance_duration > 0:
                 # Pure forward to clear obstacle
-                logger.info(f"BIG CURVE 1: Forward clear ({avoidance_duration} frames left)")
+                logger.info(f"CURVE 1: Forward clear ({avoidance_duration} frames left)")
                 return COMMANDS['FORWARD']
             else:
-                # Start return curve - BIGGER return curve
+                # Start return curve
                 avoidance_phase = 'curve_left'
-                avoidance_duration = 30  # MUCH longer return curve for bigger sweep
-                logger.info("BIG CURVE 2: Starting big left return curve")
+                avoidance_duration = 22  # Good sized return curve
+                logger.info("CURVE 2: Starting left return curve")
                 return COMMANDS['LEFT']
         
-        # PHASE 2: BIG Curve LEFT to return to line while moving forward
+        # PHASE 2: Smooth Curve LEFT to return to line while moving forward
         elif avoidance_phase == 'curve_left':
             # Check if we found the line early
             if line_detected_now and abs(line_offset_now) < 0.3:
-                logger.info("✅ LINE FOUND DURING BIG CURVE! Avoidance complete")
+                logger.info("✅ LINE FOUND DURING CURVE! Avoidance complete")
                 avoidance_phase = 'none'
                 # Gentle steering toward line center
                 if abs(line_offset_now) < 0.1:
@@ -1443,31 +1443,31 @@ def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected
                     return COMMANDS['LEFT'] if line_offset_now > 0 else COMMANDS['RIGHT']
             
             avoidance_duration -= 1
-            if avoidance_duration > 22:
-                # Strong left curve initially - LONGER for bigger curve
-                logger.info(f"BIG CURVE 2: Strong left curve forward ({avoidance_duration} frames left)")
+            if avoidance_duration > 16:
+                # Strong left curve initially
+                logger.info(f"CURVE 2: Strong left curve forward ({avoidance_duration} frames left)")
                 return COMMANDS['LEFT']
-            elif avoidance_duration > 15:
+            elif avoidance_duration > 10:
                 # Medium left curve
-                logger.info(f"BIG CURVE 2: Medium left curve forward ({avoidance_duration} frames left)")
+                logger.info(f"CURVE 2: Medium left curve forward ({avoidance_duration} frames left)")
                 # Alternate between forward and left for smooth curve
                 return COMMANDS['FORWARD'] if avoidance_duration % 2 == 0 else COMMANDS['LEFT']
-            elif avoidance_duration > 8:
+            elif avoidance_duration > 4:
                 # Gentle left curve, mostly forward
-                logger.info(f"BIG CURVE 2: Gentle left curve forward ({avoidance_duration} frames left)")
+                logger.info(f"CURVE 2: Gentle left curve forward ({avoidance_duration} frames left)")
                 # More forward motion for smoother curve
                 return COMMANDS['FORWARD'] if avoidance_duration % 3 != 0 else COMMANDS['LEFT']
             elif avoidance_duration > 0:
                 # Search pattern while moving forward
-                logger.info(f"BIG CURVE 2: Search forward ({avoidance_duration} frames left)")
+                logger.info(f"CURVE 2: Search forward ({avoidance_duration} frames left)")
                 # Gentle search oscillation
                 return COMMANDS['LEFT'] if avoidance_duration % 4 < 2 else COMMANDS['RIGHT']
             else:
                 # Final search phase if still no line
                 avoidance_phase = 'final_search'
-                avoidance_duration = 25  # Longer final search too
-                logger.info("PHASE 3: Final BIG search pattern")
-                speech_manager.announce("Searching for line after big curve.", "searching")
+                avoidance_duration = 20  # Reasonable final search
+                logger.info("PHASE 3: Final search pattern")
+                speech_manager.announce("Searching for line after curve.", "searching")
                 return COMMANDS['FORWARD']
         
         # PHASE 3: Final search while moving forward
@@ -1484,15 +1484,15 @@ def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected
             
             avoidance_duration -= 1
             if avoidance_duration > 0:
-                # Wide search pattern while moving forward
-                if avoidance_duration > 15:
+                # Good search pattern while moving forward
+                if avoidance_duration > 14:
                     logger.info(f"SEARCH: Left search forward ({avoidance_duration} frames left)")
                     return COMMANDS['LEFT'] if avoidance_duration % 3 == 0 else COMMANDS['FORWARD']
-                elif avoidance_duration > 5:
+                elif avoidance_duration > 6:
                     logger.info(f"SEARCH: Right search forward ({avoidance_duration} frames left)")
                     return COMMANDS['RIGHT'] if avoidance_duration % 3 == 0 else COMMANDS['FORWARD']
                 else:
-                    logger.info(f"SEARCH: Pure forward ({avoidance_duration} frames left)")
+                    logger.info(f"SEARCH: Pure forward sweep ({avoidance_duration} frames left)")
                     return COMMANDS['FORWARD']
             else:
                 # Complete timeout - resume normal operation
