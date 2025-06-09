@@ -54,9 +54,9 @@ BLUR_SIZE = 5
 MIN_CONTOUR_AREA = 100  # Minimum area to be considered a line
 
 # Multi-zone detection parameters
-ZONE_BOTTOM_HEIGHT = 0.25   # Bottom 20% for primary line following
+ZONE_BOTTOM_HEIGHT = 0.30   # Bottom 20% for primary line following
 ZONE_MIDDLE_HEIGHT = 0.20   # Middle 25% for corner prediction
-ZONE_TOP_HEIGHT = 0.45      # Top 45% for early object detection (much larger!)
+ZONE_TOP_HEIGHT = 0.50      # Top 45% for early object detection (much larger!)
 
 # Corner detection parameters
 CORNER_DETECTION_ENABLED = True
@@ -64,14 +64,14 @@ CORNER_CONFIDENCE_BOOST = 1.2
 CORNER_CIRCULARITY_THRESHOLD = 0.4  # Lower values indicate corners
 CORNER_PREDICTION_THRESHOLD = 0.3   # Confidence needed for corner warning
 
-# Object detection parameters1
+# Object detection parameters
 OBJECT_DETECTION_ENABLED = True  # Enable obstacle detection and avoidance
 USE_YOLO = True  # Use YOLO11n for accurate object detection (recommended)
 USE_SMART_AVOIDANCE = True  # Use smart avoidance with live mapping and learning
 
 # YOLO Configuration
 YOLO_MODEL_SIZE = "yolo11n.pt"  # Nano model for speed (yolo11s.pt, yolo11m.pt for more accuracy)
-YOLO_CONFIDENCE_THRESHOLD = 0.5  # Minimum confidence for object detection
+YOLO_CONFIDENCE_THRESHOLD = 0.3  # Lower threshold for better detection
 YOLO_CLASSES_TO_AVOID = [0, 39, 41, 43, 44, 45, 46, 47, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79]  # person, bottle, cup, bowl, etc.
 
 # Legacy CV-based detection parameters (fallback if YOLO not available)
@@ -84,21 +84,21 @@ OBJECT_MAX_ASPECT_RATIO = 3.0  # Shape filtering
 OBJECT_LINE_BLOCKING_THRESHOLD = 0.7  # Distance from line to trigger avoidance (very lenient for early detection)
 
 # Adaptive PID controller values with auto-tuning
-KP = 0.35  # Lower initial proportional gain to reduce overshoot
-KI = 0.005 # Lower integral gain
-KD = 0.25  # Higher derivative gain for better dampening
-MAX_INTEGRAL = 2.0  # Lower integral windup limit
+KP = 0.25  # Moderate proportional gain for smooth response
+KI = 0.001 # Very low integral to prevent windup
+KD = 0.12  # Moderate derivative for stability
+MAX_INTEGRAL = 1.0  # Lower integral limit
 
 # Auto-tuning parameters
 PID_LEARNING_RATE = 0.0005  # Slower learning to avoid aggressive changes
 PID_ADAPTATION_WINDOW = 100  # Longer window for more stable adaptation
 PERFORMANCE_THRESHOLD = 0.12  # Tighter performance target
 
-# Commands for ESP32 - GENTLE PROGRESSIVE AVOIDANCE
+# Commands for ESP32 - STRONGER AVOIDANCE COMMANDS
 COMMANDS = {'FORWARD': 'FORWARD', 'LEFT': 'LEFT', 'RIGHT': 'RIGHT', 'STOP': 'STOP', 
-           'AVOID_LEFT': 'LEFT', 'AVOID_RIGHT': 'RIGHT'}  # Use gentle turns for avoidance
-SPEED = 'SLOW'  # Default speed
-ROBOT_SPEED_M_S = 0.1  # Approximate robot speed in m/s for distance estimation
+           'AVOID_LEFT': 'LEFT', 'AVOID_RIGHT': 'RIGHT', 'STRONG_LEFT': 'LEFT', 'STRONG_RIGHT': 'RIGHT'}
+SPEED = 'MEDIUM'  # Faster speed for better control
+ROBOT_SPEED_M_S = 0.15  # Slightly faster robot speed
 
 # Enhanced obstacle mapping parameters
 OBSTACLE_MAP_SIZE = 50  # Remember last 50 obstacles
@@ -107,18 +107,17 @@ MIN_OBSTACLE_WIDTH = 0.1  # Minimum width ratio to be significant
 MIN_OBSTACLE_HEIGHT = 0.08  # Minimum height ratio to be significant
 
 # Gentle avoidance parameters - roundabout style smooth curve
-GENTLE_TURN_DURATION = 6     # Shorter turns to stay closer to line
-GENTLE_CLEAR_DURATION = 2    # About 1 second forward movement
-GENTLE_RETURN_DURATION = 4   # Shorter return - less time turning backls
-
+GENTLE_TURN_DURATION = 15     # Longer, stronger turns to actually avoid obstacles
+GENTLE_CLEAR_DURATION = 8     # About 1 second forward movement
+GENTLE_RETURN_DURATION = 12   # Return turn duration
 
 # Dynamic path calculation
 SAFETY_MARGIN = 1.5           # Multiply obstacle size by this for safety
 PATH_CALCULATION_ENABLED = True
 
-# Steering parameters
-STEERING_DEADZONE = 0.12  # Ignore small errors (slightly reduced for more responsiveness)
-MAX_STEERING = 0.96 # Maximum steering value (slightly increased for better responsiveness)
+# Steering parameters - SMOOTH AND STABLE
+STEERING_DEADZONE = 0.15  # Larger deadzone to prevent overreaction
+MAX_STEERING = 0.8        # Limited steering range to prevent huge turns
 
 # Learning state
 obstacle_memory = {}  # Learning-based obstacle memory
@@ -146,10 +145,10 @@ AVOIDANCE_CLEAR_DURATION = 12   # Phase 2: Move forward to clear object
 AVOIDANCE_RETURN_DURATION = 15  # Phase 3: Turn back to find line
 OBJECT_CLEAR_THRESHOLD = 3      # Frames without seeing object to consider it cleared
 
-# Avoidance phase durations
-AVOIDANCE_TURN_FRAMES = 8      # Frames to turn away from object
-AVOIDANCE_CLEAR_FRAMES = 12    # Frames to go around object  
-AVOIDANCE_RETURN_FRAMES = 10   # Frames to turn back toward line
+# Avoidance phase durations - STRONGER AVOIDANCE
+AVOIDANCE_TURN_FRAMES = 15     # More frames to turn away from object
+AVOIDANCE_CLEAR_FRAMES = 20    # More frames to go around object  
+AVOIDANCE_RETURN_FRAMES = 15   # More frames to turn back toward line
 
 # Add distance estimation parameters near the top with other parameters
 # Distance estimation using monocular vision
@@ -168,10 +167,10 @@ KNOWN_OBJECT_SIZES = {
     'default': 0.3      # Default object height for unknown objects
 }
 
-# Distance-based avoidance thresholds
-SAFE_DISTANCE = 2.0       # Minimum safe distance in meters - start avoidance earlier
-WARNING_DISTANCE = 3.0    # Warning distance in meters - detect threats earlier
-EMERGENCY_DISTANCE = 1.2  # Emergency stop distance - increased to avoid getting too close
+# Distance-based avoidance thresholds - EARLIER DETECTION
+SAFE_DISTANCE = 3.0       # Start avoidance much earlier
+WARNING_DISTANCE = 4.0    # Warning distance - detect threats very early
+EMERGENCY_DISTANCE = 2.0  # Emergency stop distance
 
 # Avoidance path planning
 MIN_AVOIDANCE_ANGLE = 30   # Minimum avoidance angle in degrees
@@ -360,8 +359,8 @@ class SpeechManager:
 # -----------------------------------------------------------------------------
 # --- PID Controller ---
 # -----------------------------------------------------------------------------
-class AdaptivePID:
-    def __init__(self, kp, ki, kd, max_integral=5.0):
+class SimplePID:
+    def __init__(self, kp, ki, kd, max_integral=1.0):
         self.kp = kp
         self.ki = ki
         self.kd = kd
@@ -370,20 +369,11 @@ class AdaptivePID:
         self.integral = 0.0
         self.last_time = time.time()
         
-        # Learning and adaptation
-        self.error_history = deque(maxlen=20)
-        self.output_history = deque(maxlen=20)
-        self.performance_score = 0.0
-        self.adaptation_counter = 0
-        
     def calculate(self, error):
         current_time = time.time()
         dt = current_time - self.last_time
         self.last_time = current_time
         dt = max(dt, 0.001)
-        
-        # Store error for learning
-        self.error_history.append(abs(error))
         
         # Calculate PID terms
         self.integral += error * dt
@@ -395,48 +385,8 @@ class AdaptivePID:
         d_term = self.kd * derivative
         output = p_term + i_term + d_term
         
-        # Store output for learning
-        self.output_history.append(abs(output))
-        
-        # Auto-tune parameters
-        self._adapt_parameters()
-        
         self.previous_error = error
         return np.clip(output, -MAX_STEERING, MAX_STEERING)
-    
-    def _adapt_parameters(self):
-        if len(self.error_history) < 20:
-            return
-            
-        self.adaptation_counter += 1
-        if self.adaptation_counter % 50 != 0:  # Adapt every 50 iterations for stability
-            return
-            
-        # Calculate performance metrics
-        avg_error = sum(self.error_history) / len(self.error_history)
-        error_variance = np.var(list(self.error_history))
-        recent_errors = list(self.error_history)[-5:]
-        trend = sum(recent_errors) / len(recent_errors)
-        
-        # More conservative adaptation to prevent overshoot
-        if avg_error > PERFORMANCE_THRESHOLD:
-            if error_variance > 0.08:  # High oscillation - reduce overshoot
-                self.kd += PID_LEARNING_RATE * 2  # Increase dampening more aggressively
-                self.kp *= 0.95  # Reduce proportional gain
-                self.ki *= 0.9   # Reduce integral to prevent windup
-            elif trend > avg_error * 1.2:  # Error increasing - be more conservative
-                self.kp *= 0.98
-            else:  # Steady state error - gentle increase
-                self.kp += PID_LEARNING_RATE * 0.5
-                
-        elif avg_error < PERFORMANCE_THRESHOLD * 0.3:  # Very good performance
-            if error_variance < 0.02:  # Very stable
-                self.kp += PID_LEARNING_RATE * 0.3  # Small increase
-        
-        # Conservative bounds to prevent overshoot
-        self.kp = np.clip(self.kp, 0.1, 0.8)   # Lower max KP
-        self.ki = np.clip(self.ki, 0.001, 0.03) # Lower max KI
-        self.kd = np.clip(self.kd, 0.1, 0.6)   # Higher min/max KD for better dampening
     
     def get_params(self):
         return self.kp, self.ki, self.kd
@@ -1389,124 +1339,97 @@ obstacle_mapper = ObstacleMapper()
 distance_estimator = DistanceEstimator()
 
 def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected_now=False, line_offset_now=0.0, detected_objects_list=None):
-    """SMOOTH FORWARD CURVE AVOIDANCE: Curve right while forward → Curve left while forward → Return to line"""
+    """SIMPLE STRONG AVOIDANCE: Strong turn away → Forward clear → Strong turn back → Find line"""
     global avoidance_phase, avoidance_side, avoidance_frame_count, avoidance_duration
     
-    # SMOOTH FORWARD CURVE AVOIDANCE
+    # SIMPLE STRONG AVOIDANCE
     if avoid_objects and (detected_objects_list or avoidance_phase != 'none'):
         
-        # START SMOOTH CURVE AVOIDANCE
+        # START STRONG AVOIDANCE
         if avoidance_phase == 'none' and detected_objects_list:
-            logger.info("🚨 OBSTACLE DETECTED - Starting smooth curve avoidance")
-            avoidance_phase = 'curve_right'
-            avoidance_duration = 18  # Nice sized curve right while moving forward
-            return COMMANDS['RIGHT']  # Start curving right
+            # Determine which side to avoid based on object position
+            main_object = detected_objects_list[0]
+            object_pos = main_object['position']
+            
+            if object_pos < 0:  # Object on left, avoid right
+                avoidance_side = 'right'
+                avoidance_phase = 'turn_right'
+            else:  # Object on right, avoid left
+                avoidance_side = 'left'
+                avoidance_phase = 'turn_left'
+                
+            avoidance_duration = AVOIDANCE_TURN_FRAMES
+            logger.info(f"🚨 OBSTACLE DETECTED - Starting STRONG {avoidance_side} avoidance")
+            robot_stats['avoidance_maneuvers'] = robot_stats.get('avoidance_maneuvers', 0) + 1
+            
+            # Start with strong turn immediately
+            return COMMANDS['STRONG_RIGHT'] if avoidance_side == 'right' else COMMANDS['STRONG_LEFT']
         
-        # PHASE 1: Smooth Curve RIGHT while moving forward
-        elif avoidance_phase == 'curve_right':
+        # PHASE 1: Strong turn away from obstacle
+        elif avoidance_phase in ['turn_left', 'turn_right']:
             avoidance_duration -= 1
-            if avoidance_duration > 12:
-                # Strong right curve initially
-                logger.info(f"CURVE 1: Strong right curve forward ({avoidance_duration} frames left)")
-                return COMMANDS['RIGHT']
-            elif avoidance_duration > 6:
-                # Medium right curve, mostly forward
-                logger.info(f"CURVE 1: Medium right curve forward ({avoidance_duration} frames left)")
-                # Alternate between forward and right for smooth curve
-                return COMMANDS['FORWARD'] if avoidance_duration % 2 == 0 else COMMANDS['RIGHT']
-            elif avoidance_duration > 2:
-                # Gentle right curve, mostly forward
-                logger.info(f"CURVE 1: Gentle right curve forward ({avoidance_duration} frames left)")
-                # More forward motion for smoother curve
-                return COMMANDS['FORWARD'] if avoidance_duration % 3 != 0 else COMMANDS['RIGHT']
-            elif avoidance_duration > 0:
-                # Pure forward to clear obstacle
-                logger.info(f"CURVE 1: Forward clear ({avoidance_duration} frames left)")
+            logger.info(f"AVOIDANCE TURN: Strong {avoidance_side} turn ({avoidance_duration} frames left)")
+            
+            if avoidance_duration <= 0:
+                # Move to clearing phase
+                avoidance_phase = 'clear'
+                avoidance_duration = AVOIDANCE_CLEAR_FRAMES
+                logger.info("AVOIDANCE CLEAR: Moving forward to clear obstacle")
                 return COMMANDS['FORWARD']
             else:
-                # Start return curve
-                avoidance_phase = 'curve_left'
-                avoidance_duration = 22  # Good sized return curve
-                logger.info("CURVE 2: Starting left return curve")
-                return COMMANDS['LEFT']
+                # Continue strong turn
+                return COMMANDS['STRONG_RIGHT'] if avoidance_side == 'right' else COMMANDS['STRONG_LEFT']
         
-        # PHASE 2: Smooth Curve LEFT to return to line while moving forward
-        elif avoidance_phase == 'curve_left':
+        # PHASE 2: Move forward to clear obstacle
+        elif avoidance_phase == 'clear':
+            avoidance_duration -= 1
+            logger.info(f"AVOIDANCE CLEAR: Moving forward ({avoidance_duration} frames left)")
+            
+            if avoidance_duration <= 0:
+                # Move to return phase
+                avoidance_phase = 'return'
+                avoidance_duration = AVOIDANCE_RETURN_FRAMES
+                logger.info("AVOIDANCE RETURN: Turning back toward line")
+                # Turn back toward line
+                return COMMANDS['STRONG_LEFT'] if avoidance_side == 'right' else COMMANDS['STRONG_RIGHT']
+            else:
+                return COMMANDS['FORWARD']
+        
+        # PHASE 3: Turn back toward line
+        elif avoidance_phase == 'return':
             # Check if we found the line early
-            if line_detected_now and abs(line_offset_now) < 0.3:
-                logger.info("✅ LINE FOUND DURING CURVE! Avoidance complete")
+            if line_detected_now and abs(line_offset_now) < 0.4:
+                logger.info("✅ LINE FOUND DURING RETURN! Avoidance complete")
                 avoidance_phase = 'none'
-                # Gentle steering toward line center
+                speech_manager.announce("Line reacquired! Resuming line following.", "success")
+                # Resume normal line following
                 if abs(line_offset_now) < 0.1:
                     return COMMANDS['FORWARD']
                 else:
                     return COMMANDS['LEFT'] if line_offset_now > 0 else COMMANDS['RIGHT']
             
             avoidance_duration -= 1
-            if avoidance_duration > 16:
-                # Strong left curve initially
-                logger.info(f"CURVE 2: Strong left curve forward ({avoidance_duration} frames left)")
-                return COMMANDS['LEFT']
-            elif avoidance_duration > 10:
-                # Medium left curve
-                logger.info(f"CURVE 2: Medium left curve forward ({avoidance_duration} frames left)")
-                # Alternate between forward and left for smooth curve
-                return COMMANDS['FORWARD'] if avoidance_duration % 2 == 0 else COMMANDS['LEFT']
-            elif avoidance_duration > 4:
-                # Gentle left curve, mostly forward
-                logger.info(f"CURVE 2: Gentle left curve forward ({avoidance_duration} frames left)")
-                # More forward motion for smoother curve
-                return COMMANDS['FORWARD'] if avoidance_duration % 3 != 0 else COMMANDS['LEFT']
-            elif avoidance_duration > 0:
-                # Search pattern while moving forward
-                logger.info(f"CURVE 2: Search forward ({avoidance_duration} frames left)")
-                # Gentle search oscillation
-                return COMMANDS['LEFT'] if avoidance_duration % 4 < 2 else COMMANDS['RIGHT']
-            else:
-                # Final search phase if still no line
-                avoidance_phase = 'final_search'
-                avoidance_duration = 20  # Reasonable final search
-                logger.info("PHASE 3: Final search pattern")
-                speech_manager.announce("Searching for line after curve.", "searching")
-                return COMMANDS['FORWARD']
-        
-        # PHASE 3: Final search while moving forward
-        elif avoidance_phase == 'final_search':
-            # Found the line!
-            if line_detected_now:
-                logger.info("✅ LINE FOUND DURING FINAL SEARCH! Avoidance complete")
-                avoidance_phase = 'none'
-                if abs(line_offset_now) < 0.2:
-                    return COMMANDS['FORWARD']
-                else:
-                    # Steer toward line
-                    return COMMANDS['LEFT'] if line_offset_now > 0 else COMMANDS['RIGHT']
+            logger.info(f"AVOIDANCE RETURN: Turning back to line ({avoidance_duration} frames left)")
             
-            avoidance_duration -= 1
-            if avoidance_duration > 0:
-                # Good search pattern while moving forward
-                if avoidance_duration > 14:
-                    logger.info(f"SEARCH: Left search forward ({avoidance_duration} frames left)")
-                    return COMMANDS['LEFT'] if avoidance_duration % 3 == 0 else COMMANDS['FORWARD']
-                elif avoidance_duration > 6:
-                    logger.info(f"SEARCH: Right search forward ({avoidance_duration} frames left)")
-                    return COMMANDS['RIGHT'] if avoidance_duration % 3 == 0 else COMMANDS['FORWARD']
-                else:
-                    logger.info(f"SEARCH: Pure forward sweep ({avoidance_duration} frames left)")
-                    return COMMANDS['FORWARD']
-            else:
-                # Complete timeout - resume normal operation
-                logger.info("⚠️ Curve avoidance timeout - resuming normal operation")
+            if avoidance_duration <= 0:
+                # Avoidance complete, resume normal operation
+                logger.info("⭐ AVOIDANCE COMPLETE - Resuming normal line following")
                 avoidance_phase = 'none'
+                speech_manager.announce("Obstacle avoided. Resuming line following.", "success")
                 return COMMANDS['FORWARD']
+            else:
+                # Continue turning back toward line
+                return COMMANDS['STRONG_LEFT'] if avoidance_side == 'right' else COMMANDS['STRONG_RIGHT']
     
     # NORMAL LINE FOLLOWING BEHAVIOR
     if abs(steering) < STEERING_DEADZONE:
         return COMMANDS['FORWARD']
     
-    if abs(steering) > 0.45:
+    # Only use strong turns for large errors
+    if abs(steering) > 0.6:
         return COMMANDS['RIGHT'] if steering < 0 else COMMANDS['LEFT']
     
+    # For moderate errors, still turn but less aggressively
     return COMMANDS['RIGHT'] if steering < 0 else COMMANDS['LEFT']
 
 def opposite_direction(direction):
@@ -2487,9 +2410,9 @@ def main():
     actual_fps = cap.get(cv2.CAP_PROP_FPS)
     logger.info(f"📷 Camera initialized: {actual_width}x{actual_height} @ {actual_fps}fps")
     
-    # Initialize adaptive PID controller
+    # Initialize simple PID controller
     global pid_controller
-    pid = AdaptivePID(KP, KI, KD, MAX_INTEGRAL)
+    pid = SimplePID(KP, KI, KD, MAX_INTEGRAL)
     pid_controller = pid
     
     # Connect to ESP32
@@ -2509,7 +2432,7 @@ def main():
     fps_history = deque(maxlen=30)
     search_counter = 0
     
-    # History for smoothing (balanced for responsive yet smooth following)
+    # History for balanced smoothing (prevent sudden turns)
     offset_history = deque(maxlen=3)
     steering_history = deque(maxlen=3)
     last_known_good_offset = 0.0
@@ -2568,16 +2491,11 @@ def main():
                 center_x = frame.shape[1] / 2
                 raw_offset = (line_x - center_x) / center_x
                 
-                # Add to history for smoothing
+                # Simple smoothing
                 offset_history.append(raw_offset)
-                
-                # Use weighted average of recent offsets for stability
-                if len(offset_history) > 0:
-                    # Give more weight to recent measurements
-                    weights = [0.5, 0.3, 0.2][:len(offset_history)]
-                    weighted_sum = sum(w * offset for w, offset in zip(weights, reversed(offset_history)))
-                    weight_total = sum(weights[:len(offset_history)])
-                    line_offset = weighted_sum / weight_total
+                if len(offset_history) >= 2:
+                    # Simple average of current and previous
+                    line_offset = (offset_history[-1] + offset_history[-2]) / 2
                 else:
                     line_offset = raw_offset
                 
@@ -2605,29 +2523,19 @@ def main():
                     else:
                         corner_detected_count = 0
                         
-                    # Enhanced status with smooth curve avoidance phases
-                    if avoidance_phase == 'curve_right':
-                        robot_status = f"CURVE AVOIDANCE: Right curve around obstacle ({avoidance_duration} frames)"
-                    elif avoidance_phase == 'curve_left':
-                        robot_status = f"CURVE AVOIDANCE: Left curve back to line ({avoidance_duration} frames)"
-                    elif avoidance_phase == 'final_search':
-                        robot_status = f"CURVE AVOIDANCE: Searching for line ({avoidance_duration} frames)"
-                    elif avoidance_phase == 'mapping':
-                        robot_status = f"MAPPING: Analyzing obstacle geometry, gentle turn {avoidance_side}"
-                    elif avoidance_phase == 'clearing':
-                        robot_status = f"ROUNDABOUT: Initial curve forward ({avoidance_duration} frames)"
-                    elif avoidance_phase == 'curving':
-                        robot_status = f"ROUNDABOUT: Continuing curve around obstacle ({avoidance_duration} frames)"
-                    elif avoidance_phase == 'completing':
-                        robot_status = f"ROUNDABOUT: Completing curve forward ({avoidance_duration} frames)"
-                    elif avoidance_phase == 'returning':
+                    # Simple avoidance status
+                    if avoidance_phase in ['turn_left', 'turn_right']:
+                        robot_status = f"AVOIDING: Strong {avoidance_side} turn ({avoidance_duration} frames)"
+                    elif avoidance_phase == 'clear':
+                        robot_status = f"AVOIDING: Moving forward to clear obstacle ({avoidance_duration} frames)"
+                    elif avoidance_phase == 'return':
                         if confidence > 0.3:
-                            robot_status = f"RETURNING: Line detected! Smart transition (offset: {line_offset:.2f})"
+                            robot_status = f"RETURNING: Line detected! Completing avoidance (offset: {line_offset:.2f})"
                             if last_avoidance_announced != 'completed':
                                 speech_manager.announce("Line reacquired! Resuming line following.", "success", force=True)
                                 last_avoidance_announced = 'completed'
                         else:
-                            robot_status = f"RETURNING: Gentle turn {opposite_direction(avoidance_side)} to find line"
+                            robot_status = f"RETURNING: Turning back to find line ({avoidance_duration} frames)"
                     elif object_detected:
                         robot_status = f"Object mapped - Calculating smart path"
                         if last_avoidance_announced != 'detected':
@@ -2638,27 +2546,17 @@ def main():
                     else:
                         robot_status = f"Following line (C:{confidence:.2f})"
                 
-                # Calculate steering using PID controller
+                # Calculate steering using simplified PID controller
                 # Negative offset means line is to the left, so invert for steering
                 steering_error = -line_offset
                 raw_steering = pid.calculate(steering_error)
                 
-                # Apply light exponential smoothing for responsive control
-                alpha = 0.7  # Smoothing factor (slightly increased for more responsiveness)
-                if hasattr(main, 'last_steering'):
-                    steering_value = alpha * raw_steering + (1 - alpha) * main.last_steering
+                # Simple steering smoothing
+                steering_history.append(raw_steering)
+                if len(steering_history) >= 2:
+                    avg_steering = (steering_history[-1] + steering_history[-2]) / 2
                 else:
-                    steering_value = raw_steering
-                main.last_steering = steering_value
-                
-                # Add to steering history for light additional smoothing
-                steering_history.append(steering_value)
-                
-                # Use simple average of recent steering values (more responsive)
-                if len(steering_history) > 0:
-                    avg_steering = sum(steering_history) / len(steering_history)
-                else:
-                    avg_steering = steering_value
+                    avg_steering = raw_steering
                 
                 # Convert steering to command with DYNAMIC NAVIGATION
                 should_avoid = OBJECT_DETECTION_ENABLED and object_detected
