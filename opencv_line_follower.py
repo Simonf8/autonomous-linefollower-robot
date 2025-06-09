@@ -1,4 +1,43 @@
 #!/usr/bin/env python3
+"""
+Advanced Line Following Robot with C-Shaped Curve Obstacle Avoidance
+
+This script controls a robot to follow a line, using advanced computer vision
+techniques. It features multi-zone image analysis, adaptive PID control for
+smooth steering, and a sophisticated C-shaped curve algorithm for intelligent
+obstacle avoidance.
+
+Features:
+- Multi-Zone Vision: Divides camera view for line following, corner prediction,
+  and object detection.
+- Obstacle Avoidance:
+  - Uses YOLOv8n for high-accuracy object detection (if available).
+  - Fallback to classic computer vision for obstacle detection.
+  - Implements a C-shaped curve maneuver for smooth, intelligent avoidance.
+- Adaptive PID Control: Auto-tunes PID parameters for optimal steering response.
+- Text-to-Speech (TTS): Provides audible status updates using Piper (high-quality)
+  or pyttsx3 (fallback).
+- Web Dashboard: A comprehensive Flask-based web UI for real-time monitoring of
+  the camera feed, robot status, and performance metrics.
+- Robust Communication: Manages a stable socket connection to an ESP32 for
+  motor control.
+
+Setup and Dependencies:
+1. Install Python dependencies:
+   pip install opencv-python numpy flask ultralytics pyttsx3
+
+2. (Optional, for high-quality TTS) Setup Piper TTS:
+   - Create a 'piper' directory.
+   - Download the Piper executable into it.
+   - Create a 'voices' directory.
+   - Download a voice model (e.g., en_US-lessac-medium.onnx) into it.
+
+3. (Optional, for Piper TTS on Linux) Ensure 'aplay' is installed:
+   sudo apt-get install alsa-utils
+
+4. Run the script:
+   python3 your_script_name.py
+"""
 
 import cv2
 import numpy as np
@@ -6,943 +45,1060 @@ import socket
 import time
 import logging
 import threading
-from collections import deque
-from flask import Flask, Response, render_template_string, jsonify
+import json
+import os
+import subprocess
 import queue
+import shutil
+from collections import deque
+from flask import Flask, Response, jsonify
 
-# Try to import text-to-speech
+# --- Dependency Availability Checks ---
+
 try:
-    import subprocess
-    import os
-    # Check if Piper TTS is available
-    if os.path.exists('./piper/piper') and os.path.exists('./voices/en_US-lessac-medium.onnx'):
-        TTS_AVAILABLE = True
-        TTS_ENGINE = 'piper'
-        print("Piper TTS available - High quality neural speech")
-    else:
-        # Fallback to pyttsx3 if available
-        import pyttsx3
-        TTS_AVAILABLE = True
-        TTS_ENGINE = 'pyttsx3'
-        print("pyttsx3 TTS available")
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
 except ImportError:
-    TTS_AVAILABLE = False
-    TTS_ENGINE = None
-    print("Text-to-speech not available. Install piper or pyttsx3")
+    YOLO_AVAILABLE = False
 
-# ESP32 Connection Settings
-ESP32_IP = '192.168.2.21'
-ESP32_PORT = 1234
+try:
+    import pyttsx3
+    PYTTSX3_AVAILABLE = True
+except ImportError:
+    PYTTSX3_AVAILABLE = False
 
-# Camera Settings
-CAMERA_WIDTH, CAMERA_HEIGHT = 640, 360  # Match actual camera resolution
-CAMERA_FPS = 25  # Match camera's native FPS
+# --- Configuration ---
 
-# Line Detection Settings - More robust for stable detection
-LINE_THRESHOLD_LOW = 30    # Lower threshold for bright conditions
-LINE_THRESHOLD_HIGH = 80   # Higher threshold for dark conditions
-BLUR_SIZE = 5              # Smaller blur for better edge detection
-MIN_LINE_AREA = 100        # Lower minimum area to catch thinner lines
-ADAPTIVE_THRESHOLD = True  # Use adaptive thresholding for better lighting handling
+class Config:
+    """
+    Central configuration class to hold all static parameters.
+    """
+    class Network:
+        ESP32_IP = '192.168.2.21'
+        ESP32_PORT = 1234
+        WEB_SERVER_PORT = 5000
 
-# Object Detection Settings - Smart detection with line exclusion
-OBJECT_THRESHOLD = 100     # Threshold for object detection
-MIN_OBJECT_AREA = 2000     # Minimum area to be considered an object (reduced due to smart filtering)
-OBJECT_MIN_WIDTH = 50      # Minimum object width in pixels 
-OBJECT_MIN_HEIGHT = 40     # Minimum object height in pixels
-OBJECT_MAX_AREA = 25000    # Maximum area to avoid detecting walls/background
-OBJECT_CONFIDENCE_FRAMES = 3  # Number of consecutive frames to confirm object (reduced due to smart filtering)
-ENABLE_OBJECT_DETECTION = True  # Enable smart object detection
+    class Camera:
+        WIDTH = 640
+        HEIGHT = 480
+        FPS = 30
+        BUFFER_SIZE = 1 # Lower buffer for reduced latency
 
-# Avoidance Settings - Simple 3-step process
-AVOIDANCE_TURN_FRAMES = 8      # Frames to turn away from object
-AVOIDANCE_FORWARD_FRAMES = 15   # Frames to go forward past object
-AVOIDANCE_RETURN_FRAMES = 12    # Frames to turn back to line
+    class Vision:
+        # Pre-processing
+        BLUR_SIZE = 5
+        BLACK_THRESHOLD = 80 # Threshold for detecting the line
 
-# Speech Settings
-SPEECH_ENABLED = True          # Enable/disable speech announcements
-SPEECH_RATE = 150             # Speech rate (words per minute)
-SPEECH_VOLUME = 0.8           # Speech volume (0.0 to 1.0)
-ANNOUNCE_INTERVAL = 3.0       # Minimum seconds between similar announcements
+        # Multi-zone detection heights (as percentage of frame height)
+        ZONE_BOTTOM_HEIGHT = 0.25  # Primary line following
+        ZONE_MIDDLE_HEIGHT = 0.20  # Corner prediction
+        ZONE_TOP_HEIGHT = 0.45     # Object detection
 
-# PID Settings - Simple and stable
-KP = 0.4
-KI = 0.01
-KD = 0.2
-MAX_STEERING = 1.0
+        # Contour filtering
+        MIN_LINE_CONTOUR_AREA = 50
 
-# Robot Commands
-FORWARD = 'FORWARD'
-LEFT = 'LEFT'
-RIGHT = 'RIGHT'
-STOP = 'STOP'
+    class CornerDetection:
+        ENABLED = True
+        CONFIDENCE_BOOST = 1.2    # How much to boost confidence for corner-like shapes
+        CIRCULARITY_THRESHOLD = 0.5 # Lower values are less circular (more corner-like)
+        PREDICTION_THRESHOLD = 0.3  # Confidence needed to trigger a corner warning
 
-# Global Variables
-current_frame = None
-binary_frame_global = None  # Store binary frame for video feed
+    class ObjectDetection:
+        ENABLED = True
+        USE_YOLO = True # Master switch to use YOLO if available
+        USE_CV_FALLBACK = True # Use basic CV if YOLO is off or unavailable
+
+        # YOLO specific settings
+        class YOLO:
+            MODEL_PATH = "yolov8n.pt" # Nano model for speed
+            CONFIDENCE_THRESHOLD = 0.45
+            # Classes to avoid (COCO model: 0=person, 39=bottle, 41=cup, etc.)
+            CLASSES_TO_AVOID = list(range(39, 80)) + [0]
+
+        # Classic Computer Vision (CV) fallback settings
+        class CV:
+            OBJECT_SIZE_THRESHOLD = 800     # Min contour area to be considered an obstacle
+            OBJECT_WIDTH_THRESHOLD = 0.20   # Min width ratio to trigger avoidance
+            OBJECT_HEIGHT_THRESHOLD = 0.15  # Min height ratio to trigger avoidance
+            OBJECT_ASPECT_RATIO_RANGE = (0.3, 3.0) # Filter shapes
+            OBJECT_LINE_BLOCKING_THRESHOLD = 0.7 # How close to the line path an object must be
+
+    class Control:
+        # Commands sent to the ESP32
+        COMMANDS = {
+            'FORWARD': 'FORWARD', 'LEFT': 'LEFT', 'RIGHT': 'RIGHT', 'STOP': 'STOP',
+            'CURVE_LEFT': 'LEFT', 'CURVE_RIGHT': 'RIGHT' # Mapped to basic turns
+        }
+        # Steering parameters
+        STEERING_DEADZONE = 0.08 # Ignore very small steering errors
+        MAX_STEERING = 1.0       # Max steering output
+
+    class PID:
+        # Initial PID gains
+        KP = 0.40
+        KI = 0.008
+        KD = 0.28
+        MAX_INTEGRAL = 2.0 # Anti-windup limit
+
+        # Auto-tuning parameters
+        ADAPTATION_ENABLED = True
+        LEARNING_RATE = 0.0005
+        ADAPTATION_WINDOW = 100 # Number of frames to average for performance
+        PERFORMANCE_THRESHOLD = 0.12 # Error threshold to trigger tuning
+
+    class Avoidance:
+        # C-Shaped Curve maneuver parameters
+        ENABLED = True
+        CURVE_RADIUS_MULTIPLIER = 2.2   # How wide the curve is relative to obstacle size
+        CURVE_DEPTH_MULTIPLIER = 1.5    # How "deep" the C-shape is
+        CURVE_SHARPNESS = 1.4           # Exaggerates the sharpness of the curve
+        SAFETY_MARGIN = 1.5             # Safety buffer around the obstacle's width
+        PROGRESS_RATE = 0.25            # Speed of maneuver progress (units per second)
+
+    class Speech:
+        ENABLED = True
+        USE_PIPER = True # Use Piper TTS if available
+        # Check for Piper executable and a default voice model
+        PIPER_PATH = './piper/piper'
+        VOICE_MODEL_PATH = './voices/en_US-lessac-medium.onnx'
+        PIPER_AVAILABLE = os.path.exists(PIPER_PATH) and os.path.exists(VOICE_MODEL_PATH)
+        # Check for 'aplay' command needed by Piper implementation
+        APLAY_AVAILABLE = shutil.which('aplay') is not None
+        # pyttsx3 fallback settings
+        SPEECH_RATE = 160
+        SPEECH_VOLUME = 0.9
+        # Cooldown between announcements of the same type (seconds)
+        ANNOUNCE_INTERVAL = 5.0
+
+# --- State Management ---
+
+class RobotState:
+    """Holds the current dynamic state of the robot."""
+    def __init__(self):
+        self.status = "Initializing"
+        self.command = Config.Control.COMMANDS['STOP']
+        self.line_offset = 0.0
+        self.steering_value = 0.0
+        self.confidence = 0.0
+        self.line_detected = False
+        self.esp_connected = False
+        self.fps = 0.0
+        self.corner_warning = False
+        self.object_detected = False
+        self.stats = {
+            'uptime_start': time.time(), 'total_frames': 0, 'lost_frames': 0,
+            'corner_count': 0, 'objects_detected': 0, 'avoidance_maneuvers': 0
+        }
+        self.pid_params = {'kp': Config.PID.KP, 'ki': Config.PID.KI, 'kd': Config.PID.KD}
+
+class AvoidanceState:
+    """Holds the state for the C-shaped curve avoidance maneuver."""
+    def __init__(self):
+        self.phase = 'none' # 'none', 'curve_out', 'curve_around', 'curve_back'
+        self.side = 'none'  # 'left' or 'right'
+        self.progress = 0.0 # 0.0 to 1.0
+        self.current_offset = 0.0
+        self.target_offset = 0.0
+        self.current_obstacle = None
+
+# --- Global Variables (for cross-thread communication) ---
+output_frame = None
 frame_lock = threading.Lock()
-robot_status = "Starting"
-line_offset = 0.0
-line_detected = False
-object_detected = False
-avoidance_phase = 'none'  # 'none', 'turning', 'forward', 'returning'
-avoidance_counter = 0
-esp_connected = False
-current_fps = 0.0
-object_detection_buffer = []  # Buffer to store recent object detections
-line_lost_counter = 0  # Counter for consecutive frames without line
-last_valid_line_center = None  # Last known good line position
+logger = logging.getLogger("LineFollowerRobot")
 
-# Speech system variables
-speech_queue = queue.Queue()
-speech_engine = None
-last_announcement = {}  # Track last announcement times
-speech_thread = None
+# --- Logging Setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] [%(levelname)-8s] %(message)s',
+    datefmt='%H:%M:%S'
+)
 
-# Logging setup
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
-logger = logging.getLogger("OpenCVLineFollower")
+
+# --- Core Modules ---
 
 class SpeechManager:
+    """Manages Text-to-Speech (TTS) announcements in a separate thread."""
     def __init__(self):
         self.engine = None
+        self.tts_engine_type = None
         self.speech_queue = queue.Queue()
         self.running = False
         self.last_announcements = {}
-        self.tts_engine_type = TTS_ENGINE
-        
-        if TTS_AVAILABLE and SPEECH_ENABLED:
-            try:
-                if TTS_ENGINE == 'piper':
-                    # Piper TTS setup
-                    self.piper_path = './piper/piper'
-                    self.voice_model = './voices/en_US-lessac-medium.onnx'
-                    self.engine = True  # Flag to indicate piper is ready
-                    logger.info("Piper TTS system initialized successfully")
-                elif TTS_ENGINE == 'pyttsx3':
-                    # pyttsx3 setup (fallback)
-                    import pyttsx3
-                    self.engine = pyttsx3.init()
-                    self.engine.setProperty('rate', SPEECH_RATE)
-                    self.engine.setProperty('volume', SPEECH_VOLUME)
-                    
-                    # Try to set voice (prefer female voice if available)
-                    voices = self.engine.getProperty('voices')
-                    if voices:
-                        for voice in voices:
-                            if 'female' in voice.name.lower() or 'zira' in voice.name.lower():
-                                self.engine.setProperty('voice', voice.id)
-                                break
-                    
-                    logger.info("pyttsx3 speech system initialized successfully")
-            except Exception as e:
-                logger.error(f"Failed to initialize speech system: {e}")
-                self.engine = None
-    
-    def start(self):
-        if self.engine:
-            self.running = True
-            self.thread = threading.Thread(target=self._speech_worker, daemon=True)
-            self.thread.start()
-            logger.info(f"{self.tts_engine_type} speech system started")
-    
-    def stop(self):
-        self.running = False
-        if hasattr(self, 'thread'):
-            self.thread.join(timeout=2)
-    
-    def announce(self, message, category="general", force=False):
-        """Add announcement to queue with category-based throttling"""
-        if not self.engine or not SPEECH_ENABLED:
+        self._initialize_engine()
+
+    def _initialize_engine(self):
+        """Initializes the best available TTS engine."""
+        if not Config.Speech.ENABLED:
+            logger.info("Speech system is disabled in config.")
             return
-        
-        current_time = time.time()
-        
-        # Check if we should throttle this announcement
-        if not force and category in self.last_announcements:
-            if current_time - self.last_announcements[category] < ANNOUNCE_INTERVAL:
+
+        # Prefer Piper for high-quality, local, neural speech
+        if Config.Speech.USE_PIPER and Config.Speech.PIPER_AVAILABLE:
+            if not Config.Speech.APLAY_AVAILABLE:
+                logger.warning("Piper TTS configured, but 'aplay' command not found. Speech will be disabled.")
                 return
-        
-        # Add to queue and update last announcement time
+            self.tts_engine_type = 'piper'
+            self.engine = True # Use a simple flag for Piper
+            logger.info("SpeechManager: Piper TTS engine initialized.")
+        # Fallback to pyttsx3
+        elif PYTTSX3_AVAILABLE:
+            try:
+                self.engine = pyttsx3.init()
+                self.engine.setProperty('rate', Config.Speech.SPEECH_RATE)
+                self.engine.setProperty('volume', Config.Speech.SPEECH_VOLUME)
+                self.tts_engine_type = 'pyttsx3'
+                logger.info("SpeechManager: pyttsx3 engine initialized.")
+            except Exception as e:
+                logger.error(f"SpeechManager: Failed to initialize pyttsx3: {e}")
+                self.engine = None
+        else:
+            logger.warning("SpeechManager: No TTS engines available (Piper or pyttsx3).")
+
+    def start(self):
+        """Starts the speech worker thread."""
+        if not self.engine:
+            return
+        self.running = True
+        thread = threading.Thread(target=self._speech_worker, daemon=True)
+        thread.start()
+        logger.info(f"Speech worker started with '{self.tts_engine_type}' engine.")
+
+    def stop(self):
+        """Stops the speech worker thread."""
+        self.running = False
+
+    def announce(self, message, category="general", force=False):
+        """Adds a message to the speech queue, with throttling."""
+        if not self.engine:
+            return
+
+        current_time = time.time()
+        # Throttle announcements to avoid spamming
+        if not force and category in self.last_announcements:
+            if current_time - self.last_announcements[category] < Config.Speech.ANNOUNCE_INTERVAL:
+                return
+
         self.speech_queue.put(message)
         self.last_announcements[category] = current_time
-        logger.info(f"Queued announcement: {message}")
-    
-    def _speak_with_piper(self, message):
-        """Use Piper TTS to speak message"""
-        try:
-            # Create temporary audio file
-            temp_audio = "/tmp/robot_speech.wav"
-            
-            # Generate speech with Piper
-            process = subprocess.run([
-                self.piper_path,
-                '--model', self.voice_model,
-                '--output_file', temp_audio
-            ], input=message, text=True, capture_output=True, timeout=10)
-            
-            if process.returncode == 0:
-                # Play the generated audio
-                subprocess.run(['aplay', temp_audio], check=True, capture_output=True)
-                # Clean up temp file
-                os.remove(temp_audio)
-                return True
-            else:
-                logger.error(f"Piper TTS failed: {process.stderr}")
-                return False
-        except Exception as e:
-            logger.error(f"Piper TTS error: {e}")
-            return False
-    
-    def _speak_with_pyttsx3(self, message):
-        """Use pyttsx3 to speak message"""
-        try:
-            self.engine.say(message)
-            self.engine.runAndWait()
-            return True
-        except Exception as e:
-            logger.error(f"pyttsx3 error: {e}")
-            return False
-    
+        logger.info(f"Speech: Queued '{message}'")
+
     def _speech_worker(self):
-        """Background thread to handle speech synthesis"""
+        """The background thread that processes the speech queue."""
         while self.running:
             try:
-                # Get message from queue with timeout
                 message = self.speech_queue.get(timeout=1.0)
-                if message and self.engine:
-                    if self.tts_engine_type == 'piper':
-                        self._speak_with_piper(message)
-                    elif self.tts_engine_type == 'pyttsx3':
-                        self._speak_with_pyttsx3(message)
+                logger.info(f"Speech: Speaking '{message}'")
+                if self.tts_engine_type == 'piper':
+                    self._speak_with_piper(message)
+                elif self.tts_engine_type == 'pyttsx3':
+                    self._speak_with_pyttsx3(message)
                 self.speech_queue.task_done()
             except queue.Empty:
                 continue
             except Exception as e:
                 logger.error(f"Speech worker error: {e}")
+        logger.info("Speech worker stopped.")
 
-# Initialize speech manager
-speech_manager = SpeechManager()
+    def _speak_with_piper(self, message):
+        """Generates and plays audio using Piper TTS."""
+        try:
+            # Using a temporary file for the audio output
+            with open("/tmp/robot_speech.wav", "w") as f:
+                subprocess.run(
+                    [Config.Speech.PIPER_PATH, '--model', Config.Speech.VOICE_MODEL_PATH, '--output_file', f.name],
+                    input=message, text=True, check=True, capture_output=True, timeout=10
+                )
+                # Play the generated audio file using aplay
+                subprocess.run(['aplay', f.name], check=True, capture_output=True, timeout=10)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            logger.error(f"Piper TTS execution failed: {e.stderr.decode() if e.stderr else str(e)}")
+        except FileNotFoundError:
+             logger.error("Piper or aplay command not found. Ensure they are in your system's PATH.")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred with Piper TTS: {e}")
 
-class SimplePID:
-    def __init__(self, kp, ki, kd):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.previous_error = 0.0
+    def _speak_with_pyttsx3(self, message):
+        """Speaks a message using the pyttsx3 library."""
+        try:
+            self.engine.say(message)
+            self.engine.runAndWait()
+        except Exception as e:
+            logger.error(f"pyttsx3 error: {e}")
+
+class CShapedCurveCalculator:
+    """
+    Calculates the parameters and steering for a smooth, C-shaped
+    obstacle avoidance maneuver.
+    """
+    @staticmethod
+    def calculate_curve_parameters(obstacle_pos, obstacle_width):
+        """
+        Determines the direction and target offset for the C-curve.
+
+        Args:
+            obstacle_pos (float): The obstacle's horizontal position (-1.0 to 1.0).
+            obstacle_width (float): The obstacle's width as a ratio of the frame width.
+
+        Returns:
+            tuple: (avoidance_side, target_offset)
+        """
+        safety_buffer = obstacle_width * Config.Avoidance.SAFETY_MARGIN
+        base_offset = safety_buffer + 0.4 # Additional fixed buffer
+
+        if obstacle_pos > 0: # Obstacle on the right, so curve left
+            side = 'left'
+            target_offset = -base_offset * Config.Avoidance.CURVE_DEPTH_MULTIPLIER
+        else: # Obstacle on the left, so curve right
+            side = 'right'
+            target_offset = base_offset * Config.Avoidance.CURVE_DEPTH_MULTIPLIER
+
+        return side, target_offset
+
+    @staticmethod
+    def _smoothstep(x):
+        """A smooth transition function (hermite interpolation)."""
+        x = np.clip(x, 0.0, 1.0)
+        return x * x * (3.0 - 2.0 * x)
+
+    @staticmethod
+    def get_curve_steering(progress, target_offset, current_offset):
+        """
+        Calculates the required steering value based on the maneuver's progress.
+
+        The curve is divided into three phases for a distinct "C" shape:
+        1. Curve Out (0% - 25%): A sharp turn away from the line.
+        2. Curve Around (25% - 75%): A wider, sustained turn around the obstacle.
+        3. Curve Back (75% - 100%): A sharp turn back towards the line.
+
+        Args:
+            progress (float): The current progress of the maneuver (0.0 to 1.0).
+            target_offset (float): The maximum desired lateral offset from the line.
+            current_offset (float): The robot's current estimated lateral offset.
+
+        Returns:
+            float: The calculated steering value.
+        """
+        if progress <= 0.25: # Phase 1: Curve Out
+            phase_progress = progress / 0.25
+            desired_offset = target_offset * CShapedCurveCalculator._smoothstep(phase_progress) * 0.8
+        elif progress <= 0.75: # Phase 2: Curve Around
+            desired_offset = target_offset
+        else: # Phase 3: Curve Back
+            phase_progress = (progress - 0.75) / 0.25
+            desired_offset = target_offset * (1.0 - CShapedCurveCalculator._smoothstep(phase_progress))
+
+        # Calculate steering needed to move from current to desired offset
+        offset_error = desired_offset - current_offset
+        steering = offset_error * Config.Avoidance.CURVE_SHARPNESS
+
+        return np.clip(steering, -Config.Control.MAX_STEERING, Config.Control.MAX_STEERING)
+
+
+class AdaptivePID:
+    """
+    An adaptive PID controller that fine-tunes its gains based on performance.
+    """
+    def __init__(self, kp, ki, kd, max_integral):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.max_integral = max_integral
+        self.prev_error = 0.0
         self.integral = 0.0
-        
+        self.last_time = time.time()
+        self.error_history = deque(maxlen=Config.PID.ADAPTATION_WINDOW)
+
     def calculate(self, error):
-        self.integral += error
-        self.integral = max(-5.0, min(5.0, self.integral))  # Limit integral windup
-        
-        derivative = error - self.previous_error
-        output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
-        
-        self.previous_error = error
-        return max(-MAX_STEERING, min(MAX_STEERING, output))
-    
-    def reset(self):
-        self.previous_error = 0.0
-        self.integral = 0.0
+        """
+        Calculates the PID output for a given error.
 
-class ESP32Controller:
+        Args:
+            error (float): The error term (e.g., negative line offset).
+
+        Returns:
+            float: The calculated control output (steering value).
+        """
+        current_time = time.time()
+        dt = current_time - self.last_time
+        self.last_time = current_time
+        if dt <= 0: return self.prev_error * self.kd # Avoid division by zero
+
+        # Proportional term
+        p_term = self.kp * error
+
+        # Integral term with anti-windup
+        self.integral += error * dt
+        self.integral = np.clip(self.integral, -self.max_integral, self.max_integral)
+        i_term = self.ki * self.integral
+
+        # Derivative term
+        derivative = (error - self.prev_error) / dt
+        d_term = self.kd * derivative
+
+        # Total output
+        output = p_term + i_term + d_term
+
+        # Update state
+        self.prev_error = error
+        self.error_history.append(abs(error))
+
+        if Config.PID.ADAPTATION_ENABLED:
+            self._adapt_parameters()
+
+        return np.clip(output, -Config.Control.MAX_STEERING, Config.Control.MAX_STEERING)
+
+    def _adapt_parameters(self):
+        """Heuristic-based auto-tuning of PID gains."""
+        if len(self.error_history) < Config.PID.ADAPTATION_WINDOW:
+            return
+
+        avg_error = np.mean(self.error_history)
+        error_variance = np.var(self.error_history)
+
+        # If error is large, the system is not tracking well
+        if avg_error > Config.PID.PERFORMANCE_THRESHOLD:
+            # If variance is high, it's oscillating -> increase D to dampen
+            if error_variance > 0.05:
+                self.kd += Config.PID.LEARNING_RATE * 2
+                self.kp *= 0.98 # Slightly reduce P to prevent overshoot
+            # If variance is low, it's a steady state error -> increase P
+            else:
+                self.kp += Config.PID.LEARNING_RATE
+        # If error is very low, the system is stable
+        elif avg_error < Config.PID.PERFORMANCE_THRESHOLD * 0.5:
+            # If variance is also low, we can be more responsive -> slightly decrease D
+            if error_variance < 0.01:
+                self.kd -= Config.PID.LEARNING_RATE * 0.5
+
+        # Clamp values to prevent them from becoming unstable
+        self.kp = np.clip(self.kp, 0.1, 1.0)
+        self.ki = np.clip(self.ki, 0.0, 0.05)
+        self.kd = np.clip(self.kd, 0.1, 0.8)
+
+    def get_params(self):
+        """Returns the current PID gains."""
+        return self.kp, self.ki, self.kd
+
+    def reset(self):
+        """Resets the PID controller's state."""
+        self.prev_error = 0.0
+        self.integral = 0.0
+        self.last_time = time.time()
+
+
+class ESP32Connection:
+    """Handles communication with the ESP32 motor controller."""
     def __init__(self, ip, port):
         self.ip = ip
         self.port = port
         self.socket = None
         self.last_command = None
-        
+        self.is_connected = False
+        self.reconnect_delay = 5 # seconds
+        self.last_attempt_time = 0
+
     def connect(self):
-        global esp_connected
+        """Attempts to establish a socket connection."""
+        if self.is_connected or time.time() - self.last_attempt_time < self.reconnect_delay:
+            return
+
+        self.last_attempt_time = time.time()
+        logger.info(f"ESP32: Attempting to connect to {self.ip}:{self.port}...")
         try:
-            if self.socket:
-                self.socket.close()
+            if self.socket: self.socket.close()
             self.socket = socket.create_connection((self.ip, self.port), timeout=2)
-            esp_connected = True
-            logger.info(f"Connected to ESP32 at {self.ip}:{self.port}")
-            return True
+            self.socket.settimeout(0.5)
+            self.is_connected = True
+            logger.info("ESP32: Connection successful.")
         except Exception as e:
-            esp_connected = False
-            logger.error(f"ESP32 connection failed: {e}")
-            return False
-    
-    def send_command(self, command):
-        if not self.socket and not self.connect():
-            return False
-        
-        try:
-            if command != self.last_command:
-                self.socket.sendall(f"{command}\n".encode())
-                self.last_command = command
-                logger.info(f"Sent: {command}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send command: {e}")
-            esp_connected = False
+            self.is_connected = False
+            logger.error(f"ESP32: Connection failed: {e}")
             self.socket = None
-            return False
-    
+
+    def send_command(self, command):
+        """
+        Sends a command to the ESP32 if connected.
+
+        Args:
+            command (str): The command to send (e.g., 'FORWARD').
+        """
+        if not self.is_connected:
+            self.connect() # Attempt to reconnect if not connected
+            return
+
+        # Only send if the command has changed to reduce network traffic
+        if command == self.last_command:
+            return
+
+        try:
+            full_command = f"{command}\n"
+            self.socket.sendall(full_command.encode())
+            self.last_command = command
+            logger.debug(f"ESP32: Sent '{command}'")
+        except (socket.timeout, socket.error) as e:
+            logger.error(f"ESP32: Send command failed: {e}")
+            self.is_connected = False
+            self.socket = None
+            self.last_command = None # Force resend after reconnect
+
     def close(self):
+        """Closes the connection gracefully."""
         if self.socket:
             try:
-                self.send_command(STOP)
+                self.send_command(Config.Control.COMMANDS['STOP'])
                 time.sleep(0.1)
                 self.socket.close()
-            except:
-                pass
-            self.socket = None
+            except Exception as e:
+                logger.error(f"ESP32: Error while closing connection: {e}")
+            finally:
+                self.socket = None
+                self.is_connected = False
+                logger.info("ESP32: Connection closed.")
 
-def detect_line_adaptive(frame):
-    """Detect line using adaptive thresholding for better lighting handling"""
-    # Convert to grayscale
+
+# --- Vision and Control Logic ---
+
+def process_image(frame, yolo_model):
+    """
+    Analyzes a single camera frame to detect the line, corners, and obstacles.
+
+    Args:
+        frame (np.ndarray): The input image frame from the camera.
+        yolo_model (YOLO, optional): The initialized YOLO model.
+
+    Returns:
+        dict: A dictionary containing all vision processing results.
+    """
+    height, width, _ = frame.shape
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-    # Apply Gaussian blur
-    blurred = cv2.GaussianBlur(gray, (BLUR_SIZE, BLUR_SIZE), 0)
-    
-    # Calculate average brightness to adapt threshold
-    avg_brightness = np.mean(blurred)
-    
-    if ADAPTIVE_THRESHOLD:
-        # Use adaptive threshold based on local area
-        binary = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_MEAN_C, 
-                                     cv2.THRESH_BINARY_INV, 21, 10)
-    else:
-        # Use dynamic threshold based on brightness
-        if avg_brightness > 120:  # Bright conditions
-            threshold = LINE_THRESHOLD_LOW
-        elif avg_brightness < 60:  # Dark conditions  
-            threshold = LINE_THRESHOLD_HIGH
-        else:  # Normal conditions
-            threshold = (LINE_THRESHOLD_LOW + LINE_THRESHOLD_HIGH) // 2
-        
-        _, binary = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY_INV)
-    
-    return binary, avg_brightness
+    blurred = cv2.GaussianBlur(gray, (Config.Vision.BLUR_SIZE, Config.Vision.BLUR_SIZE), 0)
+    _, binary_line = cv2.threshold(blurred, Config.Vision.BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
 
-def find_line_center(binary_frame):
-    """Find the center of the line in the bottom portion of the frame"""
-    height, width = binary_frame.shape
-    
-    # Focus on the bottom 30% of the frame for line detection
-    roi_height = int(height * 0.3)
-    roi = binary_frame[height - roi_height:height, :]
-    
-    # Find contours
+    # --- Define Zones ---
+    h = height
+    zone_bottom_y = int(h * (1 - Config.Vision.ZONE_BOTTOM_HEIGHT))
+    zone_middle_y = int(h * (1 - Config.Vision.ZONE_BOTTOM_HEIGHT - Config.Vision.ZONE_MIDDLE_HEIGHT))
+    zone_top_y = int(h * (1 - Config.Vision.ZONE_BOTTOM_HEIGHT - Config.Vision.ZONE_MIDDLE_HEIGHT - Config.Vision.ZONE_TOP_HEIGHT))
+
+    # --- ROIs for each zone ---
+    roi_bottom = binary_line[zone_bottom_y:h, :]
+    roi_middle = binary_line[zone_middle_y:zone_bottom_y, :]
+    roi_top_frame = frame[zone_top_y:zone_middle_y, :]
+
+    # --- Process each zone ---
+    line_x, line_confidence = _detect_line_in_roi(roi_bottom)
+    corner_x, corner_confidence = _detect_line_in_roi(roi_middle)
+
+    # --- Object Detection ---
+    detected_objects = []
+    if Config.ObjectDetection.ENABLED:
+        use_yolo_now = Config.ObjectDetection.USE_YOLO and YOLO_AVAILABLE and yolo_model is not None
+        if use_yolo_now:
+            detected_objects = _detect_objects_yolo(roi_top_frame, yolo_model)
+        elif Config.ObjectDetection.USE_CV_FALLBACK:
+            # Invert threshold for object detection (detect dark objects on light background)
+            _, binary_objects = cv2.threshold(blurred[zone_top_y:zone_middle_y, :], Config.Vision.BLACK_THRESHOLD, 255, cv2.THRESH_BINARY)
+            detected_objects = _detect_objects_cv(binary_objects)
+
+    return {
+        'line_x': line_x, 'line_confidence': line_confidence,
+        'corner_x': corner_x, 'corner_confidence': corner_confidence,
+        'detected_objects': detected_objects,
+        'zones': { # For visualization
+            'bottom': (zone_bottom_y, h), 'middle': (zone_middle_y, zone_bottom_y),
+            'top': (zone_top_y, zone_middle_y)
+        }
+    }
+
+def _detect_line_in_roi(roi):
+    """Finds the largest contour in a region of interest (ROI) and its center."""
+    if roi.size == 0: return None, 0.0
     contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if not contours:
-        return None, 0.0
-    
-    # Find the largest contour (should be the line)
+    if not contours: return None, 0.0
+
     largest_contour = max(contours, key=cv2.contourArea)
     area = cv2.contourArea(largest_contour)
-    
-    if area < MIN_LINE_AREA:
+
+    if area < Config.Vision.MIN_LINE_CONTOUR_AREA:
         return None, 0.0
-    
-    # Calculate the center of the contour
+
     M = cv2.moments(largest_contour)
-    if M["m00"] == 0:
-        return None, 0.0
-    
+    if M["m00"] == 0: return None, 0.0
+
     cx = int(M["m10"] / M["m00"])
-    
-    # Calculate confidence based on area
-    max_possible_area = roi_height * width * 0.1  # 10% of ROI area
-    confidence = min(area / max_possible_area, 1.0)
-    
+    confidence = min(area / (roi.shape[0] * roi.shape[1] * 0.1), 1.0)
     return cx, confidence
 
-def detect_objects_smart(frame, binary_frame, line_center):
-    """Smart object detection that distinguishes line from obstacles"""
-    global object_detection_buffer
-    
-    # Check if object detection is enabled
-    if not ENABLE_OBJECT_DETECTION:
-        return []
-    
-    height, width = frame.shape[:2]
-    
-    # Focus on the middle portion for object detection (30-65% height)
-    roi_start = int(height * 0.3)
-    roi_end = int(height * 0.65)
-    
-    # Use original frame for better object detection
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    roi_gray = gray[roi_start:roi_end, :]
-    
-    # Apply blur to reduce noise
-    roi_blurred = cv2.GaussianBlur(roi_gray, (7, 7), 0)
-    
-    # Use edge detection to find objects
-    edges = cv2.Canny(roi_blurred, 50, 150)
-    
-    # Apply morphological operations to connect edges
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    edges_closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-    
-    # Fill contours to create solid objects
-    edges_filled = cv2.morphologyEx(edges_closed, cv2.MORPH_CLOSE, 
-                                   cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10)))
-    
-    # Find contours
-    contours, _ = cv2.findContours(edges_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
+def _detect_objects_yolo(roi_frame, model):
+    """Detects objects using a YOLO model."""
     objects = []
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        
-        # Filter by area
-        if area < MIN_OBJECT_AREA or area > OBJECT_MAX_AREA:
-            continue
-        
-        # Get bounding rectangle
-        x, y, w, h = cv2.boundingRect(contour)
-        
-        # Adjust y coordinate to account for ROI offset
-        y += roi_start
-        
-        # Filter by size
-        if w < OBJECT_MIN_WIDTH or h < OBJECT_MIN_HEIGHT:
-            continue
-        
-        # Filter by aspect ratio - objects shouldn't be too thin (like lines)
-        aspect_ratio = w / h
-        if aspect_ratio > 5.0 or aspect_ratio < 0.2:  # Exclude very thin shapes (lines)
-            continue
-        
-        # Calculate position relative to center (-1 to 1)
-        center_x = x + w // 2
-        relative_pos = (center_x - width // 2) / (width // 2)
-        
-        # SMART FILTERING: Exclude objects that are likely part of the line
-        if line_center is not None:
-            # Check if object is very close to the detected line
-            line_distance = abs(center_x - line_center)
-            if line_distance < 30:  # Skip objects too close to the line (probably part of line)
-                continue
-        
-        # Only consider objects in the center area where robot travels
-        if abs(relative_pos) > 0.3:
-            continue
-        
-        # Check if object is in reasonable detection zone
-        if y + h > height * 0.8 or y < height * 0.25:
-            continue
-        
-        # Calculate solidity (area of contour / area of bounding box)
-        bbox_area = w * h
-        solidity = area / bbox_area if bbox_area > 0 else 0
-        
-        # Objects should be reasonably solid
-        if solidity < 0.4:
-            continue
-        
-        # Check if object has sufficient height (not just a line segment)
-        if h < 40:  # Minimum height to be considered an obstacle
-            continue
-        
-        # Additional validation: check object density in original image
-        object_roi = gray[y:y+h, x:x+w]
-        mean_intensity = np.mean(object_roi)
-        
-        # Objects should be significantly different from background
-        if mean_intensity > 200 or mean_intensity < 30:  # Skip very bright or very dark regions
-            continue
-        
-        objects.append({
-            'bbox': (x, y, w, h),
-            'position': relative_pos,
-            'area': area,
-            'solidity': solidity,
-            'mean_intensity': mean_intensity,
-            'line_distance': abs(center_x - line_center) if line_center else width
-        })
-    
-    # Update detection buffer for confidence-based filtering
-    object_detection_buffer.append(len(objects) > 0)
-    if len(object_detection_buffer) > OBJECT_CONFIDENCE_FRAMES:
-        object_detection_buffer.pop(0)
-    
-    # Only report objects if they've been detected consistently (ALL frames must detect)
-    if len(object_detection_buffer) >= OBJECT_CONFIDENCE_FRAMES:
-        consistent_detection = sum(object_detection_buffer) == OBJECT_CONFIDENCE_FRAMES
-        if not consistent_detection:
-            objects = []
-    
+    try:
+        results = model.predict(roi_frame, conf=Config.ObjectDetection.YOLO.CONFIDENCE_THRESHOLD, verbose=False)
+        for res in results:
+            for box in res.boxes:
+                if int(box.cls[0]) in Config.ObjectDetection.YOLO.CLASSES_TO_AVOID:
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    w = x2 - x1
+                    center_x = x1 + w / 2
+                    objects.append({
+                        'position': (center_x - roi_frame.shape[1] / 2) / (roi_frame.shape[1] / 2),
+                        'width_ratio': w / roi_frame.shape[1],
+                        'class_name': model.names[int(box.cls[0])],
+                        'confidence': float(box.conf[0]),
+                        'bbox': (int(x1), int(y1), int(w), int(y2-y1))
+                    })
+    except Exception as e:
+        logger.error(f"YOLO detection error: {e}")
     return objects
 
-def simple_avoidance_fsm(objects_detected, line_found):
-    """Simple 3-step avoidance: Turn Right -> Go Forward -> Turn Left back to line"""
-    global avoidance_phase, avoidance_counter, robot_status
-    
-    # Start avoidance if object detected and not already avoiding
-    if objects_detected and avoidance_phase == 'none':
-        avoidance_phase = 'turning'
-        avoidance_counter = AVOIDANCE_TURN_FRAMES
-        robot_status = "AVOIDING: Turning right away from object"
-        logger.info("OBJECT DETECTED - Starting avoidance sequence")
-        speech_manager.announce("Object detected! Starting avoidance maneuver.", "obstacle", force=True)
-        return RIGHT
-    
-    # Execute avoidance sequence
-    if avoidance_phase == 'turning':
-        avoidance_counter -= 1
-        if avoidance_counter > 0:
-            robot_status = f"AVOIDING: Turning right ({avoidance_counter} frames left)"
-            return RIGHT
-        else:
-            avoidance_phase = 'forward'
-            avoidance_counter = AVOIDANCE_FORWARD_FRAMES
-            robot_status = "AVOIDING: Going forward past object"
-            speech_manager.announce("Moving forward to clear obstacle.", "avoidance")
-            return FORWARD
-    
-    elif avoidance_phase == 'forward':
-        avoidance_counter -= 1
-        if avoidance_counter > 0:
-            robot_status = f"AVOIDING: Going forward ({avoidance_counter} frames left)"
-            return FORWARD
-        else:
-            avoidance_phase = 'returning'
-            avoidance_counter = AVOIDANCE_RETURN_FRAMES
-            robot_status = "AVOIDING: Turning left back to line"
-            speech_manager.announce("Turning back to find the line.", "returning")
-            return LEFT
-    
-    elif avoidance_phase == 'returning':
-        # Check if we found the line early
-        if line_found:
-            avoidance_phase = 'none'
-            robot_status = "Line found! Avoidance complete"
-            logger.info("Avoidance complete - line reacquired")
-            speech_manager.announce("Line reacquired! Resuming line following.", "success", force=True)
-            return FORWARD
-        
-        avoidance_counter -= 1
-        if avoidance_counter > 0:
-            robot_status = f"AVOIDING: Turning left ({avoidance_counter} frames left)"
-            return LEFT
-        else:
-            avoidance_phase = 'none'
-            robot_status = "Avoidance complete - searching for line"
-            logger.info("Avoidance sequence complete")
-            speech_manager.announce("Avoidance maneuver complete.", "complete")
-            return FORWARD
-    
-    return None
+def _detect_objects_cv(roi_binary):
+    """Detects objects using classic computer vision (contour analysis)."""
+    objects = []
+    contours, _ = cv2.findContours(roi_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    height, width = roi_binary.shape
 
-def get_robot_command(line_center, frame_width, steering_value, objects_detected):
-    """Determine robot command based on line position and objects"""
-    global robot_status, line_detected, object_detected, line_lost_counter, last_valid_line_center
-    
-    prev_line_detected = line_detected
-    line_detected = line_center is not None
-    object_detected = len(objects_detected) > 0
-    
-    # Check avoidance first
-    avoidance_command = simple_avoidance_fsm(object_detected, line_detected)
-    if avoidance_command:
-        return avoidance_command
-    
-    # Normal line following
-    if line_center is not None:
-        # Reset line lost counter and update last valid position
-        line_lost_counter = 0
-        last_valid_line_center = line_center
-        robot_status = "Following line"
-        
-        # Announce line detection if we just found it
-        if not prev_line_detected:
-            speech_manager.announce("Line detected. Following path.", "line_found")
-        
-        # Simple steering logic with announcements for sharp turns
-        if abs(steering_value) < 0.1:
-            return FORWARD
-        elif steering_value > 0.3:
-            if abs(steering_value) > 0.6:
-                speech_manager.announce("Sharp left turn ahead.", "sharp_turn")
-            return LEFT
-        elif steering_value < -0.3:
-            if abs(steering_value) > 0.6:
-                speech_manager.announce("Sharp right turn ahead.", "sharp_turn")
-            return RIGHT
-        else:
-            return FORWARD
-    else:
-        # Line not detected - use persistence logic
-        line_lost_counter += 1
-        
-        # Don't stop immediately - allow a few frames of line loss
-        if line_lost_counter < 5:  # Allow 5 frames of line loss
-            robot_status = f"Line temporarily lost ({line_lost_counter}/5) - continuing"
-            return FORWARD  # Keep going forward briefly
-        elif line_lost_counter < 15:  # Try to find line by slight movements
-            robot_status = f"Searching for line ({line_lost_counter}/15)"
-            # Alternate between slight left and right movements
-            if line_lost_counter % 4 < 2:
-                return LEFT
-            else:
-                return RIGHT
-        else:
-            robot_status = "Line lost - stopping"
-            
-            # Announce line lost if we just lost it
-            if prev_line_detected or line_lost_counter == 15:
-                speech_manager.announce("Line lost. Stopping robot.", "line_lost")
-            
-            return STOP
+    for contour in contours:
+        if cv2.contourArea(contour) < Config.ObjectDetection.CV.OBJECT_SIZE_THRESHOLD:
+            continue
 
-def draw_debug_info(frame, line_center, objects, steering_value, brightness):
-    """Draw debug information on the frame"""
-    height, width = frame.shape[:2]
-    
-    # Draw center line
-    cv2.line(frame, (width//2, 0), (width//2, height), (255, 255, 255), 1)
-    
-    # Draw line detection area
-    roi_start = int(height * 0.7)
-    cv2.rectangle(frame, (0, roi_start), (width, height), (0, 255, 0), 2)
-    cv2.putText(frame, "LINE DETECTION", (10, roi_start + 20), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-    
-    # Draw object detection area (smart detection zone: 30-65% height)
-    roi_start = int(height * 0.3)
-    roi_end = int(height * 0.65)
-    if ENABLE_OBJECT_DETECTION:
-        cv2.rectangle(frame, (0, roi_start), (width, roi_end), (0, 0, 255), 2)
-        cv2.putText(frame, "SMART OBSTACLE DETECTION", (10, roi_start + 20), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-        cv2.putText(frame, "(Excludes line path)", (10, roi_start + 40), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-    else:
-        cv2.rectangle(frame, (0, roi_start), (width, roi_end), (128, 128, 128), 1)
-        cv2.putText(frame, "OBJECT DETECTION (DISABLED)", (10, roi_start + 20), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
-    
-    # Draw detected line
-    if line_center is not None:
-        line_y = int(height * 0.85)
-        cv2.circle(frame, (line_center, line_y), 10, (255, 0, 255), -1)
-        cv2.line(frame, (width//2, line_y), (line_center, line_y), (255, 0, 255), 3)
-        
-        # Show offset
-        offset_text = f"Offset: {line_offset:.2f}"
-        cv2.putText(frame, offset_text, (line_center - 50, line_y - 20),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
-    
+        x, y, w, h = cv2.boundingRect(contour)
+        width_ratio = w / width
+        aspect_ratio = w / h if h > 0 else 0
+        min_ar, max_ar = Config.ObjectDetection.CV.OBJECT_ASPECT_RATIO_RANGE
+
+        if width_ratio > Config.ObjectDetection.CV.OBJECT_WIDTH_THRESHOLD and min_ar < aspect_ratio < max_ar:
+            center_x = x + w / 2
+            objects.append({
+                'position': (center_x - width / 2) / (width / 2),
+                'width_ratio': width_ratio,
+                'class_name': 'CV_Object',
+                'confidence': 1.0,
+                'bbox': (x, y, w, h)
+            })
+    return objects
+
+def update_robot_logic(state, avoidance, vision_data, pid, dt):
+    """
+    Main logic loop to determine the robot's next command based on vision input.
+    This function modifies the state and avoidance objects directly.
+    """
+    # --- Line and Corner Detection Logic ---
+    state.line_x = vision_data['line_x']
+    state.confidence = vision_data['line_confidence']
+    state.line_detected = state.line_x is not None and state.confidence > 0.2
+
+    # Corner warning logic
+    if Config.CornerDetection.ENABLED:
+        shift = abs(vision_data['corner_x'] - state.line_x) if state.line_detected and vision_data['corner_x'] else 0
+        state.corner_warning = vision_data['corner_confidence'] > Config.CornerDetection.PREDICTION_THRESHOLD and shift > Config.Camera.WIDTH * 0.15
+
+    # --- Obstacle Detection and Avoidance State ---
+    state.object_detected = bool(vision_data.get('detected_objects'))
+    most_significant_object = max(vision_data['detected_objects'], key=lambda o: o['width_ratio']) if state.object_detected else None
+
+    # --- C-Shaped Curve Avoidance State Machine ---
+    if Config.Avoidance.ENABLED:
+        is_avoiding = avoidance.phase != 'none'
+
+        # State: Not avoiding, but an object is now detected -> START AVOIDANCE
+        if not is_avoiding and most_significant_object:
+            avoidance.phase = 'curve_out'
+            avoidance.progress = 0.0
+            avoidance.current_offset = state.line_offset
+            avoidance.current_obstacle = most_significant_object
+            avoidance.side, avoidance.target_offset = CShapedCurveCalculator.calculate_curve_parameters(
+                most_significant_object['position'], most_significant_object['width_ratio']
+            )
+            state.stats['avoidance_maneuvers'] += 1
+            state.status = f"Obstacle! Start C-Curve {avoidance.side}"
+            speech_manager.announce(f"Obstacle detected. Curving {avoidance.side}.", "obstacle", force=True)
+
+        # State: Currently avoiding -> CONTINUE AVOIDANCE
+        elif is_avoiding:
+            # Update progress based on time
+            avoidance.progress = min(avoidance.progress + Config.Avoidance.PROGRESS_RATE * dt, 1.0)
+
+            # Determine phase based on progress
+            if avoidance.progress < 0.25: avoidance.phase = 'curve_out'
+            elif avoidance.progress < 0.75: avoidance.phase = 'curve_around'
+            else: avoidance.phase = 'curve_back'
+
+            state.status = f"C-Curve: {avoidance.phase} {avoidance.side} ({avoidance.progress:.0%})"
+
+            # Calculate the steering for the curve
+            curve_steering = CShapedCurveCalculator.get_curve_steering(
+                avoidance.progress, avoidance.target_offset, avoidance.current_offset
+            )
+            state.steering_value = curve_steering
+            avoidance.current_offset += state.steering_value * dt * 5 # Update our position estimate
+
+            # Check for completion condition
+            line_reacquired = state.line_detected and abs(state.line_offset) < 0.4
+            if avoidance.progress >= 1.0 and line_reacquired:
+                state.status = "C-Curve Complete!"
+                speech_manager.announce("Path is clear.", "obstacle")
+                avoidance.__init__() # Reset avoidance state
+
+    # --- Standard Line Following (if not avoiding) ---
+    if avoidance.phase == 'none':
+        if state.line_detected:
+            state.status = "Following Line"
+            center_x = Config.Camera.WIDTH / 2
+            state.line_offset = (state.line_x - center_x) / center_x
+            state.steering_value = pid.calculate(-state.line_offset) # PID error is negative offset
+        else:
+            state.status = "Line Lost! Searching..."
+            pid.reset()
+            # Simple search: turn in the direction the line was last seen
+            state.steering_value = 0.7 if state.line_offset > 0 else -0.7
+            if abs(state.line_offset) < 0.1: # If last seen in center, stop
+                state.steering_value = 0
+                state.command = Config.Control.COMMANDS['STOP']
+
+    # --- Final Command Generation (if not stopped) ---
+    if state.command != Config.Control.COMMANDS['STOP'] or not state.line_detected:
+        if abs(state.steering_value) < Config.Control.STEERING_DEADZONE:
+            state.command = Config.Control.COMMANDS['FORWARD']
+        elif state.steering_value > 0:
+            state.command = Config.Control.COMMANDS['LEFT']
+        else:
+            state.command = Config.Control.COMMANDS['RIGHT']
+
+    # Update state with current PID params for the dashboard
+    state.pid_params['kp'], state.pid_params['ki'], state.pid_params['kd'] = pid.get_params()
+
+def draw_visualization(frame, state, avoidance, vision_data):
+    """Draws debug information and visualizations onto the frame."""
+    h, w, _ = frame.shape
+    center_x = w // 2
+
+    # Draw zones
+    zones = vision_data.get('zones', {})
+    cv2.rectangle(frame, (0, zones['top'][0]), (w-1, zones['top'][1]), (255, 50, 50), 2)
+    cv2.putText(frame, "Object Zone", (10, zones['top'][0] + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 50, 50), 1)
+    cv2.rectangle(frame, (0, zones['middle'][0]), (w-1, zones['middle'][1]), (50, 255, 50), 2)
+    cv2.putText(frame, "Corner Zone", (10, zones['middle'][0] + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50, 255, 50), 1)
+    cv2.rectangle(frame, (0, zones['bottom'][0]), (w-1, zones['bottom'][1]), (50, 50, 255), 2)
+    cv2.putText(frame, "Line Zone", (10, zones['bottom'][0] + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50, 50, 255), 1)
+
+    # Draw line detection
+    if state.line_detected:
+        line_y = zones['bottom'][0] + 20
+        cv2.circle(frame, (state.line_x, line_y), 10, (255, 0, 255), -1)
+        cv2.line(frame, (center_x, line_y), (state.line_x, line_y), (255, 0, 255), 2)
+
     # Draw detected objects
-    for i, obj in enumerate(objects):
-        x, y, w, h = obj['bbox']
-        # Use different colors based on object properties
-        if 'line_distance' in obj and obj['line_distance'] < 50:
-            color = (0, 165, 255)  # Orange for objects near line
-        else:
-            color = (0, 255, 255)  # Yellow for clear obstacles
-        
-        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-        cv2.putText(frame, f"OBSTACLE {i+1}", (x, y - 10),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-        
-        # Show distance from line
-        if 'line_distance' in obj:
-            cv2.putText(frame, f"D:{obj['line_distance']:.0f}px", (x, y + h + 15),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-        
-        # Show object intensity
-        if 'mean_intensity' in obj:
-            cv2.putText(frame, f"I:{obj['mean_intensity']:.0f}", (x + w - 40, y + h + 15),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-    
-    # Draw status information
-    info_y = 50
-    cv2.putText(frame, f"Status: {robot_status}", (10, info_y),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    cv2.putText(frame, f"Steering: {steering_value:.2f}", (10, info_y + 25),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-    cv2.putText(frame, f"Brightness: {brightness:.0f}", (10, info_y + 45),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-    cv2.putText(frame, f"FPS: {current_fps:.1f}", (10, info_y + 65),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-    cv2.putText(frame, f"Obj Confidence: {sum(object_detection_buffer)}/{len(object_detection_buffer)}", (10, info_y + 85),
-               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-    
-    # Draw avoidance status
-    if avoidance_phase != 'none':
-        cv2.putText(frame, f"AVOIDANCE: {avoidance_phase.upper()}", 
-                   (width//2 - 100, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    for obj in vision_data.get('detected_objects', []):
+        x, y, bw, bh = obj['bbox']
+        y_abs = y + zones['top'][0]
+        label = f"{obj['class_name']} ({obj['confidence']:.2f})"
+        cv2.rectangle(frame, (x, y_abs), (x + bw, y_abs + bh), (0, 0, 255), 2)
+        cv2.putText(frame, label, (x, y_abs - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
-# Flask Web Interface
+    # Draw C-Curve Avoidance visualization
+    if avoidance.phase != 'none':
+        progress_text = f"AVOIDING ({avoidance.side}): {avoidance.phase} {avoidance.progress:.0%}"
+        cv2.putText(frame, progress_text, (center_x - 150, h - 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        # Draw a progress bar for the maneuver
+        bar_y = h - 50
+        cv2.rectangle(frame, (center_x - 100, bar_y), (center_x + 100, bar_y + 15), (80, 80, 80), -1)
+        progress_width = int(200 * avoidance.progress)
+        cv2.rectangle(frame, (center_x - 100, bar_y), (center_x - 100 + progress_width, bar_y + 15), (0, 255, 255), -1)
+
+    # Draw main status text overlay
+    info_text = [
+        f"Status: {state.status}",
+        f"Command: {state.command}",
+        f"FPS: {state.fps:.1f}",
+        f"Offset: {state.line_offset:.2f} | Steer: {state.steering_value:.2f}",
+        f"Confidence: {state.confidence:.2f}",
+    ]
+    for i, text in enumerate(info_text):
+        cv2.putText(frame, text, (10, 30 + i * 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(frame, text, (10, 30 + i * 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+
+    return frame
+
+
+# --- Web Server ---
 app = Flask(__name__)
+
+# Global reference to the robot's state, to be populated in main()
+robot_state = None
+avoidance_state = None
 
 @app.route('/')
 def index():
+    """Serves the main web dashboard."""
+    # This HTML is kept as a string for single-file simplicity, as in the original.
+    # For larger projects, using Flask's render_template() is recommended.
     return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>OpenCV Line Follower</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 20px; background: #f0f0f0; }
-            .container { max-width: 1000px; margin: 0 auto; }
-            .video-container { text-align: center; margin: 20px 0; }
-            img { border: 2px solid #333; border-radius: 10px; }
-            .status { background: white; padding: 20px; border-radius: 10px; margin: 10px 0; }
-            .status h3 { margin: 0 0 10px 0; color: #333; }
-            .info { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
-            .stat { background: #e0e0e0; padding: 10px; border-radius: 5px; text-align: center; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>OpenCV Line Follower Robot</h1>
-            <div class="video-container">
-                <img src="/video_feed" alt="Robot Camera Feed" style="max-width: 100%; height: auto;">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Line Follower Robot Dashboard</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
+        .container { max-width: 1400px; margin: auto; display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
+        .card { background-color: #1e1e1e; border-radius: 12px; padding: 20px; border: 1px solid #333; }
+        h1, h2, h3 { color: #fff; border-bottom: 2px solid #03a9f4; padding-bottom: 10px; margin-top: 0; }
+        img.video-feed { width: 100%; border-radius: 8px; background-color: #000; }
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+        .stat-item { background-color: #2a2a2a; padding: 15px; border-radius: 8px; text-align: center; }
+        .stat-label { font-size: 0.9em; color: #aaa; }
+        .stat-value { font-size: 1.8em; font-weight: bold; color: #4dd0e1; margin-top: 5px; }
+        .status-dot { height: 12px; width: 12px; border-radius: 50%; display: inline-block; vertical-align: middle; margin-left: 8px; }
+        .online { background-color: #4caf50; }
+        .offline { background-color: #f44336; }
+        #command-display { font-size: 1.5em; font-weight: bold; text-transform: uppercase; padding: 10px; border-radius: 5px; margin-top: 5px; }
+        #pid-params { display: flex; justify-content: space-around; }
+        #avoidance-progress-bar { width: 100%; background-color: #444; border-radius: 5px; overflow: hidden; height: 25px; }
+        #avoidance-progress-fill { width: 0%; height: 100%; background-color: #ff9800; transition: width 0.2s; }
+        @media (max-width: 900px) { .container { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="main-content">
+            <div class="card">
+                <h2>🎥 Live Camera Feed</h2>
+                <img src="/video_feed" class="video-feed" alt="Video Feed">
             </div>
-            <div class="status">
-                <h3>Robot Status</h3>
-                <div class="info">
-                    <div class="stat">
-                        <strong>Status:</strong><br>
-                        <span id="status">Loading...</span>
+            <div class="card">
+                <h3>🧠 Avoidance Maneuver</h3>
+                <div id="avoidance-status">Status: Not Active</div>
+                <div id="avoidance-progress-bar"><div id="avoidance-progress-fill"></div></div>
+            </div>
+        </div>
+        <aside class="sidebar">
+            <div class="card">
+                <h2>📊 Robot Status</h2>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-label">System Status</div>
+                        <div class="stat-value" id="robot-status">...</div>
                     </div>
-                    <div class="stat">
-                        <strong>Line Detected:</strong><br>
-                        <span id="line-detected">No</span>
+                    <div class="stat-item">
+                        <div class="stat-label">ESP32</div>
+                        <div class="stat-value" id="esp-status">Offline <span class="status-dot offline"></span></div>
                     </div>
-                    <div class="stat">
-                        <strong>Object Detected:</strong><br>
-                        <span id="object-detected">No</span>
+                    <div class="stat-item">
+                        <div class="stat-label">Command</div>
+                        <div class="stat-value" id="command-display">STOP</div>
                     </div>
-                                         <div class="stat">
-                         <strong>ESP32:</strong><br>
-                         <span id="esp-status">Disconnected</span>
-                     </div>
-                     <div class="stat">
-                         <strong>Speech:</strong><br>
-                         <span id="speech-status">Disabled</span>
-                     </div>
-                     <div class="stat">
-                         <strong>TTS Engine:</strong><br>
-                         <span id="tts-engine">None</span>
-                     </div>
+                    <div class="stat-item">
+                        <div class="stat-label">FPS</div>
+                        <div class="stat-value" id="fps">0.0</div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <h3>🧭 Navigation</h3>
+                 <div class="stats-grid">
+                    <div class="stat-item"><div class="stat-label">Line Offset</div><div class="stat-value" id="offset">0.00</div></div>
+                    <div class="stat-item"><div class="stat-label">Confidence</div><div class="stat-value" id="confidence">0%</div></div>
                  </div>
-             </div>
-         </div>
-        
-        <script>
-            function updateStatus() {
-                fetch('/api/status')
-                    .then(response => response.json())
-                    .then(data => {
-                        document.getElementById('status').textContent = data.status;
-                                                 document.getElementById('line-detected').textContent = data.line_detected ? 'Yes' : 'No';
-                         document.getElementById('object-detected').textContent = data.object_detected ? 'Yes' : 'No';
-                         document.getElementById('esp-status').textContent = data.esp_connected ? 'Connected' : 'Disconnected';
-                         document.getElementById('speech-status').textContent = data.speech_enabled ? 'Active' : 'Disabled';
-                         document.getElementById('tts-engine').textContent = data.tts_engine;
-                    })
-                    .catch(error => console.error('Error:', error));
-            }
-            
-            setInterval(updateStatus, 1000);
-            updateStatus();
-        </script>
-    </body>
-    </html>
-    """
+            </div>
+            <div class="card">
+                <h3>⚙️ Adaptive PID</h3>
+                <div id="pid-params" class="stats-grid">
+                    <div class="stat-item"><div class="stat-label">P</div><div class="stat-value" id="pid-kp">0.0</div></div>
+                    <div class="stat-item"><div class="stat-label">I</div><div class="stat-value" id="pid-ki">0.0</div></div>
+                    <div class="stat-item"><div class="stat-label">D</div><div class="stat-value" id="pid-kd">0.0</div></div>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <script>
+        function updateStatus() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('robot-status').textContent = data.status;
+                    document.getElementById('fps').textContent = data.fps.toFixed(1);
+                    document.getElementById('command-display').textContent = data.command;
+                    document.getElementById('offset').textContent = data.offset.toFixed(2);
+                    document.getElementById('confidence').textContent = `${(data.confidence * 100).toFixed(0)}%`;
+
+                    const espStatus = document.getElementById('esp-status');
+                    espStatus.innerHTML = data.esp_connected ? 'Online <span class="status-dot online"></span>' : 'Offline <span class="status-dot offline"></span>';
+
+                    document.getElementById('pid-kp').textContent = data.pid_params.kp.toFixed(3);
+                    document.getElementById('pid-ki').textContent = data.pid_params.ki.toFixed(3);
+                    document.getElementById('pid-kd').textContent = data.pid_params.kd.toFixed(3);
+                    
+                    const avoidanceStatus = document.getElementById('avoidance-status');
+                    const avoidanceFill = document.getElementById('avoidance-progress-fill');
+                    if (data.avoidance_phase !== 'none') {
+                        avoidanceStatus.textContent = `Phase: ${data.avoidance_phase} (${data.avoidance_side})`;
+                        avoidanceFill.style.width = `${data.avoidance_progress * 100}%`;
+                    } else {
+                        avoidanceStatus.textContent = 'Status: Not Active';
+                        avoidanceFill.style.width = '0%';
+                    }
+                })
+                .catch(err => console.error("Failed to fetch status:", err));
+        }
+        setInterval(updateStatus, 500);
+        window.onload = updateStatus;
+    </script>
+</body>
+</html>
+"""
 
 @app.route('/video_feed')
 def video_feed():
-    def generate_frames():
+    """Streams the processed video frames."""
+    def generate():
         while True:
             with frame_lock:
-                if binary_frame_global is not None:
-                    # Convert binary frame to 3-channel for display
-                    binary_display = cv2.cvtColor(binary_frame_global, cv2.COLOR_GRAY2BGR)
-                    
-                    # Add some debug info to binary frame
-                    height, width = binary_display.shape[:2]
-                    cv2.putText(binary_display, "BINARY LINE DETECTION", (10, 30),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    cv2.putText(binary_display, f"Line Lost: {line_lost_counter}", (10, 60),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                    cv2.putText(binary_display, f"Status: {robot_status}", (10, 90),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
-                    
-                    # Draw line detection ROI on binary image
-                    roi_start = int(height * 0.7)
-                    cv2.rectangle(binary_display, (0, roi_start), (width, height), (0, 255, 0), 2)
-                    
-                    frame = binary_display
+                if output_frame is not None:
+                    frame = output_frame
                 else:
-                    frame = np.zeros((360, 640, 3), dtype=np.uint8)
-                    cv2.putText(frame, "No Binary Feed", (200, 180),
-                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-                    cv2.putText(frame, "Check camera connection", (150, 220),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
+                    # Create a placeholder frame if none is available
+                    frame = np.zeros((Config.Camera.HEIGHT, Config.Camera.WIDTH, 3), dtype=np.uint8)
+                    cv2.putText(frame, "No Feed", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
             
-            ret, jpeg = cv2.imencode('.jpg', frame)
-            if ret:
-                yield (b'--frame\r\n'
-                      b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
-            time.sleep(0.1)
-    
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-@app.route('/color_feed')
-def color_feed():
-    def generate_frames():
-        while True:
-            with frame_lock:
-                if current_frame is not None:
-                    frame = current_frame.copy()
-                else:
-                    frame = np.zeros((360, 640, 3), dtype=np.uint8)
-                    cv2.putText(frame, "No Camera Feed", (200, 180),
-                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if not ret:
+                continue
             
-            ret, jpeg = cv2.imencode('.jpg', frame)
-            if ret:
-                yield (b'--frame\r\n'
-                      b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
-            time.sleep(0.1)
-    
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            time.sleep(1/Config.Camera.FPS) # Cap the stream rate
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/api/status')
 def api_status():
+    """Provides the robot's status as a JSON object."""
+    if not robot_state or not avoidance_state:
+        return jsonify({'error': 'Robot not initialized'})
+        
     return jsonify({
-        'status': robot_status,
-        'line_detected': line_detected,
-        'object_detected': object_detected,
-        'esp_connected': esp_connected,
-        'line_offset': line_offset,
-        'fps': current_fps,
-        'avoidance_phase': avoidance_phase,
-        'speech_enabled': SPEECH_ENABLED and TTS_AVAILABLE and speech_manager.engine is not None,
-        'tts_engine': TTS_ENGINE if TTS_AVAILABLE else 'None'
+        'status': robot_state.status,
+        'command': robot_state.command,
+        'offset': robot_state.line_offset,
+        'fps': robot_state.fps,
+        'confidence': robot_state.confidence,
+        'esp_connected': robot_state.esp_connected,
+        'pid_params': robot_state.pid_params,
+        'avoidance_phase': avoidance_state.phase,
+        'avoidance_side': avoidance_state.side,
+        'avoidance_progress': avoidance_state.progress
     })
 
 def run_web_server():
-    logger.info("Starting web server at http://0.0.0.0:5000")
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True)
+    """Runs the Flask web server in a separate thread."""
+    try:
+        app.run(host='0.0.0.0', port=Config.Network.WEB_SERVER_PORT, debug=False)
+    except Exception as e:
+        logger.error(f"Web server failed to start: {e}")
+
+# --- Main Application ---
 
 def main():
-    global current_frame, binary_frame_global, line_offset, robot_status, current_fps
-    
-    logger.info("Starting OpenCV Line Follower Robot")
-    
-    # Initialize camera
+    """The main entry point of the robot application."""
+    global output_frame, robot_state, avoidance_state, speech_manager
+
+    # --- Initialization ---
+    robot_state = RobotState()
+    avoidance_state = AvoidanceState()
+    speech_manager = SpeechManager()
+    speech_manager.start()
+    speech_manager.announce("Robot systems initializing.", "startup", force=True)
+
+    # Initialize YOLO model
+    yolo_model = None
+    if Config.ObjectDetection.USE_YOLO:
+        if YOLO_AVAILABLE:
+            try:
+                logger.info(f"Loading YOLO model: {Config.ObjectDetection.YOLO.MODEL_PATH}")
+                yolo_model = YOLO(Config.ObjectDetection.YOLO.MODEL_PATH)
+                logger.info("YOLO model loaded successfully.")
+                speech_manager.announce("YOLO object detection is active.", "init")
+            except Exception as e:
+                logger.error(f"Failed to load YOLO model: {e}. Falling back to CV.")
+                yolo_model = None
+        else:
+            logger.warning("YOLO is enabled in config, but 'ultralytics' package is not installed.")
+
+    # Initialize PID controller and ESP32 connection
+    pid = AdaptivePID(Config.PID.KP, Config.PID.KI, Config.PID.KD, Config.PID.MAX_INTEGRAL)
+    esp_conn = ESP32Connection(Config.Network.ESP32_IP, Config.Network.ESP32_PORT)
+
+    # Initialize Camera
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        logger.error("Failed to open camera")
+        logger.warning("Camera at index 0 not found, trying index 1.")
+        cap = cv2.VideoCapture(1)
+    if not cap.isOpened():
+        logger.critical("Could not open any camera. Exiting.")
         return
-    
-    # Try to set camera properties
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    
-    # Get actual camera settings
-    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    actual_fps = cap.get(cv2.CAP_PROP_FPS)
-    
-    logger.info(f"Camera initialized: {actual_width}x{actual_height} @ {actual_fps} FPS")
-    
-    # Test capture
-    ret, test_frame = cap.read()
-    if not ret:
-        logger.error("Failed to capture test frame from camera")
-        return
-    logger.info(f"Test frame captured successfully: {test_frame.shape}")
-    
-    # Initialize PID controller
-    pid = SimplePID(KP, KI, KD)
-    
-    # Initialize ESP32 controller
-    esp32 = ESP32Controller(ESP32_IP, ESP32_PORT)
-    esp32.connect()
-    
-    # Start web server
+        
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, Config.Camera.WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, Config.Camera.HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, Config.Camera.FPS)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, Config.Camera.BUFFER_SIZE)
+    logger.info("Camera initialized successfully.")
+
+    # Start the web server thread
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
+    logger.info(f"Web dashboard running at http://0.0.0.0:{Config.Network.WEB_SERVER_PORT}")
     
-    # Start speech system
-    speech_manager.start()
-    speech_manager.announce("OpenCV Line Follower Robot initialized and ready!", "startup", force=True)
-    
-    # FPS calculation
-    fps_history = deque(maxlen=10)
-    
-    logger.info("Robot ready!")
-    robot_status = "Ready"
-    
+    speech_manager.announce("Initialization complete. Starting main loop.", "startup", force=True)
+
+    # --- Main Loop ---
+    fps_history = deque(maxlen=30)
+    last_loop_time = time.time()
     try:
         while True:
-            start_time = time.time()
+            # Calculate delta time (dt) for time-based calculations
+            current_time = time.time()
+            dt = current_time - last_loop_time
+            last_loop_time = current_time
             
-            # Capture frame
             ret, frame = cap.read()
             if not ret:
-                logger.warning("Failed to capture frame")
+                logger.warning("Failed to capture frame from camera.")
+                robot_state.stats['lost_frames'] += 1
+                time.sleep(0.1)
                 continue
             
-            # Detect line with adaptive thresholding
-            binary_frame, brightness = detect_line_adaptive(frame)
-            line_center, confidence = find_line_center(binary_frame)
+            robot_state.stats['total_frames'] += 1
+
+            # Core Logic
+            vision_data = process_image(frame, yolo_model)
+            update_robot_logic(robot_state, avoidance_state, vision_data, pid, dt)
             
-            # Detect objects (smart detection that avoids confusing line with obstacles)
-            detected_objects = detect_objects_smart(frame, binary_frame, line_center)
+            # Communication
+            esp_conn.send_command(robot_state.command)
+            robot_state.esp_connected = esp_conn.is_connected
             
-            # Calculate steering
-            if line_center is not None:
-                center_x = frame.shape[1] // 2
-                line_offset = (line_center - center_x) / center_x
-                steering_value = pid.calculate(-line_offset)  # Negative because we want to steer opposite to offset
-            else:
-                steering_value = 0.0
-                line_offset = 0.0
+            # Visualization
+            display_frame = draw_visualization(frame.copy(), robot_state, avoidance_state, vision_data)
             
-            # Get robot command
-            command = get_robot_command(line_center, frame.shape[1], steering_value, detected_objects)
-            
-            # Send command to ESP32
-            esp32.send_command(command)
-            
-            # Draw debug information
-            display_frame = frame.copy()
-            draw_debug_info(display_frame, line_center, detected_objects, steering_value, brightness)
-            
-            # Update shared frames for web interface
+            # Update shared frame for web stream
             with frame_lock:
-                current_frame = display_frame
-                binary_frame_global = binary_frame
+                output_frame = display_frame
             
-            # Calculate FPS
-            frame_time = time.time() - start_time
-            if frame_time > 0:
-                fps_history.append(1.0 / frame_time)
-                current_fps = sum(fps_history) / len(fps_history)
-            
-            # Small delay
-            time.sleep(0.05)
-            
+            # Update FPS
+            fps_history.append(1 / dt if dt > 0 else 0)
+            robot_state.fps = np.mean(fps_history)
+
     except KeyboardInterrupt:
-        logger.info("Stopping robot...")
-        robot_status = "Stopping"
-        speech_manager.announce("Shutting down robot.", "shutdown", force=True)
-    
+        logger.info("Shutdown requested by user (Ctrl+C).")
+        speech_manager.announce("Shutting down.", "shutdown", force=True)
+    except Exception as e:
+        logger.critical(f"An unhandled exception occurred in the main loop: {e}", exc_info=True)
     finally:
-        esp32.send_command(STOP)
-        esp32.close()
+        # --- Cleanup ---
+        logger.info("Cleaning up resources...")
         cap.release()
+        esp_conn.close()
         speech_manager.stop()
-        logger.info("Robot stopped cleanly")
+        logger.info("Robot stopped cleanly.")
 
 if __name__ == "__main__":
-    main() 
+    main()
