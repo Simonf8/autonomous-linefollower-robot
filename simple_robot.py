@@ -115,12 +115,13 @@ MIN_OBSTACLE_HEIGHT = 0.08  # Minimum height ratio to be significant
 # C-SHAPED TURN AVOIDANCE PARAMETERS - Like a C-shaped road curve
 CURVE_AVOIDANCE_ENABLED = True
 CURVE_DETECTION_DISTANCE = 2.0    # Start curve when obstacle is 2m away
-CURVE_RADIUS_MULTIPLIER = 2.2     # How wide the C-curve should be
-CURVE_SMOOTHNESS_FACTOR = 0.75    # Smoothness of the curve (0.0-1.0)
-CURVE_FORWARD_BIAS = 0.6          # How much to prioritize forward motion
-CURVE_RETURN_SENSITIVITY = 0.20   # How quickly to return to line
-C_CURVE_SHARPNESS = 1.4           # How sharp the C-curve should be
-C_CURVE_DEPTH = 1.5               # How deep into the C-curve to go
+CURVE_RADIUS_MULTIPLIER = 2.5     # How wide the C-curve should be
+CURVE_SMOOTHNESS_FACTOR = 0.80    # Smoothness of the curve (0.0-1.0)
+CURVE_FORWARD_BIAS = 0.85         # INCREASED: Much more forward motion during curve
+CURVE_RETURN_SENSITIVITY = 0.25   # How quickly to return to line
+C_CURVE_SHARPNESS = 1.2           # How sharp the C-curve should be (reduced for more forward motion)
+C_CURVE_DEPTH = 1.8               # How deep into the C-curve to go
+C_CURVE_FORWARD_EXTENSION = 1.4   # How much extra forward motion after clearing obstacle
 
 # Dynamic path calculation
 SAFETY_MARGIN = 1.5           # Multiply obstacle size by this for safety
@@ -374,43 +375,54 @@ class CShapedCurveCalculator:
     @staticmethod
     def calculate_curve_steering(progress, curve_radius, target_offset, current_offset):
         """
-        Calculate steering for C-shaped curve progression
+        Calculate steering for C-shaped curve progression with STRONG forward bias
         progress: 0.0 to 1.0 (0 = start curve, 1 = end curve)
         """
-        # C-shaped curve with three distinct phases
-        # Phase 1 (0.0-0.25): Sharp curve out from line (start of C)
-        # Phase 2 (0.25-0.75): Deep curve around obstacle (middle of C)  
-        # Phase 3 (0.75-1.0): Sharp curve back to line (end of C)
+        # C-shaped curve with four phases for better forward progress
+        # Phase 1 (0.0-0.2): Quick curve out from line 
+        # Phase 2 (0.2-0.6): Forward movement around obstacle with slight curve
+        # Phase 3 (0.6-0.8): Continue forward while maintaining clearance  
+        # Phase 4 (0.8-1.0): Quick curve back towards line search area
         
-        if progress <= 0.25:
-            # Sharp curve out - rapid increase to form start of C
-            phase_progress = progress / 0.25
+        if progress <= 0.2:
+            # Quick curve out - get clear of obstacle fast
+            phase_progress = progress / 0.2
             smooth_progress = CShapedCurveCalculator._c_curve_function(phase_progress)
-            desired_offset = target_offset * smooth_progress * 0.7  # 70% of target during curve out
+            desired_offset = target_offset * smooth_progress * 0.8
+            forward_emphasis = 0.9  # Strong forward motion even while curving out
             
-        elif progress <= 0.75:
-            # Deep curve around obstacle - maintain maximum offset (middle of C)
-            phase_progress = (progress - 0.25) / 0.5
-            # Use cosine function for smooth deep curve
-            curve_factor = 0.8 + 0.2 * np.cos(phase_progress * np.pi)
-            desired_offset = target_offset * curve_factor  # 80-100% of target
+        elif progress <= 0.6:
+            # Forward movement around obstacle - prioritize moving FORWARD
+            phase_progress = (progress - 0.2) / 0.4
+            # Maintain most of the offset but focus on forward progress
+            desired_offset = target_offset * 0.9  # Stay clear of obstacle
+            forward_emphasis = 0.95  # VERY strong forward motion
+            
+        elif progress <= 0.8:
+            # Continue forward past obstacle - ensure we're well clear
+            phase_progress = (progress - 0.6) / 0.2
+            # Gradually reduce offset as we move past obstacle
+            desired_offset = target_offset * (0.9 - 0.3 * phase_progress)
+            forward_emphasis = 0.92  # Still very forward-focused
             
         else:
-            # Sharp curve back - rapid return to form end of C
-            phase_progress = (progress - 0.75) / 0.25
+            # Quick curve back to search area ahead
+            phase_progress = (progress - 0.8) / 0.2
             smooth_progress = CShapedCurveCalculator._c_curve_function(phase_progress)
-            desired_offset = target_offset * 0.8 * (1.0 - smooth_progress)
+            # Return to center-ish area to search for line ahead
+            desired_offset = target_offset * 0.6 * (1.0 - smooth_progress)
+            forward_emphasis = 0.88  # Maintain forward motion while returning
         
         # Calculate steering to achieve desired offset
         offset_error = desired_offset - current_offset
         
-        # Apply C-curve specific steering with sharper response
-        steering = offset_error * CURVE_SMOOTHNESS_FACTOR * C_CURVE_SHARPNESS
+        # Apply C-curve steering with reduced sharpness for more forward motion
+        steering = offset_error * CURVE_SMOOTHNESS_FACTOR * (C_CURVE_SHARPNESS * 0.7)
         
-        # Reduce forward bias during sharp turns for better C-shape
-        forward_component = CURVE_FORWARD_BIAS * (0.7 + 0.3 * (1.0 - abs(steering)))
+        # Strong forward component - this is key for moving past the obstacle
+        forward_component = CURVE_FORWARD_BIAS * forward_emphasis
         
-        return np.clip(steering, -1.0, 1.0), forward_component
+        return np.clip(steering, -0.8, 0.8), forward_component
     
     @staticmethod
     def _smooth_step(x):
@@ -983,7 +995,8 @@ def get_c_shaped_curve_command(steering, detected_objects=None, line_detected_no
         # CONTINUE SMOOTH CURVE AVOIDANCE
         
         # Update progress (increment based on processing speed)
-        progress_increment = 0.015  # Smooth progression
+        # Slower progression for more forward movement
+        progress_increment = 0.012  # Slower progression for more time to move forward
         avoidance_progress = min(avoidance_progress + progress_increment, 1.0)
         
         # Calculate smooth curve steering
@@ -997,22 +1010,25 @@ def get_c_shaped_curve_command(steering, detected_objects=None, line_detected_no
         # Update our position in the curve
         curve_center_offset += curve_steering * 0.1  # Simulate movement
         
-        # Determine C-curve phase
-        if avoidance_progress <= 0.25:
+        # Determine C-curve phase (updated for new 4-phase system)
+        if avoidance_progress <= 0.2:
             avoidance_phase = 'c_curve_out'
             phase_name = "C-CURVE OUT"
-        elif avoidance_progress <= 0.75:
-            avoidance_phase = 'c_curve_around'
-            phase_name = "C-CURVE AROUND"
+        elif avoidance_progress <= 0.6:
+            avoidance_phase = 'c_curve_forward'
+            phase_name = "C-CURVE FORWARD"
+        elif avoidance_progress <= 0.8:
+            avoidance_phase = 'c_curve_clear'
+            phase_name = "C-CURVE CLEARING"
         else:
-            avoidance_phase = 'c_curve_back'
-            phase_name = "C-CURVE BACK"
+            avoidance_phase = 'c_curve_search'
+            phase_name = "C-CURVE SEARCH"
         
         # Check if we should complete the curve
-        if avoidance_progress >= 1.0:
-            if line_detected_now and abs(line_offset_now) < 0.3:
-                # Successfully found line, complete C-curve
-                logger.info("✅ C-SHAPED CURVE COMPLETED - Line reacquired!")
+        if avoidance_progress >= 0.9:  # Start looking for completion earlier
+            if line_detected_now and abs(line_offset_now) < 0.4:
+                # Successfully found line ahead after passing obstacle
+                logger.info("✅ C-SHAPED CURVE COMPLETED - Line found ahead!")
                 avoidance_phase = 'none'
                 avoidance_progress = 0.0
                 curve_center_offset = 0.0
@@ -1026,31 +1042,53 @@ def get_c_shaped_curve_command(steering, detected_objects=None, line_detected_no
                     return COMMANDS['FORWARD']
                 else:
                     return COMMANDS['LEFT'] if transition_steering > 0 else COMMANDS['RIGHT']
-            
-            elif avoidance_progress >= 1.2:  # Extended C-curve if no line found
-                logger.info("⚠️ C-SHAPED CURVE TIMEOUT - Resuming search")
+        
+        # Extended curve with forward search if no line found        
+        if avoidance_progress >= 1.0:
+            if avoidance_progress >= 1.4:  # Much longer extension for forward search
+                logger.info("⚠️ C-SHAPED CURVE COMPLETED - Switching to forward search")
                 avoidance_phase = 'none'
                 avoidance_progress = 0.0
                 curve_center_offset = 0.0
+                # Continue forward to search for line ahead
                 return COMMANDS['FORWARD']
-        
-        # Generate command based on curve steering
-        logger.debug(f"🌊 {phase_name}: progress={avoidance_progress:.2f}, "
-                    f"steering={curve_steering:.2f}, offset={curve_center_offset:.2f}")
-        
-        # Convert curve steering to command
-        if abs(curve_steering) < 0.1:
-            return COMMANDS['FORWARD']
-        elif curve_steering > 0.3:
-            return COMMANDS['LEFT']
-        elif curve_steering < -0.3:
-            return COMMANDS['RIGHT']
-        else:
-            # Gentle curve - alternate between forward and turn for smoothness
-            if int(avoidance_progress * 100) % 3 == 0:
-                return COMMANDS['LEFT'] if curve_steering > 0 else COMMANDS['RIGHT']
             else:
+                # Continue the curve with forward emphasis while searching
+                logger.debug(f"🔍 C-CURVE EXTENDED: Searching ahead ({avoidance_progress:.2f})")
+                # Force more forward movement during extended search
+                if int(avoidance_progress * 50) % 3 == 0:  # Mostly forward movement
+                    return COMMANDS['FORWARD']
+                else:
+                    return COMMANDS['LEFT'] if curve_steering > 0 else COMMANDS['RIGHT']
+        
+        # Generate command based on curve steering with STRONG forward bias
+        logger.debug(f"🌊 {phase_name}: progress={avoidance_progress:.2f}, "
+                    f"steering={curve_steering:.2f}, offset={curve_center_offset:.2f}, forward={forward_component:.2f}")
+        
+        # Convert curve steering to command with heavy forward emphasis
+        steering_threshold = 0.4  # Higher threshold = more forward movement
+        
+        # During forward phases, prioritize forward movement even more
+        if avoidance_phase in ['c_curve_forward', 'c_curve_clear']:
+            forward_ratio = 0.8  # 80% forward movement during these phases
+            if int(avoidance_progress * 100) % 10 < (forward_ratio * 10):
                 return COMMANDS['FORWARD']
+        
+        # For all phases, use forward-biased steering
+        if abs(curve_steering) < 0.15:  # Very small steering = forward
+            return COMMANDS['FORWARD']
+        elif abs(curve_steering) < steering_threshold:
+            # Light steering - alternate with forward for smooth motion
+            if int(avoidance_progress * 100) % 4 < 3:  # 75% forward, 25% turn
+                return COMMANDS['FORWARD']
+            else:
+                return COMMANDS['LEFT'] if curve_steering > 0 else COMMANDS['RIGHT']
+        else:
+            # Stronger steering needed
+            if int(avoidance_progress * 100) % 3 < 2:  # Still 66% forward movement
+                return COMMANDS['FORWARD']
+            else:
+                return COMMANDS['LEFT'] if curve_steering > 0 else COMMANDS['RIGHT']
     
     # NORMAL LINE FOLLOWING BEHAVIOR
     if abs(steering) < STEERING_DEADZONE:
@@ -1193,10 +1231,12 @@ def draw_debug_info(frame, detection_data):
     if avoidance_phase != 'none':
         if avoidance_phase == 'c_curve_out':
             phase_text = f"C-CURVE: OUT ({avoidance_progress:.1%})"
-        elif avoidance_phase == 'c_curve_around':
-            phase_text = f"C-CURVE: AROUND ({avoidance_progress:.1%})"
-        elif avoidance_phase == 'c_curve_back':
-            phase_text = f"C-CURVE: BACK ({avoidance_progress:.1%})"
+        elif avoidance_phase == 'c_curve_forward':
+            phase_text = f"C-CURVE: FORWARD ({avoidance_progress:.1%})"
+        elif avoidance_phase == 'c_curve_clear':
+            phase_text = f"C-CURVE: CLEARING ({avoidance_progress:.1%})"
+        elif avoidance_phase == 'c_curve_search':
+            phase_text = f"C-CURVE: SEARCHING ({avoidance_progress:.1%})"
         else:
             phase_text = f"C-CURVE: {avoidance_phase.upper()}"
         
@@ -2070,11 +2110,13 @@ def main():
                         
                     # Enhanced status with C-shaped curve avoidance phases
                     if avoidance_phase == 'c_curve_out':
-                        robot_status = f"🌊 C-CURVE: Sharp curve out ({avoidance_progress:.1%})"
-                    elif avoidance_phase == 'c_curve_around':
-                        robot_status = f"🌊 C-CURVE: Deep around obstacle ({avoidance_progress:.1%})"
-                    elif avoidance_phase == 'c_curve_back':
-                        robot_status = f"🌊 C-CURVE: Sharp curve back ({avoidance_progress:.1%})"
+                        robot_status = f"🌊 C-CURVE: Curving out ({avoidance_progress:.1%})"
+                    elif avoidance_phase == 'c_curve_forward':
+                        robot_status = f"🌊 C-CURVE: Moving forward around obstacle ({avoidance_progress:.1%})"
+                    elif avoidance_phase == 'c_curve_clear':
+                        robot_status = f"🌊 C-CURVE: Clearing obstacle ({avoidance_progress:.1%})"
+                    elif avoidance_phase == 'c_curve_search':
+                        robot_status = f"🌊 C-CURVE: Searching for line ahead ({avoidance_progress:.1%})"
                     elif object_detected:
                         robot_status = f"Obstacle detected - Starting C-shaped curve"
                         if last_avoidance_announced != 'detected':
