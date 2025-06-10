@@ -14,14 +14,13 @@ import math
 
 # Voice model selection - Choose your meme voice!
 AVAILABLE_VOICES = {
-    'ryan': './voices/en_US-ryan-medium.onnx',          # Male voice - meme potential
-    'lessac': './voices/en_US-lessac-medium.onnx',     # Original female voice  
-    'robot': './voices/en_US-libritts_r-medium.onnx',  # Synthetic/robotic voice - BEST FOR MEMES
+    'ryan': './voices/en_US-ryan-medium.onnx',          
+    'lessac': './voices/en_US-lessac-medium.onnx',     
+    'robot': './voices/en_US-libritts_r-medium.onnx',  
     'random': 'random'  # Will pick randomly from available voices
 }
 
-# Set your preferred voice here
-PREFERRED_VOICE = 'robot'  # Change this to 'lessac', 'ryan', 'robot', or 'random'
+PREFERRED_VOICE = 'robot'  
 
 
 # Try to import YOLO
@@ -34,12 +33,10 @@ except ImportError:
     print("YOLO not available. Install with: pip install ultralytics")
     print("Falling back to basic computer vision detection")
 
-# Try to import text-to-speech (Piper TTS)
+
 try:
     import subprocess
     import queue
-    # Check if Piper TTS is available
-    # Check if Piper TTS is available with any voice model
     piper_available = os.path.exists('./piper/piper')
     voice_available = any(os.path.exists(path) for name, path in AVAILABLE_VOICES.items() if name != 'random')
     if piper_available and voice_available:
@@ -67,10 +64,10 @@ BLACK_THRESHOLD = 60  # Higher values detect darker lines
 BLUR_SIZE = 5
 MIN_CONTOUR_AREA = 100  # Minimum area to be considered a line
 
-# Multi-zone detection parameters
-ZONE_BOTTOM_HEIGHT = 0.30   # Bottom 20% for primary line following
-ZONE_MIDDLE_HEIGHT = 0.20   # Middle 25% for corner prediction
-ZONE_TOP_HEIGHT = 0.50      # Top 45% for early object detection (much larger!)
+
+ZONE_BOTTOM_HEIGHT = 0.40   # Bottom 20% for primary line following
+ZONE_MIDDLE_HEIGHT = 0.40   # Middle 25% for corner prediction
+ZONE_TOP_HEIGHT = 0.20      
 
 # Corner detection parameters
 CORNER_DETECTION_ENABLED = True
@@ -80,15 +77,15 @@ CORNER_PREDICTION_THRESHOLD = 0.3   # Confidence needed for corner warning
 
 # Object detection parameters
 OBJECT_DETECTION_ENABLED = True  # Enable obstacle detection and avoidance
-USE_YOLO = True  # Use YOLO11n for accurate object detection (recommended)
-USE_SMART_AVOIDANCE = True  # Use smart avoidance with live mapping and learning
+USE_YOLO = True  
+USE_SMART_AVOIDANCE = True  
 
 # YOLO Configuration
-YOLO_MODEL_SIZE = "yolo11n.pt"  # Nano model for speed (yolo11s.pt, yolo11m.pt for more accuracy)
-YOLO_CONFIDENCE_THRESHOLD = 0.4  # Lower threshold for better detection
+YOLO_MODEL_SIZE = "yolo11n.pt"  
+YOLO_CONFIDENCE_THRESHOLD = 0.4  
 YOLO_CLASSES_TO_AVOID = [0, 39, 41, 43, 44, 45, 46, 47, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79]  # person, bottle, cup, bowl, etc.
 
-# Legacy CV-based detection parameters (fallback if YOLO not available)
+
 OBJECT_SIZE_THRESHOLD = 800    # Minimum contour area 
 OBJECT_WIDTH_THRESHOLD = 0.20  # Object width ratio to trigger avoidance
 OBJECT_HEIGHT_THRESHOLD = 0.15  # Object height ratio to trigger avoidance
@@ -219,6 +216,16 @@ SPEECH_ENABLED = True          # Enable/disable speech announcements
 SPEECH_RATE = 150             # Speech rate (words per minute)
 SPEECH_VOLUME = 0.8           # Speech volume (0.0 to 1.0)
 ANNOUNCE_INTERVAL = 3.0       # Minimum seconds between similar announcements
+
+# Add corner turning constants and state variables
+CORNER_TURN_OFFSET_THRESHOLD = 0.35  # Offset to trigger corner turn mode
+CORNER_TURN_COUNT_THRESHOLD = 5      # Consecutive frames to confirm corner
+CORNER_TURN_EXIT_THRESHOLD = 0.12    # Offset to exit corner turn when line recenters
+CORNER_TURN_MAX_FRAMES = 120         # Safety limit to exit corner turn
+
+corner_turn_mode = False             # Whether we are currently turning a corner
+corner_turn_direction = 'LEFT'       # Direction we are turning ('LEFT' or 'RIGHT')
+corner_turn_frame_counter = 0         # Frames spent in corner turn mode
 
 # -----------------------------------------------------------------------------
 # --- Global Variables ---
@@ -2445,6 +2452,7 @@ def run_flask_server():
 def main():
     global output_frame, line_offset, steering_value, turn_command, robot_status
     global line_detected, current_fps, confidence, esp_connection, robot_stats, yolo_model, smart_avoidance, speech_manager
+    global corner_turn_mode, corner_turn_direction, corner_turn_frame_counter
     
     logger.info("Starting Smart Line Follower Robot")
     robot_status = "Starting camera"
@@ -2616,16 +2624,24 @@ def main():
                 # Check for corner (enhanced with prediction)
                 if abs(line_offset) > 0.4 and confidence > CORNER_LINE_CONFIDENCE:
                     corner_detected_count += 1
-                    
-                    # Adjust status based on corner detection duration
-                    if corner_detected_count > 5:
-                        robot_status = f"Taking corner ({corner_detected_count})"
-                        
-                        # For sharp corners, exaggerate the steering to make tighter turns
-                        if abs(line_offset) > 0.5:
-                            line_offset *= 1.5  # Increase turning response
-                    else:
-                        robot_status = f" Corner detected ({corner_detected_count})"
+                    # Check if we should enter corner turning mode
+                    if (not corner_turn_mode and corner_detected_count >= CORNER_TURN_COUNT_THRESHOLD
+                            and abs(line_offset) > CORNER_TURN_OFFSET_THRESHOLD):
+                        corner_turn_mode = True
+                        corner_turn_direction = 'LEFT' if line_offset > 0 else 'RIGHT'
+                        corner_turn_frame_counter = 0
+                        logger.info(f"🟡 Entering corner turn mode: {corner_turn_direction}")
+                        if speech_manager:
+                            speech_manager.announce("Turning corner", "corner")
+                     
+                     # Adjust status based on corner detection duration
+                     if True:
+                         robot_status = f"Taking corner ({corner_detected_count})"
+                         # For sharp corners, exaggerate the steering to make tighter turns
+                         if abs(line_offset) > 0.5:
+                             line_offset *= 1.5  # Increase turning response
+                     else:
+                         robot_status = f" Corner detected ({corner_detected_count})"
                 elif corner_warning:
                     robot_status = f"Corner predicted ahead"
                 else:
@@ -2788,6 +2804,24 @@ def main():
                 # OVERRIDE ANY COMMAND - Force strong turn during turnaround
                 turn_command = COMMANDS[TURNAROUND_COMMAND]
                 logger.info(f"🔄 TURNAROUND SAFETY OVERRIDE: Forcing {turn_command} (frame: {TURNAROUND_FRAMES - avoidance_duration})")
+            
+            # Corner turning mode override (after turnaround safety)
+            if corner_turn_mode and avoidance_phase == 'none':
+                corner_turn_frame_counter += 1
+                if line_detected and abs(line_offset) < CORNER_TURN_EXIT_THRESHOLD:
+                    # Corner successfully completed, exit mode
+                    corner_turn_mode = False
+                    logger.info("✅ Corner turn completed – resuming normal line following")
+                    if speech_manager:
+                        speech_manager.announce("Corner completed", "corner_done")
+                elif corner_turn_frame_counter >= CORNER_TURN_MAX_FRAMES:
+                    # Timeout/failsafe – exit corner mode
+                    corner_turn_mode = False
+                    logger.warning("⚠️ Corner turn timeout – resuming normal control")
+                else:
+                    # Continue turning in the chosen direction
+                    turn_command = COMMANDS[corner_turn_direction]
+                    robot_status = f"Turning corner ({corner_turn_direction})"
             
             # Send command to ESP32 with enhanced logging during turnaround
             if avoidance_phase == 'turnaround':
