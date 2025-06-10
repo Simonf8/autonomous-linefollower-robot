@@ -7,9 +7,21 @@ import time
 import logging
 import threading
 import json
+import os
 from collections import deque
 from flask import Flask, Response, render_template_string, jsonify
 import math
+
+# Voice model selection - Choose your meme voice!
+AVAILABLE_VOICES = {
+    'ryan': './voices/en_US-ryan-medium.onnx',          # Male voice - meme potential
+    'lessac': './voices/en_US-lessac-medium.onnx',     # Original female voice  
+    'robot': './voices/en_US-libritts_r-medium.onnx',  # Synthetic/robotic voice - BEST FOR MEMES
+    'random': 'random'  # Will pick randomly from available voices
+}
+
+# Set your preferred voice here
+PREFERRED_VOICE = 'robot'  # Change this to 'lessac', 'ryan', 'robot', or 'random'
 
 
 # Try to import YOLO
@@ -25,10 +37,12 @@ except ImportError:
 # Try to import text-to-speech (Piper TTS)
 try:
     import subprocess
-    import os
     import queue
     # Check if Piper TTS is available
-    if os.path.exists('./piper/piper') and os.path.exists('./voices/en_US-lessac-medium.onnx'):
+    # Check if Piper TTS is available with any voice model
+    piper_available = os.path.exists('./piper/piper')
+    voice_available = any(os.path.exists(path) for name, path in AVAILABLE_VOICES.items() if name != 'random')
+    if piper_available and voice_available:
         TTS_AVAILABLE = True
         TTS_ENGINE = 'piper'
         print("Piper TTS available - High quality neural speech")
@@ -102,7 +116,7 @@ ROBOT_SPEED_M_S = 0.15  # Slightly faster robot speed
 
 # Enhanced obstacle mapping parameters
 OBSTACLE_MAP_SIZE = 50  # Remember last 50 obstacles
-OBSTACLE_MEMORY_TIMEOUT = 30.0  # Forget obstacles after 30 seconds
+OBSTACLE_MEMORY_TIMEOUT = 3.0  # Forget obstacles after 30 seconds
 MIN_OBSTACLE_WIDTH = 0.1  # Minimum width ratio to be significant
 MIN_OBSTACLE_HEIGHT = 0.08  # Minimum height ratio to be significant
 
@@ -119,18 +133,19 @@ PATH_CALCULATION_ENABLED = True
 STEERING_DEADZONE = 0.25  # Larger deadzone to prevent overreaction
 MAX_STEERING = 0.8        # Limited steering range to prevent huge turns
 
-# Line search timeout parameters - PREVENT PREMATURE STOPPING
-# PROBLEM: Robot was stopping after just 9 seconds (45 frames @ 5 FPS)
-# SOLUTION: Extended timeout to 30 seconds with better search phases
-LINE_SEARCH_TIMEOUT_FRAMES = 150  # Increased from 45 (30 seconds at 5 FPS)
-LINE_SEARCH_RESET_FRAMES = 200    # Reset search pattern after this many frames
-LINE_SEARCH_BRIEF_GAP_FRAMES = 8  # Increased from 5 - allow longer brief gaps
-LINE_SEARCH_DIRECTION_FRAMES = 25 # Increased from 15 - search direction longer
-LINE_SEARCH_OPPOSITE_FRAMES = 50  # Increased from 30 - search opposite longer
+# Line search timeout parameters - NEVER GIVE UP SEARCHING!
+# SOLUTION: Make robot extremely persistent - keep searching indefinitely with different strategies
+LINE_SEARCH_TIMEOUT_FRAMES = 1  # Essentially infinite - never stop searching
+LINE_SEARCH_RESET_FRAMES = 300       # Reset search pattern every 60 seconds
+LINE_SEARCH_BRIEF_GAP_FRAMES = 15    # Allow longer brief gaps (3 seconds)
+LINE_SEARCH_DIRECTION_FRAMES = 50    # Search each direction longer (10 seconds)
+LINE_SEARCH_OPPOSITE_FRAMES = 100    # Search opposite direction longer (20 seconds)
+LINE_SEARCH_SPIRAL_FRAMES = 200      # After basic search, try spiral pattern (40 seconds)
 
-# Line detection confidence parameters
-MIN_LINE_CONFIDENCE = 0.15  # Reduced from 0.2 - more lenient line detection
-CORNER_LINE_CONFIDENCE = 0.25  # Higher confidence needed for corner detection
+# Line detection confidence parameters - MORE LENIENT FOR SEARCHING
+MIN_LINE_CONFIDENCE = 0.10  # Much more lenient - detect even faint lines
+CORNER_LINE_CONFIDENCE = 0.20  # Slightly lower for corner detection
+SEARCH_LINE_CONFIDENCE = 0.05  # Extra lenient when actively searching
 
 # Learning state
 obstacle_memory = {}  # Learning-based obstacle memory
@@ -271,9 +286,9 @@ class SpeechManager:
                 if TTS_ENGINE == 'piper':
                     # Piper TTS setup
                     self.piper_path = './piper/piper'
-                    self.voice_model = './voices/en_US-lessac-medium.onnx'
+                    self.voice_model = self._select_voice()
                     self.engine = True  # Flag to indicate piper is ready
-                    logger.info("Piper TTS system initialized successfully")
+                    logger.info(f"Piper TTS system initialized with voice: {self.voice_model}")
                 elif TTS_ENGINE == 'pyttsx3':
                     # pyttsx3 setup (fallback)
                     import pyttsx3
@@ -293,6 +308,39 @@ class SpeechManager:
             except Exception as e:
                 logger.error(f"Failed to initialize speech system: {e}")
                 self.engine = None
+    
+    def _select_voice(self):
+        """Select voice model based on preferences and availability"""
+        import random
+        
+        if PREFERRED_VOICE == 'random':
+            # Pick random voice from available models
+            available = []
+            for name, path in AVAILABLE_VOICES.items():
+                if name != 'random' and os.path.exists(path):
+                    available.append(path)
+            if available:
+                selected = random.choice(available)
+                logger.info(f"🎲 Random voice selected: {selected}")
+                return selected
+        else:
+            # Use preferred voice if available
+            if PREFERRED_VOICE in AVAILABLE_VOICES:
+                voice_path = AVAILABLE_VOICES[PREFERRED_VOICE]
+                if os.path.exists(voice_path):
+                    logger.info(f"🎤 Using preferred voice: {PREFERRED_VOICE}")
+                    return voice_path
+                else:
+                    logger.warning(f"Preferred voice '{PREFERRED_VOICE}' not found at {voice_path}")
+        
+        # Fallback: use first available voice
+        for name, path in AVAILABLE_VOICES.items():
+            if name != 'random' and os.path.exists(path):
+                logger.info(f"🎤 Fallback to available voice: {name}")
+                return path
+        
+        # Final fallback
+        return './voices/en_US-ryan-medium.onnx'
     
     def start(self):
         if self.engine:
@@ -375,6 +423,30 @@ class SpeechManager:
                 continue
             except Exception as e:
                 logger.error(f"Speech worker error: {e}")
+    
+    def change_voice(self, voice_name):
+        """Change voice dynamically during runtime"""
+        if voice_name in AVAILABLE_VOICES and voice_name != 'random':
+            voice_path = AVAILABLE_VOICES[voice_name]
+            if os.path.exists(voice_path):
+                self.voice_model = voice_path
+                logger.info(f"🎤 Voice changed to: {voice_name} ({voice_path})")
+                self.announce(f"Voice changed to {voice_name}. How do I sound now?", "voice_change", force=True)
+                return True
+            else:
+                logger.warning(f"Voice file not found: {voice_path}")
+                return False
+        else:
+            logger.warning(f"Unknown voice: {voice_name}")
+            return False
+    
+    def list_available_voices(self):
+        """List all available voice models"""
+        available = []
+        for name, path in AVAILABLE_VOICES.items():
+            if name != 'random' and os.path.exists(path):
+                available.append(name)
+        return available
 
 # -----------------------------------------------------------------------------
 # --- PID Controller ---
@@ -2462,15 +2534,15 @@ def main():
     
     logger.info("✅ Robot ready! Starting line detection...")
     
-    # Log timeout configuration for debugging
-    timeout_seconds = LINE_SEARCH_TIMEOUT_FRAMES / CAMERA_FPS
+    # Log search configuration for debugging
+    reset_minutes = LINE_SEARCH_RESET_FRAMES / (CAMERA_FPS * 60)
     turnaround_seconds = TURNAROUND_FRAMES / CAMERA_FPS
-    logger.info(f"🔧 Line search timeout: {timeout_seconds:.1f}s ({LINE_SEARCH_TIMEOUT_FRAMES} frames)")
+    logger.info(f"🔧 Line search: NEVER TIMEOUT - reset pattern every {reset_minutes:.1f} minutes")
     logger.info(f"🔧 180° turnaround duration: {turnaround_seconds:.1f}s ({TURNAROUND_FRAMES} frames)")
-    logger.info(f"🔧 Min line confidence: {MIN_LINE_CONFIDENCE:.2f}")
+    logger.info(f"🔧 Min line confidence: {MIN_LINE_CONFIDENCE:.2f} (Search: {SEARCH_LINE_CONFIDENCE:.2f})")
     
     robot_status = "Ready - Searching for line"
-    speech_manager.announce("Smart Line Follower Robot initialized and ready!", "startup", force=True)
+    speech_manager.announce("big black LINE detected... just how i like it", "startup", force=True)
     
     try:
         frame_count = 0
@@ -2481,7 +2553,7 @@ def main():
             # Capture frame from camera
             ret, frame = cap.read()
             if not ret:
-                logger.warning("⚠️ Failed to capture frame")
+                logger.warning(" Failed to capture frame")
                 robot_status = "Camera read error"
                 robot_stats['lost_frames'] = robot_stats.get('lost_frames', 0) + 1
                 time.sleep(0.1)
@@ -2513,7 +2585,10 @@ def main():
                 logger.info(f"🔄 FORCED TURNAROUND OVERRIDE: {turn_command} - Frame {TURNAROUND_FRAMES - avoidance_duration}/{TURNAROUND_FRAMES}")
             
             # Update line following logic (only if NOT in turnaround)
-            elif line_x is not None and confidence > MIN_LINE_CONFIDENCE:
+            # Use more lenient confidence when actively searching for lost line
+            confidence_threshold = SEARCH_LINE_CONFIDENCE if search_counter > 0 else MIN_LINE_CONFIDENCE
+            
+            if line_x is not None and confidence > confidence_threshold:
                 # Line detected
                 line_detected = True
                 search_counter = 0
@@ -2606,7 +2681,7 @@ def main():
                 
                 logger.debug(f"Line at x={line_x}, offset={line_offset:.2f}, steering={steering_value:.2f}")
                 
-            else:
+            elif line_x is None or confidence <= confidence_threshold:
                 # Line not detected (or we're in turnaround mode and ignoring line)
                 line_detected = False
                 
@@ -2617,7 +2692,7 @@ def main():
                 else:
                     # Announce line loss if just lost
                     if last_line_detected:
-                        speech_manager.announce("Line lost. Searching for path.", "line_lost")
+                        speech_manager.announce("i want that line back daddy... just like that")
                     last_line_detected = False
                 
                 # If we're in an avoidance sequence (but not turnaround), defer to FSM
@@ -2633,68 +2708,80 @@ def main():
                     )
                     robot_status = f"AVOIDING: {avoidance_phase}"
                 elif avoidance_phase != 'turnaround':
-                    # Regular search mode with configurable timeouts (ONLY if not in turnaround)
+                    # PERSISTENT SEARCH MODE - NEVER GIVE UP!
                     search_counter += 1
+                    
+                    # Use more lenient confidence when searching
+                    search_confidence = SEARCH_LINE_CONFIDENCE
+                    
                     if search_counter < LINE_SEARCH_BRIEF_GAP_FRAMES:
                         # Keep last command briefly to bridge small gaps
-                        robot_status = f"🔍 Searching for line (brief gap - frame {search_counter})"
+                        robot_status = f"🔍 Bridging gap (frame {search_counter}/{LINE_SEARCH_BRIEF_GAP_FRAMES})"
                     elif search_counter < LINE_SEARCH_DIRECTION_FRAMES:
+                        # Search in direction opposite to last known offset
                         if last_known_good_offset < 0:
                             turn_command = COMMANDS['RIGHT']
-                            robot_status = "Searching right (last seen left)"
+                            robot_status = f"🔍 Searching RIGHT (last seen left) {search_counter}/{LINE_SEARCH_DIRECTION_FRAMES}"
                         else:
                             turn_command = COMMANDS['LEFT']
-                            robot_status = "Searching left (last seen right)"
+                            robot_status = f"🔍 Searching LEFT (last seen right) {search_counter}/{LINE_SEARCH_DIRECTION_FRAMES}"
                     elif search_counter < LINE_SEARCH_OPPOSITE_FRAMES:
+                        # Search opposite direction
                         turn_command = COMMANDS['RIGHT'] if turn_command == COMMANDS['LEFT'] else COMMANDS['LEFT']
-                        robot_status = f"Searching opposite direction ({search_counter})"
-                    elif search_counter < LINE_SEARCH_TIMEOUT_FRAMES:
+                        direction = "RIGHT" if turn_command == COMMANDS['RIGHT'] else "LEFT"
+                        robot_status = f"🔍 Searching {direction} (opposite) {search_counter}/{LINE_SEARCH_OPPOSITE_FRAMES}"
+                    elif search_counter < LINE_SEARCH_SPIRAL_FRAMES:
+                        # Spiral search pattern - alternating left/right with forward movement
+                        cycle_position = (search_counter - LINE_SEARCH_OPPOSITE_FRAMES) % 6
+                        if cycle_position < 2:
+                            turn_command = COMMANDS['LEFT']
+                            robot_status = f"🌀 SPIRAL LEFT {search_counter}/{LINE_SEARCH_SPIRAL_FRAMES}"
+                        elif cycle_position < 3:
+                            turn_command = COMMANDS['FORWARD']
+                            robot_status = f"🌀 SPIRAL FORWARD {search_counter}/{LINE_SEARCH_SPIRAL_FRAMES}"
+                        elif cycle_position < 5:
+                            turn_command = COMMANDS['RIGHT']
+                            robot_status = f"🌀 SPIRAL RIGHT {search_counter}/{LINE_SEARCH_SPIRAL_FRAMES}"
+                        else:
+                            turn_command = COMMANDS['FORWARD']
+                            robot_status = f"🌀 SPIRAL FORWARD {search_counter}/{LINE_SEARCH_SPIRAL_FRAMES}"
+                    else:
+                        # NEVER STOP - Continue with adaptive search
+                        # Check if we need to handle object avoidance during search
                         should_avoid = OBJECT_DETECTION_ENABLED and object_detected
                         if should_avoid:
-                            logger.info(f"AVOIDANCE DURING SEARCH! Duration: {avoidance_duration} frames")
-                        turn_command = get_turn_command_with_avoidance(
-                            0.0, avoid_objects=should_avoid,
-                            line_detected_now=False, line_offset_now=0.0,
-                            detected_objects_list=detected_objects if 'detected_objects' in locals() else []
-                        )
-                        if turn_command in [COMMANDS['AVOID_LEFT'], COMMANDS['AVOID_RIGHT']]:
-                            robot_status = f"AVOIDING while searching - {avoidance_duration} frames left"
-                        elif turn_command == COMMANDS['FORWARD']:
-                            robot_status = "Moving forward to find line"
-                        else:
-                            robot_status = "Searching for line"
-                    else:
-                        # Extended timeout reached - only stop if not avoiding AND not in turnaround
-                        should_avoid = OBJECT_DETECTION_ENABLED and object_detected
-                        in_turnaround = avoidance_phase == 'turnaround'
-                        
-                        if should_avoid or in_turnaround:
                             turn_command = get_turn_command_with_avoidance(
-                                0.0, avoid_objects=should_avoid,
+                                0.0, avoid_objects=True,
                                 line_detected_now=False, line_offset_now=0.0,
                                 detected_objects_list=detected_objects if 'detected_objects' in locals() else []
                             )
-                            if in_turnaround:
-                                robot_status = "🔄 TURNAROUND in progress - ignoring search timeout"
-                            else:
-                                robot_status = "🔍 Line lost but still avoiding object"
+                            robot_status = f"🔍 AVOIDING while searching - {avoidance_duration} frames left"
                         else:
-                            # Calculate timeout in seconds for status display
-                            timeout_seconds = LINE_SEARCH_TIMEOUT_FRAMES / current_fps if current_fps > 0 else LINE_SEARCH_TIMEOUT_FRAMES / 5
-                            turn_command = COMMANDS['STOP']
-                            robot_status = f"Line lost for {timeout_seconds:.1f}s - stopped (timeout)"
-                            # Log timeout for debugging
-                            if search_counter == LINE_SEARCH_TIMEOUT_FRAMES + 1:  # Log only once when timeout first reached
-                                logger.warning(f"⏰ Line search timeout reached after {timeout_seconds:.1f} seconds ({LINE_SEARCH_TIMEOUT_FRAMES} frames)")
-                        
-                        # Reset search pattern after extended period
-                        if search_counter > LINE_SEARCH_RESET_FRAMES:
-                            search_counter = 0
-                            last_known_good_offset = 0.0
-                            pid.reset()
-                            offset_history.clear()
-                            steering_history.clear()
-                            logger.info("🔄 Search pattern reset after extended timeout")
+                            # Continuous search pattern - random exploration
+                            pattern_cycle = (search_counter - LINE_SEARCH_SPIRAL_FRAMES) % 20
+                            if pattern_cycle < 8:
+                                turn_command = COMMANDS['LEFT']
+                                robot_status = f"🔍 PERSISTENT SEARCH LEFT ({search_counter} total frames)"
+                            elif pattern_cycle < 12:
+                                turn_command = COMMANDS['FORWARD']
+                                robot_status = f"🔍 PERSISTENT SEARCH FORWARD ({search_counter} total frames)"
+                            elif pattern_cycle < 16:
+                                turn_command = COMMANDS['RIGHT']
+                                robot_status = f"🔍 PERSISTENT SEARCH RIGHT ({search_counter} total frames)"
+                            else:
+                                turn_command = COMMANDS['FORWARD']
+                                robot_status = f"🔍 PERSISTENT SEARCH FORWARD ({search_counter} total frames)"
+                    
+                    # Reset search pattern periodically but NEVER stop searching
+                    if search_counter >= LINE_SEARCH_RESET_FRAMES:
+                        search_counter = 0
+                        last_known_good_offset = 0.0
+                        pid.reset()
+                        offset_history.clear()
+                        steering_history.clear()
+                        elapsed_minutes = LINE_SEARCH_RESET_FRAMES / (current_fps * 60) if current_fps > 0 else 1
+                        logger.info(f"🔄 Search pattern reset after {elapsed_minutes:.1f} minutes - CONTINUING TO SEARCH")
+                        robot_status = "🔄 RESET SEARCH PATTERN - Never giving up!"
             
             # FINAL SAFETY CHECK: Force correct command during turnaround
             if avoidance_phase == 'turnaround':
@@ -2747,7 +2834,7 @@ def main():
     except KeyboardInterrupt:
         logger.info(" Stopping robot (Ctrl+C pressed)")
         robot_status = "Shutting down"
-        speech_manager.announce("Shutting down robot.", "shutdown", force=True)
+        speech_manager.announce("shutting down, come with bigger black next time.", "shutdown", force=True)
     except Exception as e:
         logger.error(f" Unexpected error: {e}", exc_info=True)
         robot_status = f"Error: {str(e)}"
@@ -2770,6 +2857,48 @@ def main():
             logger.info("Speech system stopped")
         
         logger.info(" Robot stopped cleanly")
+
+@app.route('/api/voices')
+def api_voices():
+    """Get list of available voices"""
+    if speech_manager:
+        available_voices = speech_manager.list_available_voices()
+        current_voice = PREFERRED_VOICE
+        
+        # Try to detect current voice from path
+        if hasattr(speech_manager, 'voice_model'):
+            for name, path in AVAILABLE_VOICES.items():
+                if path == speech_manager.voice_model:
+                    current_voice = name
+                    break
+        
+        return jsonify({
+            'available_voices': available_voices,
+            'current_voice': current_voice,
+            'voice_descriptions': {
+                'ryan': 'Male voice - good for memes',
+                'lessac': 'Female voice - original',
+                'robot': 'Synthetic/robotic voice - BEST FOR MEMES',
+                'random': 'Random voice selection'
+            }
+        })
+    else:
+        return jsonify({'error': 'Speech system not available'}), 400
+
+@app.route('/api/change_voice/<voice_name>')
+def api_change_voice(voice_name):
+    """Change the robot's voice"""
+    global PREFERRED_VOICE
+    
+    if speech_manager:
+        success = speech_manager.change_voice(voice_name)
+        if success:
+            PREFERRED_VOICE = voice_name  # Update global preference
+            return jsonify({'success': True, 'message': f'Voice changed to {voice_name}'})
+        else:
+            return jsonify({'error': f'Failed to change voice to {voice_name}'}), 400
+    else:
+        return jsonify({'error': 'Speech system not available'}), 400
 
 if __name__ == "__main__":
     main()

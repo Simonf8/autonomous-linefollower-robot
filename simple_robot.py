@@ -67,7 +67,7 @@ ZONE_TOP_HEIGHT = 0.45      # Top 45% for early object detection
 
 # Corner detection improvements
 CORNER_DETECTION_ENABLED = True
-CORNER_ANGLE_THRESHOLD = 25  # Reduced from 35 - less sensitive
+CORNER_ANGLE_THRESHOLD = 35  # Reduced from 35 - less sensitive
 CORNER_SMOOTHING_FACTOR = 0.7
 CORNER_PREDICTION_FRAMES = 5
 
@@ -83,7 +83,7 @@ KP = 0.30  # Reduced from 0.40 for less aggressive response
 KI = 0.005  # Reduced from 0.008 to prevent windup
 KD = 0.20  # Reduced from 0.30 for less jerkiness
 KF = 0.10  # Reduced feedforward gain
-MAX_INTEGRAL = 2.0  # Reduced from 2.5
+MAX_INTEGRAL = 2.4  # Reduced from 2.5
 
 # Smooth curve parameters
 CURVE_LOOKAHEAD_DISTANCE = 0.8  # meters
