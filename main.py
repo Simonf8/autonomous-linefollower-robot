@@ -44,7 +44,7 @@ except ImportError:
     print("Text-to-speech not available. Install piper or pyttsx3")
 
 
-ESP32_IP = '192.168.2.21'  
+ESP32_IP = '192.168.128.117'  
 ESP32_PORT = 1234
 CAMERA_WIDTH, CAMERA_HEIGHT = 730, 420
 CAMERA_FPS = 5
@@ -71,7 +71,7 @@ USE_SMART_AVOIDANCE = True  # Use smart avoidance with live mapping and learning
 
 # YOLO Configuration
 YOLO_MODEL_SIZE = "yolo11n.pt"  # Nano model for speed (yolo11s.pt, yolo11m.pt for more accuracy)
-YOLO_CONFIDENCE_THRESHOLD = 0.3  # Lower threshold for better detection
+YOLO_CONFIDENCE_THRESHOLD = 0.4  # Lower threshold for better detection
 YOLO_CLASSES_TO_AVOID = [0, 39, 41, 43, 44, 45, 46, 47, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79]  # person, bottle, cup, bowl, etc.
 
 # Legacy CV-based detection parameters (fallback if YOLO not available)
@@ -81,7 +81,7 @@ OBJECT_HEIGHT_THRESHOLD = 0.15  # Object height ratio to trigger avoidance
 OBJECT_AVOIDANCE_DISTANCE = 35  # How many frames to remember object position (much longer avoidance)
 OBJECT_MIN_ASPECT_RATIO = 0.3  # Shape filtering
 OBJECT_MAX_ASPECT_RATIO = 3.0  # Shape filtering
-OBJECT_LINE_BLOCKING_THRESHOLD = 0.7  # Distance from line to trigger avoidance (very lenient for early detection)
+OBJECT_LINE_BLOCKING_THRESHOLD = 0.9  # Distance from line to trigger avoidance (very lenient for early detection)
 
 # Adaptive PID controller values with auto-tuning
 KP = 0.25  # Moderate proportional gain for smooth response
@@ -107,7 +107,7 @@ MIN_OBSTACLE_WIDTH = 0.1  # Minimum width ratio to be significant
 MIN_OBSTACLE_HEIGHT = 0.08  # Minimum height ratio to be significant
 
 # Gentle avoidance parameters - roundabout style smooth curve
-GENTLE_TURN_DURATION = 15     # Longer, stronger turns to actually avoid obstacles
+GENTLE_TURN_DURATION = 1     # Longer, stronger turns to actually avoid obstacles
 GENTLE_CLEAR_DURATION = 8     # About 1 second forward movement
 GENTLE_RETURN_DURATION = 12   # Return turn duration
 
@@ -116,8 +116,21 @@ SAFETY_MARGIN = 1.5           # Multiply obstacle size by this for safety
 PATH_CALCULATION_ENABLED = True
 
 # Steering parameters - SMOOTH AND STABLE
-STEERING_DEADZONE = 0.15  # Larger deadzone to prevent overreaction
+STEERING_DEADZONE = 0.25  # Larger deadzone to prevent overreaction
 MAX_STEERING = 0.8        # Limited steering range to prevent huge turns
+
+# Line search timeout parameters - PREVENT PREMATURE STOPPING
+# PROBLEM: Robot was stopping after just 9 seconds (45 frames @ 5 FPS)
+# SOLUTION: Extended timeout to 30 seconds with better search phases
+LINE_SEARCH_TIMEOUT_FRAMES = 150  # Increased from 45 (30 seconds at 5 FPS)
+LINE_SEARCH_RESET_FRAMES = 200    # Reset search pattern after this many frames
+LINE_SEARCH_BRIEF_GAP_FRAMES = 8  # Increased from 5 - allow longer brief gaps
+LINE_SEARCH_DIRECTION_FRAMES = 25 # Increased from 15 - search direction longer
+LINE_SEARCH_OPPOSITE_FRAMES = 50  # Increased from 30 - search opposite longer
+
+# Line detection confidence parameters
+MIN_LINE_CONFIDENCE = 0.15  # Reduced from 0.2 - more lenient line detection
+CORNER_LINE_CONFIDENCE = 0.25  # Higher confidence needed for corner detection
 
 # Learning state
 obstacle_memory = {}  # Learning-based obstacle memory
@@ -129,10 +142,10 @@ object_detected = False
 object_position = 0.0
 current_obstacle = None       # Current obstacle being avoided
 obstacle_map = {}            # Persistent obstacle memory
-avoidance_phase = 'none'     # 'none', 'mapping', 'avoiding', 'clearing', 'returning'
-avoidance_side = 'none'      # 'left', 'right'
-avoidance_frame_count = 0
+avoidance_phase = 'none'     # 'none', 'turnaround', 'search_after_turn'
+turnaround_direction = 'right'  # 'left' or 'right' - which way to turn around
 avoidance_duration = 0
+turnaround_start_time = 0.0    # Track actual time for turnaround verification
 planned_path = None          # Calculated path around obstacle
 corner_warning = False
 corner_prediction_frames = 0
@@ -145,10 +158,17 @@ AVOIDANCE_CLEAR_DURATION = 12   # Phase 2: Move forward to clear object
 AVOIDANCE_RETURN_DURATION = 15  # Phase 3: Turn back to find line
 OBJECT_CLEAR_THRESHOLD = 3      # Frames without seeing object to consider it cleared
 
-# Avoidance phase durations - STRONGER AVOIDANCE
-AVOIDANCE_TURN_FRAMES = 15     # More frames to turn away from object
-AVOIDANCE_CLEAR_FRAMES = 20    # More frames to go around object  
-AVOIDANCE_RETURN_FRAMES = 15   # More frames to turn back toward line
+# 180-DEGREE TURNAROUND AVOIDANCE - SIMPLE AND RELIABLE
+# PROBLEM: Robot not completing full 180° turn
+# SOLUTION: Dramatically increased duration - if still not enough, increase TURNAROUND_FRAMES even more
+TURNAROUND_FRAMES = 200        # MUCH longer - 40 seconds at 5 FPS to ensure full turn
+TURNAROUND_SEARCH_FRAMES = 50  # Frames to search for line after turnaround
+TURNAROUND_IGNORE_LINE = True  # Ignore line detection during turnaround to prevent early exit
+TURNAROUND_COMMAND = 'RIGHT'   # Use strong RIGHT command for turnaround
+
+# Alternative settings if robot still doesn't turn enough:
+# TURNAROUND_FRAMES = 300  # 60 seconds - try this if 200 isn't enough
+# TURNAROUND_FRAMES = 400  # 80 seconds - last resort
 
 # Add distance estimation parameters near the top with other parameters
 # Distance estimation using monocular vision
@@ -1339,69 +1359,67 @@ obstacle_mapper = ObstacleMapper()
 distance_estimator = DistanceEstimator()
 
 def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected_now=False, line_offset_now=0.0, detected_objects_list=None):
-    """SIMPLE STRONG AVOIDANCE: Strong turn away → Forward clear → Strong turn back → Find line"""
-    global avoidance_phase, avoidance_side, avoidance_frame_count, avoidance_duration
+    """SIMPLE 180-DEGREE TURNAROUND: Turn around completely when obstacle detected"""
+    global avoidance_phase, turnaround_direction, avoidance_duration
     
-    # SIMPLE STRONG AVOIDANCE
+    # 180-DEGREE TURNAROUND AVOIDANCE
     if avoid_objects and (detected_objects_list or avoidance_phase != 'none'):
         
-        # START STRONG AVOIDANCE
+        # START 180-DEGREE TURNAROUND
         if avoidance_phase == 'none' and detected_objects_list:
-            # Determine which side to avoid based on object position
-            main_object = detected_objects_list[0]
-            object_pos = main_object['position']
+            global turnaround_start_time
+            # Choose turnaround direction (prefer right turns for consistency)
+            turnaround_direction = 'right'  # Always turn right for 180-degree turnaround
+            avoidance_phase = 'turnaround'
+            avoidance_duration = TURNAROUND_FRAMES
+            turnaround_start_time = time.time()  # Record start time
             
-            if object_pos < 0:  # Object on left, avoid right
-                avoidance_side = 'right'
-                avoidance_phase = 'turn_right'
-            else:  # Object on right, avoid left
-                avoidance_side = 'left'
-                avoidance_phase = 'turn_left'
-                
-            avoidance_duration = AVOIDANCE_TURN_FRAMES
-            logger.info(f"🚨 OBSTACLE DETECTED - Starting STRONG {avoidance_side} avoidance")
+            logger.info(f"🚨 OBSTACLE DETECTED - Starting 180-DEGREE TURNAROUND! Duration: {TURNAROUND_FRAMES} frames ({TURNAROUND_FRAMES/5:.1f} seconds)")
             robot_stats['avoidance_maneuvers'] = robot_stats.get('avoidance_maneuvers', 0) + 1
             
-            # Start with strong turn immediately
-            return COMMANDS['STRONG_RIGHT'] if avoidance_side == 'right' else COMMANDS['STRONG_LEFT']
+            if speech_manager:
+                speech_manager.announce("Obstacle detected! Turning around completely.", "obstacle", force=True)
+            
+            # Start turnaround immediately with strong command
+            return COMMANDS[TURNAROUND_COMMAND]
         
-        # PHASE 1: Strong turn away from obstacle
-        elif avoidance_phase in ['turn_left', 'turn_right']:
-            avoidance_duration -= 1
-            logger.info(f"AVOIDANCE TURN: Strong {avoidance_side} turn ({avoidance_duration} frames left)")
+        # PHASE 1: Complete 180-degree turnaround (IGNORE LINE DETECTION)
+        elif avoidance_phase == 'turnaround':
+            # SAFETY CHECK: Ensure duration doesn't go negative
+            if avoidance_duration > 0:
+                avoidance_duration -= 1
+            
+            # Log progress every 10 frames to track turnaround  
+            if avoidance_duration % 10 == 0 or avoidance_duration <= 5:
+                progress_percent = ((TURNAROUND_FRAMES - avoidance_duration) / TURNAROUND_FRAMES) * 100
+                elapsed_time = time.time() - turnaround_start_time
+                logger.info(f"🔄 TURNAROUND PROGRESS: {progress_percent:.0f}% - {avoidance_duration} frames left - {elapsed_time:.1f}s elapsed")
             
             if avoidance_duration <= 0:
-                # Move to clearing phase
-                avoidance_phase = 'clear'
-                avoidance_duration = AVOIDANCE_CLEAR_FRAMES
-                logger.info("AVOIDANCE CLEAR: Moving forward to clear obstacle")
+                # Start searching for line after turnaround
+                total_time = time.time() - turnaround_start_time
+                avoidance_phase = 'search_after_turn'
+                avoidance_duration = TURNAROUND_SEARCH_FRAMES
+                logger.info(f"✅ TURNAROUND COMPLETE - Total time: {total_time:.1f}s - Now searching for line")
+                if speech_manager:
+                    speech_manager.announce("Turnaround complete. Searching for line.", "navigation")
                 return COMMANDS['FORWARD']
             else:
-                # Continue strong turn
-                return COMMANDS['STRONG_RIGHT'] if avoidance_side == 'right' else COMMANDS['STRONG_LEFT']
+                # Continue turning - FORCE THE TURN, IGNORE LINE DETECTION
+                current_frame = TURNAROUND_FRAMES - avoidance_duration
+                command = COMMANDS[TURNAROUND_COMMAND]
+                logger.info(f"🔄 FORCING TURN {TURNAROUND_COMMAND}: frame {current_frame}/{TURNAROUND_FRAMES} -> {command}")
+                return command
         
-        # PHASE 2: Move forward to clear obstacle
-        elif avoidance_phase == 'clear':
-            avoidance_duration -= 1
-            logger.info(f"AVOIDANCE CLEAR: Moving forward ({avoidance_duration} frames left)")
-            
-            if avoidance_duration <= 0:
-                # Move to return phase
-                avoidance_phase = 'return'
-                avoidance_duration = AVOIDANCE_RETURN_FRAMES
-                logger.info("AVOIDANCE RETURN: Turning back toward line")
-                # Turn back toward line
-                return COMMANDS['STRONG_LEFT'] if avoidance_side == 'right' else COMMANDS['STRONG_RIGHT']
-            else:
-                return COMMANDS['FORWARD']
-        
-        # PHASE 3: Turn back toward line
-        elif avoidance_phase == 'return':
-            # Check if we found the line early
-            if line_detected_now and abs(line_offset_now) < 0.4:
-                logger.info("✅ LINE FOUND DURING RETURN! Avoidance complete")
+        # PHASE 2: Search for line after 180-degree turn
+        elif avoidance_phase == 'search_after_turn':
+            # Check if we found the line
+            if line_detected_now:
+                logger.info("✅ LINE FOUND AFTER TURNAROUND! Avoidance complete")
                 avoidance_phase = 'none'
-                speech_manager.announce("Line reacquired! Resuming line following.", "success")
+                if speech_manager:
+                    speech_manager.announce("Line found! Resuming line following.", "success", force=True)
+                
                 # Resume normal line following
                 if abs(line_offset_now) < 0.1:
                     return COMMANDS['FORWARD']
@@ -1409,17 +1427,19 @@ def get_turn_command_with_avoidance(steering, avoid_objects=False, line_detected
                     return COMMANDS['LEFT'] if line_offset_now > 0 else COMMANDS['RIGHT']
             
             avoidance_duration -= 1
-            logger.info(f"AVOIDANCE RETURN: Turning back to line ({avoidance_duration} frames left)")
+            logger.info(f"🔍 SEARCHING AFTER TURNAROUND: ({avoidance_duration} frames left)")
             
             if avoidance_duration <= 0:
-                # Avoidance complete, resume normal operation
-                logger.info("⭐ AVOIDANCE COMPLETE - Resuming normal line following")
+                # Search timeout - give up and resume normal operation
+                logger.info("⚠️ SEARCH TIMEOUT AFTER TURNAROUND - Resuming normal operation")
                 avoidance_phase = 'none'
-                speech_manager.announce("Obstacle avoided. Resuming line following.", "success")
                 return COMMANDS['FORWARD']
             else:
-                # Continue turning back toward line
-                return COMMANDS['STRONG_LEFT'] if avoidance_side == 'right' else COMMANDS['STRONG_RIGHT']
+                # Keep searching - alternate between forward and slight turns
+                if avoidance_duration % 10 < 5:
+                    return COMMANDS['FORWARD']
+                else:
+                    return COMMANDS['LEFT']  # Slight left turn while searching
     
     # NORMAL LINE FOLLOWING BEHAVIOR
     if abs(steering) < STEERING_DEADZONE:
@@ -1577,12 +1597,10 @@ def draw_debug_info(frame, detection_data):
     
     # Draw avoidance status
     if avoidance_phase != 'none':
-        if avoidance_phase == 'curve_right':
-            phase_text = f"AVOIDANCE: CURVE RIGHT"
-        elif avoidance_phase == 'curve_left':
-            phase_text = f"AVOIDANCE: CURVE LEFT"
-        elif avoidance_phase == 'final_search':
-            phase_text = f"AVOIDANCE: SEARCHING FOR LINE"
+        if avoidance_phase == 'turnaround':
+            phase_text = f"180° TURNAROUND: {turnaround_direction.upper()}"
+        elif avoidance_phase == 'search_after_turn':
+            phase_text = f"SEARCHING AFTER TURNAROUND"
         else:
             phase_text = f"AVOIDANCE: {avoidance_phase.upper()}"
         cv2.putText(frame, phase_text, (width//2 - 120, 110),
@@ -2443,6 +2461,14 @@ def main():
     last_avoidance_announced = None
     
     logger.info("✅ Robot ready! Starting line detection...")
+    
+    # Log timeout configuration for debugging
+    timeout_seconds = LINE_SEARCH_TIMEOUT_FRAMES / CAMERA_FPS
+    turnaround_seconds = TURNAROUND_FRAMES / CAMERA_FPS
+    logger.info(f"🔧 Line search timeout: {timeout_seconds:.1f}s ({LINE_SEARCH_TIMEOUT_FRAMES} frames)")
+    logger.info(f"🔧 180° turnaround duration: {turnaround_seconds:.1f}s ({TURNAROUND_FRAMES} frames)")
+    logger.info(f"🔧 Min line confidence: {MIN_LINE_CONFIDENCE:.2f}")
+    
     robot_status = "Ready - Searching for line"
     speech_manager.announce("Smart Line Follower Robot initialized and ready!", "startup", force=True)
     
@@ -2476,8 +2502,18 @@ def main():
             # Track performance for learning
             performance_history.append(abs(line_offset) if line_detected else 1.0)
             
-            # Update line following logic
-            if line_x is not None and confidence > 0.2:
+            # ABSOLUTE PRIORITY: If in turnaround mode, SKIP ALL OTHER LOGIC
+            if avoidance_phase == 'turnaround':
+                # FORCE TURNAROUND - No other logic can interrupt
+                turn_command = get_turn_command_with_avoidance(
+                    0.0, avoid_objects=True, line_detected_now=False, line_offset_now=0.0, detected_objects_list=[]
+                )
+                progress_percent = ((TURNAROUND_FRAMES - avoidance_duration) / TURNAROUND_FRAMES) * 100
+                robot_status = f"🔄 FORCED TURNAROUND: {progress_percent:.0f}% ({avoidance_duration} frames left)"
+                logger.info(f"🔄 FORCED TURNAROUND OVERRIDE: {turn_command} - Frame {TURNAROUND_FRAMES - avoidance_duration}/{TURNAROUND_FRAMES}")
+            
+            # Update line following logic (only if NOT in turnaround)
+            elif line_x is not None and confidence > MIN_LINE_CONFIDENCE:
                 # Line detected
                 line_detected = True
                 search_counter = 0
@@ -2503,7 +2539,7 @@ def main():
                 last_known_good_offset = line_offset
                 
                 # Check for corner (enhanced with prediction)
-                if abs(line_offset) > 0.4 and confidence > 0.3:
+                if abs(line_offset) > 0.4 and confidence > CORNER_LINE_CONFIDENCE:
                     corner_detected_count += 1
                     
                     # Adjust status based on corner detection duration
@@ -2523,19 +2559,18 @@ def main():
                     else:
                         corner_detected_count = 0
                         
-                    # Simple avoidance status
-                    if avoidance_phase in ['turn_left', 'turn_right']:
-                        robot_status = f"AVOIDING: Strong {avoidance_side} turn ({avoidance_duration} frames)"
-                    elif avoidance_phase == 'clear':
-                        robot_status = f"AVOIDING: Moving forward to clear obstacle ({avoidance_duration} frames)"
-                    elif avoidance_phase == 'return':
-                        if confidence > 0.3:
-                            robot_status = f"RETURNING: Line detected! Completing avoidance (offset: {line_offset:.2f})"
+                    # 180-degree turnaround status
+                    if avoidance_phase == 'turnaround':
+                        progress_percent = ((TURNAROUND_FRAMES - avoidance_duration) / TURNAROUND_FRAMES) * 100
+                        robot_status = f"🔄 TURNAROUND: {progress_percent:.0f}% complete ({avoidance_duration} frames)"
+                    elif avoidance_phase == 'search_after_turn':
+                        if confidence > MIN_LINE_CONFIDENCE:
+                            robot_status = f"✅ FOUND LINE after turnaround! (offset: {line_offset:.2f})"
                             if last_avoidance_announced != 'completed':
-                                speech_manager.announce("Line reacquired! Resuming line following.", "success", force=True)
+                                speech_manager.announce("Line found after turnaround!", "success", force=True)
                                 last_avoidance_announced = 'completed'
                         else:
-                            robot_status = f"RETURNING: Turning back to find line ({avoidance_duration} frames)"
+                            robot_status = f"🔍 SEARCHING after turnaround ({avoidance_duration} frames)"
                     elif object_detected:
                         robot_status = f"Object mapped - Calculating smart path"
                         if last_avoidance_announced != 'detected':
@@ -2558,13 +2593,10 @@ def main():
                 else:
                     avg_steering = raw_steering
                 
-                # Convert steering to command with DYNAMIC NAVIGATION
+                # Convert steering to command with 180-DEGREE TURNAROUND
                 should_avoid = OBJECT_DETECTION_ENABLED and object_detected
                 if should_avoid and avoidance_phase != 'none':
-                    if avoidance_phase == 'turning':
-                        logger.info(f"DYNAMIC NAVIGATION! Phase: {avoidance_phase.upper()} - frame {avoidance_duration}")
-                    else:
-                        logger.info(f"DYNAMIC NAVIGATION! Phase: {avoidance_phase.upper()} - {avoidance_duration} frames left")
+                    logger.info(f"180° TURNAROUND! Phase: {avoidance_phase.upper()} - {avoidance_duration} frames left")
                 
                 turn_command = get_turn_command_with_avoidance(avg_steering, 
                                                              avoid_objects=should_avoid,
@@ -2575,40 +2607,48 @@ def main():
                 logger.debug(f"Line at x={line_x}, offset={line_offset:.2f}, steering={steering_value:.2f}")
                 
             else:
-                # Line not detected
+                # Line not detected (or we're in turnaround mode and ignoring line)
                 line_detected = False
                 
-                # Announce line loss if just lost
-                if last_line_detected:
-                    speech_manager.announce("Line lost. Searching for path.", "line_lost")
-                last_line_detected = False
+                # SKIP LINE LOSS ANNOUNCEMENTS AND SEARCH LOGIC DURING TURNAROUND
+                if avoidance_phase == 'turnaround':
+                    # Do nothing - turnaround is already handled above
+                    pass
+                else:
+                    # Announce line loss if just lost
+                    if last_line_detected:
+                        speech_manager.announce("Line lost. Searching for path.", "line_lost")
+                    last_line_detected = False
                 
-                # If we're in an avoidance sequence, always defer to FSM
-                if avoidance_phase != 'none':
+                # If we're in an avoidance sequence (but not turnaround), defer to FSM
+                if avoidance_phase != 'none' and avoidance_phase != 'turnaround':
+                    # During turnaround, force line_detected to False to prevent interference
+                    force_line_detected = False if avoidance_phase == 'turnaround' else line_detected
                     turn_command = get_turn_command_with_avoidance(
                         0.0,
                         avoid_objects=True,
-                        line_detected_now=False,
+                        line_detected_now=force_line_detected,
                         line_offset_now=0.0,
                         detected_objects_list=detected_objects if 'detected_objects' in locals() else []
                     )
                     robot_status = f"AVOIDING: {avoidance_phase}"
-                else:
-                    # Regular search mode
+                elif avoidance_phase != 'turnaround':
+                    # Regular search mode with configurable timeouts (ONLY if not in turnaround)
                     search_counter += 1
-                    if search_counter < 5:
-                        robot_status = "🔍 Searching for line (brief gap)"
-                    elif search_counter < 15:
+                    if search_counter < LINE_SEARCH_BRIEF_GAP_FRAMES:
+                        # Keep last command briefly to bridge small gaps
+                        robot_status = f"🔍 Searching for line (brief gap - frame {search_counter})"
+                    elif search_counter < LINE_SEARCH_DIRECTION_FRAMES:
                         if last_known_good_offset < 0:
                             turn_command = COMMANDS['RIGHT']
                             robot_status = "Searching right (last seen left)"
                         else:
                             turn_command = COMMANDS['LEFT']
                             robot_status = "Searching left (last seen right)"
-                    elif search_counter < 30:
+                    elif search_counter < LINE_SEARCH_OPPOSITE_FRAMES:
                         turn_command = COMMANDS['RIGHT'] if turn_command == COMMANDS['LEFT'] else COMMANDS['LEFT']
                         robot_status = f"Searching opposite direction ({search_counter})"
-                    elif search_counter < 45:
+                    elif search_counter < LINE_SEARCH_TIMEOUT_FRAMES:
                         should_avoid = OBJECT_DETECTION_ENABLED and object_detected
                         if should_avoid:
                             logger.info(f"AVOIDANCE DURING SEARCH! Duration: {avoidance_duration} frames")
@@ -2624,33 +2664,57 @@ def main():
                         else:
                             robot_status = "Searching for line"
                     else:
+                        # Extended timeout reached - only stop if not avoiding AND not in turnaround
                         should_avoid = OBJECT_DETECTION_ENABLED and object_detected
-                        if should_avoid:
+                        in_turnaround = avoidance_phase == 'turnaround'
+                        
+                        if should_avoid or in_turnaround:
                             turn_command = get_turn_command_with_avoidance(
                                 0.0, avoid_objects=should_avoid,
                                 line_detected_now=False, line_offset_now=0.0,
                                 detected_objects_list=detected_objects if 'detected_objects' in locals() else []
                             )
-                            robot_status = "🔍 Line lost but still avoiding object"
+                            if in_turnaround:
+                                robot_status = "🔄 TURNAROUND in progress - ignoring search timeout"
+                            else:
+                                robot_status = "🔍 Line lost but still avoiding object"
                         else:
+                            # Calculate timeout in seconds for status display
+                            timeout_seconds = LINE_SEARCH_TIMEOUT_FRAMES / current_fps if current_fps > 0 else LINE_SEARCH_TIMEOUT_FRAMES / 5
                             turn_command = COMMANDS['STOP']
-                            robot_status = "Line lost - stopped"
-                        if search_counter > 60:
+                            robot_status = f"Line lost for {timeout_seconds:.1f}s - stopped (timeout)"
+                            # Log timeout for debugging
+                            if search_counter == LINE_SEARCH_TIMEOUT_FRAMES + 1:  # Log only once when timeout first reached
+                                logger.warning(f"⏰ Line search timeout reached after {timeout_seconds:.1f} seconds ({LINE_SEARCH_TIMEOUT_FRAMES} frames)")
+                        
+                        # Reset search pattern after extended period
+                        if search_counter > LINE_SEARCH_RESET_FRAMES:
                             search_counter = 0
                             last_known_good_offset = 0.0
                             pid.reset()
                             offset_history.clear()
                             steering_history.clear()
-                            logger.info("Search pattern reset")
+                            logger.info("🔄 Search pattern reset after extended timeout")
             
-            # Send command to ESP32 with avoidance logging
-            if turn_command in [COMMANDS['AVOID_LEFT'], COMMANDS['AVOID_RIGHT']]:
+            # FINAL SAFETY CHECK: Force correct command during turnaround
+            if avoidance_phase == 'turnaround':
+                # OVERRIDE ANY COMMAND - Force strong turn during turnaround
+                turn_command = COMMANDS[TURNAROUND_COMMAND]
+                logger.info(f"🔄 TURNAROUND SAFETY OVERRIDE: Forcing {turn_command} (frame: {TURNAROUND_FRAMES - avoidance_duration})")
+            
+            # Send command to ESP32 with enhanced logging during turnaround
+            if avoidance_phase == 'turnaround':
+                logger.info(f"🔄 TURNAROUND COMMAND TO ESP32: {turn_command} (phase: {avoidance_phase}, duration: {avoidance_duration})")
+            elif turn_command in [COMMANDS['AVOID_LEFT'], COMMANDS['AVOID_RIGHT']]:
                 logger.info(f"SENDING AVOIDANCE COMMAND: {turn_command}")
             
             if esp_connection:
                 success = esp_connection.send_command(turn_command)
-                if not success and frame_count % 30 == 0:  # Log occasionally
-                    logger.warning("ESP32 communication failed")
+                if not success:
+                    if avoidance_phase == 'turnaround':
+                        logger.error(f"🚨 ESP32 FAILED DURING TURNAROUND! Command: {turn_command}, Frame: {TURNAROUND_FRAMES - avoidance_duration}")
+                    elif frame_count % 30 == 0:  # Log occasionally for normal operation
+                        logger.warning("ESP32 communication failed")
             
             # Draw enhanced debug information
             draw_debug_info(display_frame, detection_data)
