@@ -216,6 +216,7 @@ SPEECH_ENABLED = True          # Enable/disable speech announcements
 SPEECH_RATE = 150             # Speech rate (words per minute)
 SPEECH_VOLUME = 0.8           # Speech volume (0.0 to 1.0)
 ANNOUNCE_INTERVAL = 3.0       # Minimum seconds between similar announcements
+KEEPALIVE_INTERVAL = 1.0        # Resend same ESP32 command at least this often
 
 # Add corner turning constants and state variables
 CORNER_TURN_OFFSET_THRESHOLD = 0.35  # Offset to trigger corner turn mode
@@ -505,6 +506,7 @@ class ESP32Connection:
         self.socket = None
         self.last_command = None
         self.connection_attempts = 0
+        self.last_send_time = 0.0  # For keep-alive resend
         self.connect()
     
     def connect(self):
@@ -541,10 +543,12 @@ class ESP32Connection:
             full_command = f"{command}\n"
             
             # Only send if command changed
-            if full_command != self.last_command:
+            current_time = time.time()
+            if (full_command != self.last_command) or (current_time - self.last_send_time) > KEEPALIVE_INTERVAL:
                 self.socket.sendall(full_command.encode())
                 self.last_command = full_command
-                logger.debug(f"📡 Sent to ESP32: {command}")
+                self.last_send_time = current_time
+                logger.debug(f"📡 Sent to ESP32: {command} (keep-alive={full_command == self.last_command})")
             
             return True
         except Exception as e:
@@ -2635,7 +2639,7 @@ def main():
                             speech_manager.announce("Turning corner", "corner")
                      
                      # Adjust status based on corner detection duration
-                     if True:
+                     if corner_detected_count > 5:
                          robot_status = f"Taking corner ({corner_detected_count})"
                          # For sharp corners, exaggerate the steering to make tighter turns
                          if abs(line_offset) > 0.5:
