@@ -420,4 +420,63 @@ timeline
 
 **Intelligent • Adaptive • Autonomous**
 
-</div> 
+</div>
+
+# Autonomous Line Follower Robot
+
+This project implements an autonomous line-following robot with computer vision capabilities, ESP32 control, and audio feedback features.
+
+## Project Structure
+
+```
+.
+├── src/                    # Source code directory
+│   ├── controllers/        # Robot control logic
+│   │   ├── esp32_robot_controller.py
+│   │   ├── monitor_robot.py
+│   │   └── simple_robot.py
+│   ├── vision/            # Computer vision components
+│   │   └── opencv_line_follower.py
+│   ├── audio/            # Audio processing and voice features
+│   │   ├── meme_voices.py
+│   │   └── test_voice.py
+│   └── utils/            # Utility scripts
+│       └── install_yolo.sh
+├── tests/                # Test files
+│   ├── test.py
+│   └── test_esp32_connection.py
+├── config/              # Configuration files
+│   └── requirements.txt
+├── models/              # ML model files
+│   ├── yolov8n.pt
+│   └── yolo11n.pt
+├── voices/             # Voice data directory
+└── piper/              # Piper voice synthesis files
+```
+
+## Components
+
+1. **Controllers**: Contains the main robot control logic including ESP32 communication and robot monitoring
+2. **Vision**: Computer vision components for line following and object detection
+3. **Audio**: Voice synthesis and audio feedback features
+4. **Utils**: Utility scripts for setup and maintenance
+5. **Tests**: Test files for various components
+6. **Config**: Configuration files including Python dependencies
+7. **Models**: Pre-trained ML models for vision tasks
+8. **Voices**: Voice data and related resources
+
+## Setup
+
+1. Install the required dependencies:
+```bash
+pip install -r config/requirements.txt
+```
+
+2. Install YOLO dependencies:
+```bash
+./src/utils/install_yolo.sh
+```
+
+## Usage
+
+[Original usage instructions from previous README...] 

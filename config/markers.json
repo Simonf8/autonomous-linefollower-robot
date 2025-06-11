@@ -1,0 +1,32 @@
+{
+    "markers": [
+        {
+            "id": 0,
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "description": "Origin marker"
+        },
+        {
+            "id": 1,
+            "x": 1.0,
+            "y": 0.0,
+            "z": 0.0,
+            "description": "1 meter along X axis"
+        },
+        {
+            "id": 2,
+            "x": 0.0,
+            "y": 1.0,
+            "z": 0.0,
+            "description": "1 meter along Y axis"
+        },
+        {
+            "id": 3,
+            "x": 1.0,
+            "y": 1.0,
+            "z": 0.0,
+            "description": "Corner marker"
+        }
+    ]
+} 
