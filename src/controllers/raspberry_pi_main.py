@@ -21,110 +21,75 @@ HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Line Follower Robot Control</title>
+    <title>Line Follower Robot Dashboard</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-    <style>
-        body { 
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            background: #1a1a1a;
-            color: #ffffff;
-        }
-        .container {
-            display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 20px;
-            max-width: 1400px;
-            margin: 0 auto;
-        }
-        .video-feed {
-            background: #2a2a2a;
-            padding: 10px;
-            border-radius: 10px;
-        }
-        .status-panel {
-            background: #2a2a2a;
-            padding: 20px;
-            border-radius: 10px;
-        }
-        .status-item {
-            margin: 10px 0;
-            padding: 10px;
-            background: #3a3a3a;
-            border-radius: 5px;
-        }
-        #camera-feed {
-            width: 100%;
-            border-radius: 5px;
-        }
-        .path-canvas {
-            margin-top: 20px;
-            background: #000;
-            border-radius: 5px;
-        }
-        h2 { color: #4CAF50; }
-        .detected { color: #4CAF50; }
-        .not-detected { color: #f44336; }
-    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="/static/dashboard.css">
 </head>
 <body>
     <div class="container">
         <div class="video-feed">
             <h2>Camera Feed</h2>
-            <img id="camera-feed" src="">
-            <canvas id="path-canvas" class="path-canvas" width="400" height="400"></canvas>
+            <img id="camera-feed" src="" alt="Robot Camera Feed">
+            <canvas id="path-canvas" class="path-canvas" width="600" height="400"></canvas>
         </div>
+        
         <div class="status-panel">
             <h2>Robot Status</h2>
+            
             <div id="line-status" class="status-item">
-                Line Status: <span class="not-detected">Not Detected</span>
+                <div class="status-indicator inactive"></div>
+                Line Status: Not Detected
             </div>
-            <div id="position" class="status-item">
-                Position: [0, 0, 0]
+            
+            <div class="status-item">
+                <h3>Position</h3>
+                <div class="position-grid">
+                    <div class="position-item">
+                        <div class="position-label">X</div>
+                        <div class="position-value" id="position-x">0.00</div>
+                    </div>
+                    <div class="position-item">
+                        <div class="position-label">Y</div>
+                        <div class="position-value" id="position-y">0.00</div>
+                    </div>
+                    <div class="position-item">
+                        <div class="position-label">Angle</div>
+                        <div class="position-value" id="position-theta">0.00</div>
+                    </div>
+                </div>
             </div>
+            
             <div id="command" class="status-item">
-                Last Command: None
+                Command: None
             </div>
-            <div id="objects" class="status-item">
-                Detected Objects: None
+            
+            <div class="status-item">
+                Objects Detected: <span id="objects-count">0</span>
+            </div>
+            
+            <div class="status-item">
+                Uptime: <span id="uptime">00:00:00</span>
+            </div>
+            
+            <div class="status-item">
+                <h3>Performance Metrics</h3>
+                <canvas id="metrics-chart" width="300" height="200"></canvas>
+            </div>
+            
+            <div class="controls-info">
+                <h3>Manual Controls</h3>
+                <p>W - Forward</p>
+                <p>A - Left</p>
+                <p>D - Right</p>
+                <p>S - Stop</p>
+                <p>Q - Turn Around</p>
             </div>
         </div>
     </div>
-    <script>
-        const socket = io();
-        const cameraFeed = document.getElementById('camera-feed');
-        const pathCanvas = document.getElementById('path-canvas');
-        const ctx = pathCanvas.getContext('2d');
-        
-        socket.on('robot_update', function(data) {
-            // Update camera feed
-            cameraFeed.src = 'data:image/jpeg;base64,' + data.frame;
-            
-            // Update status
-            document.getElementById('line-status').innerHTML = 
-                'Line Status: <span class="' + (data.data.line_detected ? 'detected">Detected' : 'not-detected">Not Detected') + '</span>';
-            document.getElementById('position').textContent = 
-                'Position: [' + data.data.position.map(x => x.toFixed(2)).join(', ') + ']';
-            document.getElementById('command').textContent = 
-                'Last Command: ' + data.data.last_command;
-            document.getElementById('objects').textContent = 
-                'Detected Objects: ' + data.data.detected_objects.length;
-            
-            // Draw path
-            ctx.fillStyle = '#000';
-            ctx.fillRect(0, 0, pathCanvas.width, pathCanvas.height);
-            ctx.strokeStyle = '#4CAF50';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            data.data.path_history.forEach((point, i) => {
-                const x = (point[0] * 50) + pathCanvas.width/2;
-                const y = (point[1] * 50) + pathCanvas.height/2;
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            });
-            ctx.stroke();
-        });
-    </script>
+    <script src="/static/dashboard.js"></script>
 </body>
 </html>
 '''
@@ -348,27 +313,27 @@ class VoiceSystem:
         # Voice presets with different speakers and emotions
         self.voices = {
             'obstacle': {
-                'text': "[clears throat] Yo, there's something in my way! [laughs] Time to turn this baby around! 🔄",
+                'text': "Obstacle detected. Initiating turn around maneuver.",
                 'voice_preset': "v2/en_speaker_6"  # Confident male voice
             },
             'line_lost': {
-                'text': "[sighs] Uh oh... where did my line go? [concerned] Looking around... 👀",
+                'text': "Line signal lost. Searching for path.",
                 'voice_preset': "v2/en_speaker_3"  # Concerned voice
             },
             'line_found': {
-                'text': "[excited] YES! Found it! [laughs] Let's gooooo! 🚀",
+                'text': "Line detected. Resuming navigation.",
                 'voice_preset': "v2/en_speaker_9"  # Excited voice
             },
             'startup': {
-                'text': "[dramatic voice] Line follower robot... ACTIVATED! [epic music sound] Ready to dominate these lines! 💪",
+                'text': "Line follower robot system activated. Ready for operation.",
                 'voice_preset': "v2/en_speaker_6"  # Dramatic voice
             },
             'turn_complete': {
-                'text': "[satisfied] Boom! 180 flip complete! [chuckles] Now where's that line at? 🎯",
+                'text': "Turn around maneuver complete. Searching for line.",
                 'voice_preset': "v2/en_speaker_5"  # Satisfied voice
             },
             'object_detected': {
-                'text': "[alert] OBJECT DETECTED! [dramatic pause] Initiating evasive maneuvers! 🚨",
+                'text': "Object detected in path. Executing avoidance protocol.",
                 'voice_preset': "v2/en_speaker_8"  # Alert voice
             }
         }
@@ -440,9 +405,16 @@ class Robot:
     
     def __init__(self, esp32_ip, esp32_port=1234):
         # Initialize Flask app and SocketIO
-        self.app = Flask(__name__)
+        self.app = Flask(__name__, static_folder='../static')
         self.socketio = SocketIO(self.app)
         self.app.route('/')(self.index)
+        
+        # Add manual command handler
+        @self.socketio.on('manual_command')
+        def handle_manual_command(command):
+            if command in self.esp32.VALID_COMMANDS:
+                self.send_command(command)
+                logging.info(f"Manual command executed: {command}")
         
         # Initialize camera
         self.cap = cv2.VideoCapture(0)
