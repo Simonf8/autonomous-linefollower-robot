@@ -142,6 +142,16 @@ class Motors:
         self._set_left_motor(speed, True)
         self._set_right_motor(speed, False)
     
+    def slight_left(self, speed=30):
+        print("Slight left")
+        self._set_left_motor(speed // 2, True)
+        self._set_right_motor(speed, True)
+    
+    def slight_right(self, speed=30):
+        print("Slight right")
+        self._set_left_motor(speed, True)
+        self._set_right_motor(speed // 2, True)
+    
     def stop(self):
         print("Stop")
         self.left_1.duty(0)
@@ -187,6 +197,12 @@ def process_command(command, motors):
             motors.left()
         elif command == 'RIGHT':
             motors.right()
+        elif command == 'SLIGHT_LEFT':
+            motors.slight_left()
+        elif command == 'SLIGHT_RIGHT':
+            motors.slight_right()
+        elif command == 'BACKWARD':
+            motors.backward()
         elif command == 'TURN_AROUND':
             motors.turn_around()
         elif command == 'EMERGENCY_LEFT':
