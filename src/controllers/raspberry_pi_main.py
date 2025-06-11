@@ -324,80 +324,116 @@ class VisualOdometry:
         cv2.arrowedLine(frame, center, end_point, (0, 255, 0), 2)
 
 class VoiceSystem:
-    """High-quality voice system using XTTS API"""
+    """High-quality voice system using Bark TTS"""
     
     def __init__(self):
         # Initialize pygame mixer for audio playback
-        pygame.mixer.init()
+        pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
         self.cache_dir = Path("voice_cache")
         self.cache_dir.mkdir(exist_ok=True)
         
-        # Voice styles/characters mapping
+        # Import Bark
+        from bark import SAMPLE_RATE, generate_audio, preload_models
+        from scipy.io.wavfile import write as write_wav
+        
+        self.SAMPLE_RATE = SAMPLE_RATE
+        self.generate_audio = generate_audio
+        self.write_wav = write_wav
+        
+        # Preload models for faster generation
+        print("Loading Bark TTS models...")
+        preload_models()
+        print("Bark TTS ready!")
+        
+        # Voice presets with different speakers and emotions
         self.voices = {
             'obstacle': {
-                'text': "Can't go there! Turning around!",
-                'style': 'dramatic'
+                'text': "[clears throat] Yo, there's something in my way! [laughs] Time to turn this baby around! 🔄",
+                'voice_preset': "v2/en_speaker_6"  # Confident male voice
             },
             'line_lost': {
-                'text': "Where's my line? Looking for it!",
-                'style': 'concerned'
+                'text': "[sighs] Uh oh... where did my line go? [concerned] Looking around... 👀",
+                'voice_preset': "v2/en_speaker_3"  # Concerned voice
             },
             'line_found': {
-                'text': "Got the line! Let's go!",
-                'style': 'excited'
+                'text': "[excited] YES! Found it! [laughs] Let's gooooo! 🚀",
+                'voice_preset': "v2/en_speaker_9"  # Excited voice
             },
             'startup': {
-                'text': "Line follower robot activated! Ready to roll!",
-                'style': 'confident'
+                'text': "[dramatic voice] Line follower robot... ACTIVATED! [epic music sound] Ready to dominate these lines! 💪",
+                'voice_preset': "v2/en_speaker_6"  # Dramatic voice
+            },
+            'turn_complete': {
+                'text': "[satisfied] Boom! 180 flip complete! [chuckles] Now where's that line at? 🎯",
+                'voice_preset': "v2/en_speaker_5"  # Satisfied voice
+            },
+            'object_detected': {
+                'text': "[alert] OBJECT DETECTED! [dramatic pause] Initiating evasive maneuvers! 🚨",
+                'voice_preset': "v2/en_speaker_8"  # Alert voice
             }
         }
         
         # Cache for storing generated audio files
         self.audio_cache = {}
+        self.is_playing = False
         
-    def _get_cached_audio(self, text, style):
+    def _get_cached_audio(self, text, voice_preset):
         """Get cached audio file or generate new one"""
-        cache_key = f"{text}_{style}"
-        cache_file = self.cache_dir / f"{hash(cache_key)}.wav"
+        cache_key = f"{text}_{voice_preset}"
+        cache_file = self.cache_dir / f"{abs(hash(cache_key))}.wav"
         
         if cache_file.exists():
             return str(cache_file)
             
-        # Generate audio using XTTS API
+        # Generate audio using Bark
         try:
-            # Using Coqui API (you'll need to replace with your endpoint)
-            response = requests.post(
-                "https://api.coqui.ai/v2/samples",
-                json={
-                    "text": text,
-                    "voice": style,
-                    "language": "en"
-                },
-                headers={"Authorization": f"Bearer YOUR_API_KEY"}
-            )
+            print(f"Generating voice: {text[:50]}...")
             
-            if response.status_code == 200:
-                audio_data = response.content
-                with open(cache_file, 'wb') as f:
-                    f.write(audio_data)
-                return str(cache_file)
+            # Generate audio with Bark
+            audio_array = self.generate_audio(text, history_prompt=voice_preset)
+            
+            # Save to file
+            self.write_wav(str(cache_file), self.SAMPLE_RATE, audio_array)
+            print(f"Voice generated and cached: {cache_file.name}")
+            return str(cache_file)
                 
         except Exception as e:
-            logging.error(f"Failed to generate audio: {e}")
+            logging.error(f"Failed to generate audio with Bark: {e}")
             return None
     
     def play_sound(self, event):
         """Play a sound for a specific event"""
+        if self.is_playing:
+            return  # Don't interrupt current playback
+            
         if event in self.voices:
             voice_data = self.voices[event]
-            audio_file = self._get_cached_audio(voice_data['text'], voice_data['style'])
+            audio_file = self._get_cached_audio(voice_data['text'], voice_data['voice_preset'])
             
             if audio_file:
                 try:
+                    self.is_playing = True
                     pygame.mixer.music.load(audio_file)
                     pygame.mixer.music.play()
+                    
+                    # Start a thread to reset playing status when done
+                    def reset_playing():
+                        while pygame.mixer.music.get_busy():
+                            time.sleep(0.1)
+                        self.is_playing = False
+                    
+                    threading.Thread(target=reset_playing, daemon=True).start()
+                    
                 except Exception as e:
                     logging.error(f"Failed to play audio: {e}")
+                    self.is_playing = False
+    
+    def add_custom_voice(self, event_name, text, voice_preset="v2/en_speaker_6"):
+        """Add a custom voice line"""
+        self.voices[event_name] = {
+            'text': text,
+            'voice_preset': voice_preset
+        }
 
 class Robot:
     """Main robot control class"""
@@ -560,7 +596,7 @@ class Robot:
             x1, y1, x2, y2 = obj['box']
             # If obstacle is in the path
             if (x2 - x1) > 100 and y2 > 240:  # Large and close object
-                self.voice.play_sound('obstacle')
+                self.voice.play_sound('object_detected')
                 return "TURN_AROUND"
         
         # Line following with voice feedback
@@ -591,6 +627,14 @@ class Robot:
             current_time - self.last_command_time > 0.1):
             
             if self.esp32.send_command(command):
+                # Add voice feedback for turn around completion
+                if command == "TURN_AROUND" and self.last_command != "TURN_AROUND":
+                    # Play turn complete sound after a delay
+                    def delayed_voice():
+                        time.sleep(3)  # Wait for turn to complete
+                        self.voice.play_sound('turn_complete')
+                    threading.Thread(target=delayed_voice, daemon=True).start()
+                
                 self.last_command = command
                 self.last_command_time = current_time
                 logging.debug(f"Sent command: {command}")

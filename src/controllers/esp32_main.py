@@ -187,14 +187,14 @@ def process_command(command, motors):
             motors.left()
         elif command == 'RIGHT':
             motors.right()
+        elif command == 'TURN_AROUND':
+            motors.turn_around()
         elif command == 'EMERGENCY_LEFT':
             motors.emergency_left()
         elif command == 'EMERGENCY_RIGHT':
             motors.emergency_right()
         elif command == 'STOP':
             motors.stop()
-        elif command == 'TURN_AROUND':
-            motors.turn_around()
         else:
             print(f"Unknown command: '{command}'")
             return False
