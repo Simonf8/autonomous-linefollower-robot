@@ -1136,18 +1136,15 @@ class Robot:
             # Direct control based on error - no smoothing
             abs_error = abs(error)
             
-            # INVERTED CONTROL LOGIC:
-            # The following logic is intentionally INVERTED to compensate for
-            # what appears to be swapped motor wiring.
             if abs_error < 0.15:  # Close to center - go straight
                 command = "FORWARD"
                 self.current_action = "Following line"
             elif abs_error < 0.4:  # Medium correction
-                # Positive error = line to RIGHT = turn RIGHT (inverted)
+                # Positive error = line to RIGHT => turn RIGHT to follow
                 command = "SLIGHT_RIGHT" if error > 0 else "SLIGHT_LEFT"
                 self.current_action = "Correcting position"
             else:  # Big correction needed
-                # Positive error = line to RIGHT = turn RIGHT (inverted)
+                # Positive error = line to RIGHT => turn RIGHT to follow
                 command = "RIGHT" if error > 0 else "LEFT"
                 self.current_action = "Major turn"
             
@@ -1164,11 +1161,11 @@ class Robot:
         """Ultra-simplified control focused only on line following"""
         # Direct line following - no voice, no delays
         if self.esp32.line_detected:
-            self.line_status = True
+                self.line_status = True
             return self._pid_line_following()
         else:
-            self.line_status = False
-            return self._handle_line_loss()
+                self.line_status = False
+                return self._handle_line_loss()
     
     def _pid_line_following(self):
         """Responsive but smooth PID controller for line following"""
@@ -1198,20 +1195,21 @@ class Robot:
         
         control_output = self.pid_controller.update(smooth_error)
         
-        # INVERTED CONTROL LOGIC:
-        # The following logic is intentionally INVERTED to compensate for
-        # what appears to be swapped motor wiring.
-        # Positive error = line to RIGHT of robot = SHOULD turn LEFT, but we turn RIGHT.
-        # Negative error = line to LEFT of robot = SHOULD turn RIGHT, but we turn LEFT.
+        # DEBUG: Print control decision details
+        command = None
+        # CORRECTED: Control direction logic
+        # Position 0.0 = line centered = go FORWARD
+        # Positive error = line to RIGHT of robot = turn RIGHT to follow
+        # Negative error = line to LEFT of robot = turn LEFT to follow
         if abs(smooth_error) < 0.15:  # Wider center zone - go straight when close to center
             command = "FORWARD"
-        elif smooth_error > 0.5:  # Line far to the right - turn RIGHT sharply (inverted)
+        elif smooth_error > 0.5:  # Line far to the right - turn RIGHT sharply
             command = "RIGHT"
-        elif smooth_error < -0.5:  # Line far to the left - turn LEFT sharply (inverted)
+        elif smooth_error < -0.5:  # Line far to the left - turn LEFT sharply
             command = "LEFT"
-        elif smooth_error > 0.1:  # Line slightly right - turn RIGHT gently (inverted)
+        elif smooth_error > 0.1:  # Line slightly right - turn RIGHT gently
             command = "SLIGHT_RIGHT"
-        elif smooth_error < -0.1:  # Line slightly left - turn LEFT gently (inverted)
+        elif smooth_error < -0.1:  # Line slightly left - turn LEFT gently
             command = "SLIGHT_LEFT"
         else:
             command = "FORWARD"
@@ -1332,7 +1330,7 @@ class Robot:
         logging.info("Cleaning up...")
         self.send_command("STOP")
         if self.cap:
-            self.cap.release()
+        self.cap.release()
         cv2.destroyAllWindows()
         self.esp32.close()
 
