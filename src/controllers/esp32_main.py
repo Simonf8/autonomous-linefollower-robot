@@ -21,24 +21,43 @@ RIGHT_MOTOR_1 = 12
 RIGHT_MOTOR_2 = 13
 
 # Line Sensor Pins
-LINE_SENSORS = [32, 33, 34, 35, 36]  # ADC capable pins
+LINE_SENSORS = [14, 27, 16, 17, 25]  # ADC capable pins
 
 class LineSensor:
     def __init__(self, sensor_pins):
-        self.sensors = [ADC(Pin(pin)) for pin in sensor_pins]
-        for sensor in self.sensors:
-            sensor.atten(ADC.ATTN_11DB)
-            sensor.width(ADC.WIDTH_12BIT)
+        self.sensors = []
+        self.sensor_pins = sensor_pins
         
-        self.threshold = 2000
+        # Initialize digital GPIO pins for line sensors
+        for pin in sensor_pins:
+            try:
+                gpio_pin = Pin(pin, Pin.IN)
+                self.sensors.append(gpio_pin)
+                print(f"Digital sensor on pin {pin} initialized")
+            except Exception as e:
+                print(f"Failed to initialize GPIO on pin {pin}: {e}")
+                self.sensors.append(None)
+        
         self.last_position = 0
     
     def read_raw(self):
-        return [sensor.read() for sensor in self.sensors]
+        # For digital sensors, raw and digital are the same
+        return self.read_digital()
     
     def read_digital(self):
-        raw_values = self.read_raw()
-        return [1 if value > self.threshold else 0 for value in raw_values]
+        values = []
+        for sensor in self.sensors:
+            if sensor is not None:
+                try:
+                    # Use raw values directly (0 = line detected, 1 = no line)
+                    raw_value = sensor.value()
+                    line_detected = 1 - raw_value  # Convert: 0 becomes 1 (line), 1 becomes 0 (no line)
+                    values.append(line_detected)
+                except:
+                    values.append(0)  # Default value if read fails
+            else:
+                values.append(0)  # Default value for failed sensors
+        return values
     
     def get_line_position(self):
         values = self.read_digital()
@@ -58,21 +77,15 @@ class LineSensor:
         return position, True
     
     def calibrate(self, samples=100):
-        print("Starting calibration...")
-        min_values = [4095] * len(self.sensors)
-        max_values = [0] * len(self.sensors)
+        print("Digital line sensors don't need calibration")
+        print("Sensors will read 1 for line detected, 0 for no line")
         
-        for _ in range(samples):
-            current_values = self.read_raw()
-            for i, value in enumerate(current_values):
-                min_values[i] = min(min_values[i], value)
-                max_values[i] = max(max_values[i], value)
-            time.sleep_ms(10)
-        
-        self.threshold = sum([(max_val + min_val) / 2 
-                            for min_val, max_val 
-                            in zip(min_values, max_values)]) / len(self.sensors)
-        print(f"Calibration complete. Threshold: {self.threshold}")
+        # Test read to make sure sensors are working
+        print("Testing sensor readings:")
+        values = self.read_digital()
+        for i, value in enumerate(values):
+            print(f"  Sensor {i} (pin {self.sensor_pins[i]}): {value}")
+        print("Calibration complete")
 
 class Motors:
     def __init__(self):
@@ -102,7 +115,7 @@ class Motors:
             self.right_2.duty(duty)
     
     def forward(self, speed=FORWARD_SPEED):
-        print("Forward")
+        print(f"MOTOR: Forward at speed {speed}")
         self._set_left_motor(speed, True)
         self._set_right_motor(speed, True)
     
@@ -112,12 +125,12 @@ class Motors:
         self._set_right_motor(speed, False)
     
     def left(self, speed=TURN_SPEED):
-        print("Left turn")
+        print(f"MOTOR: Left turn at speed {speed}")
         self._set_left_motor(speed, False)
         self._set_right_motor(speed, True)
     
     def right(self, speed=TURN_SPEED):
-        print("Right turn")
+        print(f"MOTOR: Right turn at speed {speed}")
         self._set_left_motor(speed, True)
         self._set_right_motor(speed, False)
     
@@ -143,12 +156,12 @@ class Motors:
         self._set_right_motor(speed, False)
     
     def slight_left(self, speed=30):
-        print("Slight left")
+        print(f"MOTOR: Slight left - L:{speed//2} R:{speed}")
         self._set_left_motor(speed // 2, True)
         self._set_right_motor(speed, True)
     
     def slight_right(self, speed=30):
-        print("Slight right")
+        print(f"MOTOR: Slight right - L:{speed} R:{speed//2}")
         self._set_left_motor(speed, True)
         self._set_right_motor(speed // 2, True)
     

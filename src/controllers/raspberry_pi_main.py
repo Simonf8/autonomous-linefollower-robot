@@ -158,8 +158,10 @@ class ESP32Interface:
                     position, detected = map(float, data.split(','))
                     self.line_position = position
                     self.line_detected = bool(detected)
+                    print(f"ESP32 Data - Position: {position:.2f}, Detected: {detected}")
                 except:
                     self.logger.error("Failed to parse line sensor data")
+                    print(f"ESP32 Raw Data: '{data}'")
             
             return True
         except Exception as e:
@@ -534,13 +536,15 @@ class VisualOdometry:
     
     def draw_debug(self, frame):
         """Draw debug visualization"""
-        if self.prev_kp is not None:
+        if self.prev_kp is not None and len(self.prev_kp) > 0:
+            # Only draw top 20 best features to reduce clutter
+            sorted_kp = sorted(self.prev_kp, key=lambda x: x.response, reverse=True)[:20]
             cv2.drawKeypoints(
                 frame,
-                self.prev_kp,
+                sorted_kp,
                 frame,
                 color=(0, 255, 0),
-                flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
+                flags=cv2.DRAW_MATCHES_FLAGS_NOT_DRAW_SINGLE_POINTS
             )
         
         # Draw position and heading
@@ -703,7 +707,13 @@ class Robot:
         self.esp32 = ESP32Interface(esp32_ip, esp32_port)
         self.vo = VisualOdometry()
         self.yolo = YOLO("yolov8n.pt")
-        self.voice = VoiceSystem()
+        
+        # Initialize voice system (optional)
+        try:
+            self.voice = VoiceSystem()
+        except ImportError as e:
+            logging.warning(f"Voice system disabled: {e}")
+            self.voice = None
         
         # State variables
         self.position = np.zeros(3)
@@ -724,7 +734,8 @@ class Robot:
         self.web_thread.start()
         
         # Play startup sound
-        self.voice.play_sound('startup')
+        if self.voice:
+            self.voice.play_sound('startup')
     
     def index(self):
         """Serve the web interface"""
@@ -742,6 +753,16 @@ class Robot:
     def _emit_update(self, frame):
         """Emit updates to web clients"""
         try:
+            # Limit update frequency to prevent payload issues
+            current_time = time.time()
+            if not hasattr(self, '_last_emit_time'):
+                self._last_emit_time = 0
+            
+            if current_time - self._last_emit_time < 0.2:  # 5 FPS max
+                return
+                
+            self._last_emit_time = current_time
+            
             frame_data = self._encode_frame(frame)
             self.socketio.emit('robot_update', {
                 'frame': frame_data,
@@ -749,9 +770,9 @@ class Robot:
                     'position': self.position.tolist(),
                     'line_position': self.esp32.line_position,
                     'line_detected': self.esp32.line_detected,
-                    'detected_objects': self.detected_objects,
+                    'detected_objects': len(self.detected_objects),  # Just count, not full data
                     'last_command': self.last_command,
-                    'path_history': self.path_history
+                    'tracking_quality': self.tracking_quality
                 }
             })
         except Exception as e:
@@ -764,10 +785,12 @@ class Robot:
         
         # Monitor tracking quality and provide feedback
         if self.tracking_quality > 0.8 and not self.precision_mode:
-            self.voice.play_sound('high_precision')
+            if self.voice:
+                self.voice.play_sound('high_precision')
             self.precision_mode = True
         elif self.tracking_quality < 0.3 and self.tracking_status:
-            self.voice.play_sound('tracking_lost')
+            if self.voice:
+                self.voice.play_sound('tracking_lost')
             self.tracking_status = False
         elif self.tracking_quality > 0.5:
             self.tracking_status = True
@@ -809,10 +832,10 @@ class Robot:
         # Draw visual odometry debug info
         self.vo.draw_debug(frame)
         
-        # Draw path history
-        if len(self.path_history) > 1:
-            points = np.array(self.path_history, dtype=np.int32)
-            cv2.polylines(frame, [points], False, (0, 255, 255), 2)
+        # Draw path history (disabled to reduce visual clutter)
+        # if len(self.path_history) > 1:
+        #     points = np.array(self.path_history, dtype=np.int32)
+        #     cv2.polylines(frame, [points], False, (0, 255, 255), 2)
         
         # Draw detected objects
         for obj in self.detected_objects:
@@ -862,12 +885,14 @@ class Robot:
         # Adaptive PID line following
         if self.esp32.line_detected:
             if not self.line_status:
-                self.voice.play_sound('line_found')
+                if self.voice:
+                    self.voice.play_sound('line_found')
                 self.line_status = True
             return self._pid_line_following()
         else:
             if self.line_status:
-                self.voice.play_sound('line_lost')
+                if self.voice:
+                    self.voice.play_sound('line_lost')
                 self.line_status = False
             return self._intelligent_line_search()
     
@@ -921,7 +946,8 @@ class Robot:
     
     def _execute_smart_avoidance(self, obstacle):
         """Execute intelligent obstacle avoidance maneuver"""
-        self.voice.play_sound('object_detected')
+        if self.voice:
+            self.voice.play_sound('object_detected')
         
         # Choose avoidance strategy based on obstacle position and distance
         if obstacle['distance'] < 0.8:  # Very close - emergency maneuver
@@ -935,22 +961,24 @@ class Robot:
     def _pid_line_following(self):
         """Advanced PID controller for smooth line following"""
         if not hasattr(self, 'pid_controller'):
-            self.pid_controller = PIDController(kp=1.2, ki=0.1, kd=0.05)
+            self.pid_controller = PIDController(kp=2.0, ki=0.0, kd=0.1)
         
         error = self.esp32.line_position
         control_output = self.pid_controller.update(error)
         
-        # Convert PID output to motor commands
-        if abs(control_output) < 0.05:
+        # Convert PID output to motor commands with improved thresholds
+        if abs(error) < 0.1:
             return "FORWARD"
-        elif control_output > 0.3:
-            return "RIGHT"
-        elif control_output < -0.3:
+        elif error > 0.5:  # Line is to the right
+            return "RIGHT" 
+        elif error < -0.5:  # Line is to the left
             return "LEFT"
-        elif control_output > 0:
-            return "SLIGHT_RIGHT"  # New gentle turn command
+        elif error > 0.2:
+            return "SLIGHT_RIGHT"
+        elif error < -0.2:
+            return "SLIGHT_LEFT"
         else:
-            return "SLIGHT_LEFT"   # New gentle turn command
+            return "FORWARD"
     
     def _intelligent_line_search(self):
         """Intelligent line search using visual odometry and memory"""
@@ -978,7 +1006,8 @@ class Robot:
                     # Play turn complete sound after a delay
                     def delayed_voice():
                         time.sleep(3)  # Wait for turn to complete
-                        self.voice.play_sound('turn_complete')
+                        if self.voice:
+                            self.voice.play_sound('turn_complete')
                     threading.Thread(target=delayed_voice, daemon=True).start()
                 
                 self.last_command = command
@@ -1003,12 +1032,19 @@ class Robot:
                 
                 # 3. Calculate and send control command
                 command = self.calculate_control()
+                
+                # Debug line sensor data
+                print(f"Line detected: {self.esp32.line_detected}, Position: {self.esp32.line_position:.2f}, Command: {command}")
+                
                 self.send_command(command)
                 
-                # 4. Display frame
-                cv2.imshow('Robot View', processed_frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                # 4. Display frame (disabled for headless operation)
+                # cv2.imshow('Robot View', processed_frame)
+                # if cv2.waitKey(1) & 0xFF == ord('q'):
+                #     break
+                
+                # Small delay to prevent excessive CPU usage
+                time.sleep(0.01)
                 
         except KeyboardInterrupt:
             logging.info("Shutting down...")
@@ -1032,5 +1068,5 @@ if __name__ == "__main__":
     
     # Create and run robot
     # Replace with your ESP32's IP address
-    robot = Robot(esp32_ip="192.168.2.21")
+    robot = Robot(esp32_ip="192.168.128.117")
     robot.run() 
