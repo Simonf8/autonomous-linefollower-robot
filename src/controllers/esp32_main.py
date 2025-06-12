@@ -13,6 +13,7 @@ FORWARD_SPEED = 60  # Faster forward movement
 TURN_SPEED = 70     # Much faster turning for quicker search
 EMERGENCY_SPEED = 80
 STOP_SPEED = 0
+TURN_AROUND_DURATION = 2.5  # seconds to spin for ~180° (tune as needed)
 
 # Motor Pins
 LEFT_MOTOR_1 = 18
@@ -179,10 +180,10 @@ class Motors:
         # First back up a bit
         self.backward(speed)
         time.sleep(0.5)
-        # Then do a 180-degree turn
+        # Then do a 180-degree turn (duration tuned by constant)
         self._set_left_motor(speed, True)
         self._set_right_motor(speed, False)
-        time.sleep(2.0)  # Adjust this time based on your robot's turning speed
+        time.sleep(TURN_AROUND_DURATION)
         self.stop()
     
     def emergency_left(self, speed=EMERGENCY_SPEED):

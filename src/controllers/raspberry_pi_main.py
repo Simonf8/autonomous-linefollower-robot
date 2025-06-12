@@ -1213,6 +1213,7 @@ class Robot:
         """Ultra-simplified control focused only on line following"""
         # Direct line following - no voice, no delays
         if self.esp32.line_detected:
+            
             self.line_status = True
             return self._pid_line_following()
         else:
