@@ -8,10 +8,10 @@ WIFI_SSID = "CJ"  # Fill in your WiFi name
 WIFI_PASSWORD = "4533simon"  # Fill in your WiFi password
 SERVER_PORT = 1234
 
-# Motor Configuration
-FORWARD_SPEED = 50  # Reduced for stability
-TURN_SPEED = 50     # Reduced for stability  
-EMERGENCY_SPEED = 50
+# Motor Configuration - Faster settings
+FORWARD_SPEED = 60  # Faster forward movement
+TURN_SPEED = 70     # Much faster turning for quicker search
+EMERGENCY_SPEED = 80
 STOP_SPEED = 0
 
 # Motor Pins
@@ -20,8 +20,8 @@ LEFT_MOTOR_2 = 19
 RIGHT_MOTOR_1 = 12
 RIGHT_MOTOR_2 = 13
 
-# Line Sensor Pins
-LINE_SENSORS = [14, 27, 16, 17, 25]  # ADC capable pins
+# Line Sensor Pins - Waveshare ITR20001/T
+LINE_SENSORS = [14, 27, 16, 17, 26]  # Correct pins: Left2, Left1, Center, Right1, Right2
 
 class LineSensor:
     def __init__(self, sensor_pins):
@@ -92,30 +92,26 @@ class LineSensor:
     def get_line_position(self):
         values = self.read_digital()
         
-        # Special case: If middle 3 sensors are all 0 (black), robot is perfectly centered
-        if len(values) == 5:
-            if values[1] == 0 and values[2] == 0 and values[3] == 0:
-                print(f"PERFECT CENTER: All 3 middle sensors on line: {values}")
-                self.last_position = 0.0
-                return 0.0, True
-        
-        # Check if any sensors detect the line
+        # Check if any sensors detect the line (value = 1 means line detected)
         total = sum(values)
         if total == 0:
-            print(f"NO LINE: All sensors read 0: {values}")
-            return self.last_position, False
+            print(f"NO LINE: All sensors read 0 (white surface): {values}")
+            return self.last_position, 1  # Return 1 for "no line detected"
         
-        # Calculate weighted position for other cases
+        # Calculate weighted position
         weighted_sum = 0
         for i, value in enumerate(values):
-            weighted_sum += value * (i - (len(values) - 1) / 2)
+            weighted_sum += value * (i - 2)  # Center sensor is index 2, so subtract 2
         
         position = weighted_sum / total
-        position = position / ((len(values) - 1) / 2)
+        
+        # Normalize position to -1.0 to +1.0 range
+        # Divide by 2 because max distance from center is 2 positions
+        position = position / 2.0
         
         print(f"LINE POS: sensors={values}, pos={position:.2f}")
         self.last_position = position
-        return position, True
+        return position, 0  # Return 0 for "line detected"
     
     def calibrate(self, samples=100):
         print("Digital line sensors don't need calibration")
@@ -165,12 +161,12 @@ class Motors:
         self._set_left_motor(speed, False)
         self._set_right_motor(speed, False)
     
-    def left(self, speed=35):  # Slower sharp turns
+    def left(self, speed=TURN_SPEED):  # Use faster turn speed
         print(f"MOTOR: Left turn at speed {speed}")
         self._set_left_motor(speed, False)
         self._set_right_motor(speed, True)
     
-    def right(self, speed=35):  # Slower sharp turns
+    def right(self, speed=TURN_SPEED):  # Use faster turn speed
         print(f"MOTOR: Right turn at speed {speed}")
         self._set_left_motor(speed, True)
         self._set_right_motor(speed, False)
@@ -196,16 +192,16 @@ class Motors:
         self._set_left_motor(speed, True)
         self._set_right_motor(speed, False)
     
-    def slight_left(self, speed=40):  # More responsive differential speed
-        left_speed = int(speed * 0.7)   # 70% speed on inside wheel (more effective)
+    def slight_left(self, speed=FORWARD_SPEED):  # Use forward speed for slight turns
+        left_speed = int(speed * 0.7)   # 70% speed on inside wheel
         right_speed = speed             # 100% speed on outside wheel
         print(f"MOTOR: Slight left - L:{left_speed} R:{right_speed}")
         self._set_left_motor(left_speed, True)
         self._set_right_motor(right_speed, True)
     
-    def slight_right(self, speed=40):  # More responsive differential speed
+    def slight_right(self, speed=FORWARD_SPEED):  # Use forward speed for slight turns
         left_speed = speed              # 100% speed on outside wheel  
-        right_speed = int(speed * 0.7)  # 70% speed on inside wheel (more effective)
+        right_speed = int(speed * 0.7)  # 70% speed on inside wheel
         print(f"MOTOR: Slight right - L:{left_speed} R:{right_speed}")
         self._set_left_motor(left_speed, True)
         self._set_right_motor(right_speed, True)

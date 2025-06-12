@@ -5,94 +5,190 @@ import numpy as np
 import socket
 import time
 import logging
-from ultralytics import YOLO
-from flask import Flask, render_template_string, Response
-from flask_socketio import SocketIO
+from flask import Flask, render_template_string, Response, jsonify
 import threading
-import base64
+import subprocess
 import os
-import pygame
-import requests
-import json
 from pathlib import Path
+import pygame
 
 # HTML template for web interface
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Line Follower Robot Dashboard</title>
+    <title>Robot Dashboard</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="/static/dashboard.css">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #1a1a1a;
+            color: white;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+                }
+        .camera-feed {
+            width: 100%;
+            max-width: 640px;
+            margin: 0 auto 20px;
+            display: block;
+            border-radius: 8px;
+            border: 2px solid #4CAF50;
+        }
+        .status {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .status-card {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .status-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #4CAF50;
+            margin-bottom: 5px;
+        }
+        .status-label {
+            color: #888;
+            font-size: 0.9em;
+        }
+        .autonomous-info {
+            margin-top: 20px;
+            text-align: center;
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 8px;
+        }
+        .autonomous-info h3 {
+            margin: 0 0 10px 0;
+            color: #4CAF50;
+        }
+        .action-display {
+            margin: 20px 0;
+            text-align: center;
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 8px;
+            border: 2px solid #4CAF50;
+        }
+        .action-display h3 {
+            margin: 0 0 10px 0;
+            color: #4CAF50;
+        }
+        .action-text {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #fff;
+            padding: 10px;
+            background: #1a1a1a;
+            border-radius: 5px;
+        }
+    </style>
 </head>
 <body>
     <div class="container">
-        <div class="video-feed">
-            <h2>Camera Feed</h2>
-            <img id="camera-feed" src="" alt="Robot Camera Feed">
-            <canvas id="path-canvas" class="path-canvas" width="600" height="400"></canvas>
+        <div class="header">
+            <h1>Line Follower Robot</h1>
         </div>
         
-        <div class="status-panel">
-            <h2>Robot Status</h2>
-            
-            <div id="line-status" class="status-item">
-                <div class="status-indicator inactive"></div>
-                Line Status: Not Detected
+        <img src="/video_feed" class="camera-feed" alt="Robot Camera Feed">
+        
+        <div class="status">
+            <div class="status-card">
+                <div class="status-value" id="robot-status">Running</div>
+                <div class="status-label">Status</div>
             </div>
             
-            <div class="status-item">
-                <h3>Position</h3>
-                <div class="position-grid">
-                    <div class="position-item">
-                        <div class="position-label">X</div>
-                        <div class="position-value" id="position-x">0.00</div>
-                    </div>
-                    <div class="position-item">
-                        <div class="position-label">Y</div>
-                        <div class="position-value" id="position-y">0.00</div>
-                    </div>
-                    <div class="position-item">
-                        <div class="position-label">Angle</div>
-                        <div class="position-value" id="position-theta">0.00</div>
-                    </div>
-                </div>
+            <div class="status-card">
+                <div class="status-value" id="command">FORWARD</div>
+                <div class="status-label">Current Command</div>
             </div>
             
-            <div id="command" class="status-item">
-                Command: None
+            <div class="status-card">
+                <div class="status-value" id="line-detected">Yes</div>
+                <div class="status-label">Line Detected</div>
             </div>
             
-            <div class="status-item">
-                Objects Detected: <span id="objects-count">0</span>
+            <div class="status-card">
+                <div class="status-value" id="position">0.00</div>
+                <div class="status-label">Line Position</div>
             </div>
             
-            <div class="status-item">
-                Uptime: <span id="uptime">00:00:00</span>
+            <div class="status-card">
+                <div class="status-value" id="obstacle">No</div>
+                <div class="status-label">Obstacle Detected</div>
+            </div>
             </div>
             
-            <div class="status-item">
-                <h3>Performance Metrics</h3>
-                <canvas id="metrics-chart" width="300" height="200"></canvas>
+        <div class="action-display">
+            <h3>Current Action</h3>
+            <div class="action-text" id="current-action">Initializing...</div>
             </div>
             
-            <div class="controls-info">
-                <h3>Manual Controls</h3>
-                <p>W - Forward</p>
-                <p>A - Left</p>
-                <p>D - Right</p>
-                <p>S - Stop</p>
-                <p>Q - Turn Around</p>
+        <div class="autonomous-info">
+            <h3>Autonomous Line Following</h3>
+            <p>Robot follows BLACK lines using ESP32 sensors and avoids obstacles with camera</p>
             </div>
         </div>
-    </div>
-    <script src="/static/dashboard.js"></script>
+    
+    <script>
+        // Real-time status updates for autonomous robot
+        function updateStatus() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    // Update all status fields
+                    document.getElementById('robot-status').textContent = data.status;
+                    document.getElementById('command').textContent = data.command;
+                    document.getElementById('line-detected').textContent = data.line_detected ? 'Yes' : 'No';
+                    document.getElementById('obstacle').textContent = data.obstacle_detected ? 'YES!' : 'No';
+                    document.getElementById('position').textContent = data.position.toFixed(2);
+                    document.getElementById('current-action').textContent = data.current_action;
+                    
+                    // Color coding for better visibility
+                    const lineCard = document.getElementById('line-detected');
+                    lineCard.style.color = data.line_detected ? '#4CAF50' : '#f44336';
+                    
+                    const obstacleCard = document.getElementById('obstacle');
+                    obstacleCard.style.color = data.obstacle_detected ? '#f44336' : '#4CAF50';
+                    obstacleCard.style.fontWeight = data.obstacle_detected ? 'bold' : 'normal';
+                    
+                    const positionCard = document.getElementById('position');
+                    const pos = data.position;
+                    if (Math.abs(pos) < 0.1) {
+                        positionCard.style.color = '#4CAF50'; // Green for centered
+                    } else if (Math.abs(pos) < 0.5) {
+                        positionCard.style.color = '#FFC107'; // Yellow for slight offset
+                    } else {
+                        positionCard.style.color = '#f44336'; // Red for major offset
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching status:', error);
+                    document.getElementById('robot-status').textContent = 'Connection Error';
+                });
+        }
+        
+        // Fast updates for real-time feedback
+        setInterval(updateStatus, 500);
+        updateStatus(); // Initial call
+    </script>
 </body>
-</html>
-'''
+</html>'''
 
 class ESP32Interface:
     """Handles communication with ESP32"""
@@ -116,7 +212,11 @@ class ESP32Interface:
         """Establish connection to ESP32"""
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(5.0)
+            self.socket.settimeout(10.0)  # Longer timeout
+            # Enable keep-alive to maintain connection
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Disable Nagle's algorithm for faster response
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.socket.connect((self.ip_address, self.port))
             self.connected = True
             self.logger.info(f"Connected to ESP32 at {self.ip_address}:{self.port}")
@@ -124,17 +224,32 @@ class ESP32Interface:
         except Exception as e:
             self.logger.error(f"Failed to connect to ESP32: {e}")
             self.connected = False
+            if self.socket:
+                try:
+                    self.socket.close()
+                except:
+                    pass
+                self.socket = None
             return False
     
     def reconnect(self):
         """Attempt to reconnect to ESP32"""
+        # Don't spam reconnection attempts
+        if hasattr(self, '_last_reconnect_time'):
+            if time.time() - self._last_reconnect_time < 2.0:
+                return False
+        
         self.logger.info("Attempting to reconnect to ESP32...")
+        self._last_reconnect_time = time.time()
+        
         if self.socket:
             try:
                 self.socket.close()
             except:
                 pass
         self.socket = None
+        self.connected = False
+        time.sleep(1.0)  # Longer delay before reconnection
         return self.connect()
     
     def send_command(self, command):
@@ -143,30 +258,50 @@ class ESP32Interface:
             self.logger.error(f"Invalid command: {command}")
             return False
         
+        # Only try reconnection if really needed
         if not self.connected:
             if not self.reconnect():
                 return False
         
         try:
-            # Send command
+            # Send command with reasonable timeout
+            self.socket.settimeout(2.0)
             self.socket.send(command.encode('utf-8'))
             
-            # Receive line sensor data
+            # Receive line sensor data with timeout
+            self.socket.settimeout(2.0)
             data = self.socket.recv(64).decode('utf-8').strip()
             if data:
                 try:
                     position, detected = map(float, data.split(','))
                     self.line_position = position
-                    self.line_detected = bool(detected)
-                    print(f"ESP32 Data - Position: {position:.2f}, Detected: {detected}")
-                except:
-                    self.logger.error("Failed to parse line sensor data")
+                    # ESP32 sends: 0 = line detected, 1 = no line detected
+                    self.line_detected = (detected == 0.0)
+                    # Only print occasionally to reduce spam
+                    if hasattr(self, '_last_print_time'):
+                        if time.time() - self._last_print_time > 3.0:
+                            print(f"ESP32 Data - Position: {position:.2f}, Detected: {detected}")
+                            self._last_print_time = time.time()
+                    else:
+                        self._last_print_time = time.time()
+                except Exception as parse_e:
+                    self.logger.error(f"Failed to parse line sensor data: {parse_e}")
                     print(f"ESP32 Raw Data: '{data}'")
             
             return True
+        except socket.timeout:
+            # Don't disconnect on timeout - ESP32 might just be busy
+            return False
         except Exception as e:
             self.logger.error(f"Failed to communicate with ESP32: {e}")
             self.connected = False
+            # Close the broken socket
+            if self.socket:
+                try:
+                    self.socket.close()
+                except:
+                    pass
+                self.socket = None
             return False
     
     def close(self):
@@ -559,491 +694,469 @@ class VisualOdometry:
         )
         cv2.arrowedLine(frame, center, end_point, (0, 255, 0), 2)
 
-class VoiceSystem:
-    """Robust voice system with multiple TTS fallbacks"""
-    
-    def __init__(self):
-        # Initialize pygame mixer for audio playback
-        try:
-            pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
-            print("Audio system initialized successfully")
-        except Exception as e:
-            print(f"Audio system failed: {e}")
-        
-        self.cache_dir = Path("voice_cache")
-        self.cache_dir.mkdir(exist_ok=True)
-        self.is_playing = False
-        self.tts_method = None
-        
-        # Try to initialize TTS systems in order of preference
-        if self._init_bark():
-            print("Bark TTS system ready!")
-        elif self._init_pyttsx3():
-            print("pyttsx3 TTS system ready!")
-        elif self._init_espeak():
-            print("espeak TTS system ready!")
-        else:
-            print("No TTS system available - voice disabled")
-        
-        # Voice messages
-        self.voices = {
-            'obstacle': "Obstacle detected. Initiating turn around maneuver.",
-            'line_lost': "Line signal lost. Activating search protocol.",
-            'line_found': "Line detected. Resuming navigation control.",
-            'startup': "Autonomous navigation system activated.",
-            'turn_complete': "Avoidance maneuver complete. Resuming line following.",
-            'object_detected': "Critical obstacle detected. Executing emergency avoidance.",
-            'tracking_lost': "Visual tracking degraded. Switching to backup navigation.",
-            'high_precision': "High precision mode engaged."
-        }
-        
-        self.audio_cache = {}
-    
-    def _init_bark(self):
-        """Try to initialize Bark TTS"""
-        try:
-            from bark import SAMPLE_RATE, generate_audio, preload_models
-            from scipy.io.wavfile import write as write_wav
-            
-            self.SAMPLE_RATE = SAMPLE_RATE
-            self.generate_audio = generate_audio
-            self.write_wav = write_wav
-            self.tts_method = 'bark'
-            
-            # Preload models (optional - comment out for faster startup)
-            # preload_models()
-            return True
-        except Exception as e:
-            print(f"Bark TTS not available: {e}")
-            return False
-    
-    def _init_pyttsx3(self):
-        """Try to initialize pyttsx3 TTS"""
-        try:
-            import pyttsx3
-            self.tts_engine = pyttsx3.init()
-            self.tts_engine.setProperty('rate', 150)
-            self.tts_engine.setProperty('volume', 0.8)
-            self.tts_method = 'pyttsx3'
-            return True
-        except Exception as e:
-            print(f"pyttsx3 TTS not available: {e}")
-            return False
-    
-    def _init_espeak(self):
-        """Try to initialize espeak TTS"""
-        try:
-            import subprocess
-            result = subprocess.run(['espeak', '--version'], capture_output=True, check=True)
-            self.tts_method = 'espeak'
-            return True
-        except Exception as e:
-            print(f"espeak TTS not available: {e}")
-            return False
-        
-    def _get_cached_audio(self, text, voice_preset):
-        """Get cached audio file or generate new one"""
-        cache_key = f"{text}_{voice_preset}"
-        cache_file = self.cache_dir / f"{abs(hash(cache_key))}.wav"
-        
-        if cache_file.exists():
-            return str(cache_file)
-            
-        # Generate audio using Bark
-        try:
-            print(f"Generating voice: {text[:50]}...")
-            
-            # Generate audio with Bark
-            audio_array = self.generate_audio(text, history_prompt=voice_preset)
-            
-            # Save to file
-            self.write_wav(str(cache_file), self.SAMPLE_RATE, audio_array)
-            print(f"Voice generated and cached: {cache_file.name}")
-            return str(cache_file)
-                
-        except Exception as e:
-            logging.error(f"Failed to generate audio with Bark: {e}")
-            return None
-    
-    def play_sound(self, event_or_text):
-        """Play a sound for a specific event or custom text"""
-        if self.is_playing or not self.tts_method:
-            return  # Don't interrupt current playback or if no TTS
-        
-        # Handle both predefined events and custom text
-        if event_or_text in self.voices:
-            text = self.voices[event_or_text]
-        else:
-            text = str(event_or_text)  # Use the text directly
-        
-        try:
-            self.is_playing = True
-            
-            if self.tts_method == 'bark':
-                self._play_bark_tts(text)
-            elif self.tts_method == 'pyttsx3':
-                self._play_pyttsx3_tts(text)
-            elif self.tts_method == 'espeak':
-                self._play_espeak_tts(text)
-                
-        except Exception as e:
-            print(f"Failed to play TTS audio: {e}")
-            self.is_playing = False
-    
-    def _play_bark_tts(self, text):
-        """Play TTS using Bark"""
-        try:
-            audio_array = self.generate_audio(text, history_prompt="v2/en_speaker_6")
-            temp_file = self.cache_dir / f"temp_{int(time.time())}.wav"
-            self.write_wav(str(temp_file), self.SAMPLE_RATE, audio_array)
-            
-            pygame.mixer.music.load(str(temp_file))
-            pygame.mixer.music.play()
-            
-            def cleanup():
-                while pygame.mixer.music.get_busy():
-                    time.sleep(0.1)
-                self.is_playing = False
-                temp_file.unlink(missing_ok=True)
-            
-            threading.Thread(target=cleanup, daemon=True).start()
-        except Exception as e:
-            print(f"Bark TTS failed: {e}")
-            self.is_playing = False
-    
-    def _play_pyttsx3_tts(self, text):
-        """Play TTS using pyttsx3"""
-        try:
-            def speak():
-                self.tts_engine.say(text)
-                self.tts_engine.runAndWait()
-                self.is_playing = False
-            
-            threading.Thread(target=speak, daemon=True).start()
-        except Exception as e:
-            print(f"pyttsx3 TTS failed: {e}")
-            self.is_playing = False
-    
-    def _play_espeak_tts(self, text):
-        """Play TTS using espeak"""
-        try:
-            def speak():
-                import subprocess
-                subprocess.run(['espeak', text], check=True)
-                self.is_playing = False
-            
-            threading.Thread(target=speak, daemon=True).start()
-        except Exception as e:
-            print(f"espeak TTS failed: {e}")
-            self.is_playing = False
-    
-    def add_custom_voice(self, event_name, text, voice_preset="v2/en_speaker_6"):
-        """Add a custom voice line"""
-        self.voices[event_name] = {
-            'text': text,
-            'voice_preset': voice_preset
-        }
-
+#class VoiceSystem:
+#    """Robust voice system with multiple TTS fallbacks"""
+#    
+#    def __init__(self):
+#        # Initialize pygame mixer for audio playback
+#        try:
+#            pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
+#            print("Audio system initialized successfully")
+#        except Exception as e:
+#            print(f"Audio system failed: {e}")
+#        
+#        self.cache_dir = Path("voice_cache")
+#        self.cache_dir.mkdir(exist_ok=True)
+#        self.is_playing = False
+#        self.tts_method = None
+#        
+#        # Try to initialize TTS systems in order of preference
+#        if self._init_bark():
+#            print("Bark TTS system ready!")
+#        elif self._init_pyttsx3():
+#            print("pyttsx3 TTS system ready!")
+#        elif self._init_espeak():
+#            print("espeak TTS system ready!")
+#        else:
+#            print("No TTS system available - voice disabled")
+#        
+#        # Voice messages with SAVAGE your mom jokes
+#        self.savage_mom_jokes = [
+#            "Your mom is so big, she shows up on satellite navigation as a permanent obstacle!",
+#            "Your mom is so slow, she makes this robot look like Formula 1!",
+#            "Your mom is so wide, she blocks more sensors than a solar eclipse!",
+#            "Your mom is so heavy, she caused a seismic shift in my line detection algorithm!",
+#            "Your mom is so large, NASA classified her as a small moon!",
+#            "Your mom is so massive, she has her own gravitational field affecting my gyroscope!",
+#            "Your mom is so huge, she appears in every frame of my camera feed!",
+#            "Your mom is so enormous, she triggered my emergency avoidance protocols from 3 miles away!",
+#            "Your mom is so gigantic, she makes elephants look like ants in my object detection!",
+#            "Your mom is so colossal, she broke my distance sensors just by existing!",
+#            "Your mom is so immense, she caused a buffer overflow in my memory just thinking about her size!",
+#            "Your mom is so vast, she's visible from the International Space Station!",
+#            "Your mom is so tremendous, she has her own zip code in my mapping system!",
+#            "Your mom is so monumental, she appears as a mountain range in my terrain analysis!",
+#            "Your mom is so gargantuan, she makes blue whales jealous of her size!"
+#        ]
+#        
+#        self.voices = {
+#            'obstacle': "Obstacle detected. Initiating turn around maneuver.",
+#            'line_lost': "Line signal lost. Activating search protocol.",
+#            'line_found': "Line detected. Resuming navigation control.",
+#            'startup': "Autonomous navigation system activated. Ready to roast some moms!",
+#            'turn_complete': "Avoidance maneuver complete. Resuming line following.",
+#            'object_detected': "Critical obstacle detected. Executing emergency avoidance.",
+#            'tracking_lost': "Visual tracking degraded. Switching to backup navigation.",
+#            'high_precision': "High precision mode engaged.",
+#            'savage_roast': "Time for a savage roast!"
+#        }
+#        
+#        self.audio_cache = {}
+#    
+#    def _init_bark(self):
+#        """Try to initialize Bark TTS"""
+#        try:
+#                from bark import SAMPLE_RATE, generate_audio, preload_models
+#            from scipy.io.wavfile import write as write_wav
+#            
+#            self.SAMPLE_RATE = SAMPLE_RATE
+#            self.generate_audio = generate_audio
+#            self.write_wav = write_wav
+#            self.tts_method = 'bark'
+#            
+#            # Preload models (optional - comment out for faster startup)
+#            # preload_models()
+#            return True
+#        except ImportError:
+#            print("Bark TTS not available: 'bark' package not installed")
+#            return False
+#        except Exception as e:
+#            print(f"Bark TTS not available: {e}")
+#            return False
+#    
+#    def _init_pyttsx3(self):
+#        """Try to initialize pyttsx3 TTS"""
+#        try:
+#            import pyttsx3
+#            self.tts_engine = pyttsx3.init()
+#            self.tts_engine.setProperty('rate', 150)
+#            self.tts_engine.setProperty('volume', 0.8)
+#            self.tts_method = 'pyttsx3'
+#            return True
+#        except Exception as e:
+#            print(f"pyttsx3 TTS not available: {e}")
+#            return False
+#    
+#    def _init_espeak(self):
+#        """Try to initialize espeak TTS"""
+#        try:
+#            import subprocess
+#            result = subprocess.run(['espeak', '--version'], capture_output=True, check=True)
+#            self.tts_method = 'espeak'
+#            return True
+#        except Exception as e:
+#            print(f"espeak TTS not available: {e}")
+#            return False
+#        
+#    def _get_cached_audio(self, text, voice_preset):
+#        """Get cached audio file or generate new one"""
+#        cache_key = f"{text}_{voice_preset}"
+#        cache_file = self.cache_dir / f"{abs(hash(cache_key))}.wav"
+#        
+#        if cache_file.exists():
+#            return str(cache_file)
+#            
+#        # Generate audio using Bark
+#        try:
+#            print(f"Generating voice: {text[:50]}...")
+#            
+#            # Generate audio with Bark
+#            audio_array = self.generate_audio(text, history_prompt=voice_preset)
+#            
+#            # Save to file
+#            self.write_wav(str(cache_file), self.SAMPLE_RATE, audio_array)
+#            print(f"Voice generated and cached: {cache_file.name}")
+#            return str(cache_file)
+#                
+#        except Exception as e:
+#            logging.error(f"Failed to generate audio with Bark: {e}")
+#            return None
+#    
+#    def play_sound(self, event_or_text):
+#        """Play a sound for a specific event or custom text"""
+#        if self.is_playing or not self.tts_method:
+#            return  # Don't interrupt current playback or if no TTS
+#        
+#        # Handle both predefined events and custom text
+#        if event_or_text in self.voices:
+#            text = self.voices[event_or_text]
+#        else:
+#            text = str(event_or_text)  # Use the text directly
+#        
+#        try:
+#            self.is_playing = True
+#            
+#            if self.tts_method == 'bark':
+#                self._play_bark_tts(text)
+#            elif self.tts_method == 'pyttsx3':
+#                self._play_pyttsx3_tts(text)
+#            elif self.tts_method == 'espeak':
+#                self._play_espeak_tts(text)
+#                
+#        except Exception as e:
+#            print(f"Failed to play TTS audio: {e}")
+#            self.is_playing = False
+#    
+#    def _play_bark_tts(self, text):
+#        """Play TTS using Bark"""
+#        try:
+#            audio_array = self.generate_audio(text, history_prompt="v2/en_speaker_6")
+#            temp_file = self.cache_dir / f"temp_{int(time.time())}.wav"
+#            self.write_wav(str(temp_file), self.SAMPLE_RATE, audio_array)
+#            
+#            pygame.mixer.music.load(str(temp_file))
+#            pygame.mixer.music.play()
+#            
+#            def cleanup():
+#                while pygame.mixer.music.get_busy():
+#                    time.sleep(0.1)
+#                self.is_playing = False
+#            temp_file.unlink(missing_ok=True)
+#            
+#            threading.Thread(target=cleanup, daemon=True).start()
+#        except Exception as e:
+#            print(f"Bark TTS failed: {e}")
+#            self.is_playing = False
+#    
+#    def _play_pyttsx3_tts(self, text):
+#        """Play TTS using pyttsx3"""
+#        try:
+#            def speak():
+#                self.tts_engine.say(text)
+#                self.tts_engine.runAndWait()
+#                self.is_playing = False
+#            
+#            threading.Thread(target=speak, daemon=True).start()
+#        except Exception as e:
+#            print(f"pyttsx3 TTS failed: {e}")
+#            self.is_playing = False
+#    
+#    def _play_espeak_tts(self, text):
+#        """Play TTS using espeak"""
+#        try:
+#            def speak():
+#                import subprocess
+#                subprocess.run(['espeak', text], check=True)
+#                self.is_playing = False
+#            
+#            threading.Thread(target=speak, daemon=True).start()
+#        except Exception as e:
+#            print(f"espeak TTS failed: {e}")
+#            self.is_playing = False
+#    
+#    def get_savage_roast(self):
+#        """Get a random savage your mom joke"""
+#        import random
+#        return random.choice(self.savage_mom_jokes)
+#    
+#    def speak_with_roast(self, main_text):
+#        """Speak main text followed by a savage roast"""
+#        roast = self.get_savage_roast()
+#        combined_text = f"{main_text} {roast}"
+#        self.play_sound(combined_text)
+#    
+#    def add_custom_voice(self, event_name, text, voice_preset="v2/en_speaker_6"):
+#        """Add a custom voice line"""
+##        self.voices[event_name] = {
+#            'text': text,
+#            'voice_preset': voice_preset
+#        }
+#
 class Robot:
-    """Main robot control class"""
+    """Simple robot control class for line following"""
     
     def __init__(self, esp32_ip, esp32_port=1234):
-        # Initialize Flask app and SocketIO
-        self.app = Flask(__name__, static_folder='../static')
-        self.socketio = SocketIO(self.app)
+        # Initialize Flask app
+        self.app = Flask(__name__)
         self.app.route('/')(self.index)
+        self.app.route('/video_feed')(self.video_feed)
+        self.app.route('/api/status')(self.api_status)
         
-        # Add manual command handler
-        @self.socketio.on('manual_command')
-        def handle_manual_command(command):
-            if command in self.esp32.VALID_COMMANDS:
-                self.send_command(command)
-                logging.info(f"Manual command executed: {command}")
-        
-        # Initialize camera
+        # Initialize camera for line detection
         self.cap = cv2.VideoCapture(0)
+        if not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(1)  # Try camera 1 if 0 fails
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         
-        # Initialize components
+        # Initialize ESP32 connection
         self.esp32 = ESP32Interface(esp32_ip, esp32_port)
-        self.vo = VisualOdometry()
-        self.yolo = YOLO("yolo11n.pt")  # Use YOLO11n model
         
-        # Initialize voice system (optional)
-        try:
-            self.voice = VoiceSystem()
-        except ImportError as e:
-            logging.warning(f"Voice system disabled: {e}")
-            self.voice = None
-        
-        # State variables
-        self.position = np.zeros(3)
-        self.tracking_quality = 1.0
-        self.detected_objects = []
-        self.last_command = None
+        # Simple state variables
+        self.last_command = "STOP"
         self.last_command_time = time.time()
-        self.line_status = False  # Track if line was previously detected
-        self.tracking_status = True  # Track if visual tracking is good
-        self.precision_mode = False  # Track if in high precision mode
+        self.line_detected = False
+        self.obstacle_detected = False
+        self.current_action = "Initializing"
         
-        # Path tracking
-        self.path_history = []
+        # Initialize advanced voice system with savage roasts
+        # self.voice_system = VoiceSystem()
+        self.tts_enabled = self.check_tts_available()
         
         # Start web server thread
         self.web_thread = threading.Thread(target=self._run_web_server)
         self.web_thread.daemon = True
         self.web_thread.start()
         
-        # Play startup sound
-        if self.voice:
-            self.voice.play_sound('startup')
+        logging.info("Robot initialized - simple mode")
+        
+        # Start with a savage roast announcement
+        #self.speak_savage_roast(" roast robot activated and ready to insult your moms while following lines. Starting up because")
     
     def index(self):
         """Serve the web interface"""
         return render_template_string(HTML_TEMPLATE)
     
-    def _run_web_server(self):
-        """Run the web server in a separate thread"""
-        self.socketio.run(self.app, host='0.0.0.0', port=5000)
-    
-    def _encode_frame(self, frame):
-        """Convert OpenCV frame to base64 for web display"""
-        _, buffer = cv2.imencode('.jpg', frame)
-        return base64.b64encode(buffer).decode('utf-8')
-    
-    def _emit_update(self, frame):
-        """Emit updates to web clients"""
+    def check_tts_available(self):
+        """Check if text-to-speech is available"""
         try:
-            # Limit update frequency to prevent payload issues
-            current_time = time.time()
-            if not hasattr(self, '_last_emit_time'):
-                self._last_emit_time = 0
-            
-            if current_time - self._last_emit_time < 0.2:  # 5 FPS max
-                return
+            # Check for espeak
+            subprocess.run(['espeak', '--version'], capture_output=True, check=True)
+            logging.info("Text-to-speech (espeak) available")
+            return True
+        except:
+            try:
+                # Check for festival
+                subprocess.run(['festival', '--version'], capture_output=True, check=True)
+                logging.info("Text-to-speech (festival) available")
+                return True
+            except:
+                logging.warning("No text-to-speech system found")
+                return False
+    
+    def speak(self, text):
+        """Enhanced text-to-speech with optional savage roasts"""
+        if not self.tts_enabled:
+            return
+        
+        # 30% chance to add a savage roast to any speech
+        import random
+        if random.random() < 0.3:  # 30% chance
+            roast = self.voice_system.get_savage_roast()
+            text = f"{text} Also, {roast}"
+        
+        try:
+            # Use espeak for fast, clear speech
+            subprocess.Popen(['espeak', '-s', '150', '-v', 'en', text], 
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except:
+            try:
+                # Fallback to festival
+                subprocess.Popen(['festival', '--tts'], 
+                               input=text.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except:
+                pass
+    
+    def speak_savage_roast(self, main_text):
+        """Guaranteed savage roast with main text"""
+        if not self.tts_enabled:
+            return
+        
+        roast = self.voice_system.get_savage_roast()
+        combined_text = f"{main_text} {roast}"
+        
+        try:
+            subprocess.Popen(['espeak', '-s', '150', '-v', 'en', combined_text], 
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except:
+            try:
+                subprocess.Popen(['festival', '--tts'], 
+                               input=combined_text.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except:
+                pass
+    
+    def api_status(self):
+        """API endpoint for real-time robot status"""
+        return jsonify({
+            'status': 'Autonomous' if self.esp32.connected else 'Disconnected',
+            'command': self.last_command,
+            'line_detected': self.line_detected,
+            'obstacle_detected': getattr(self, 'obstacle_detected', False),
+            'position': getattr(self.esp32, 'line_position', 0.0),
+            'current_action': getattr(self, 'current_action', 'Unknown'),
+            'esp_connected': self.esp32.connected
+        })
+    
+    def _run_web_server(self):
+        """Run the simple web server"""
+        self.app.run(host='0.0.0.0', port=5001, debug=False)
+    
+    def send_command(self, command):
+        """Send command to ESP32"""
+        if self.esp32.send_command(command):
+            self.last_command = command
+            logging.info(f"Command sent: {command}")
+            return True
+        return False
+    
+    def video_feed(self):
+        """Video streaming route"""
+        return Response(self.generate_frames(),
+                       mimetype='multipart/x-mixed-replace; boundary=frame')
+    
+    def generate_frames(self):
+        """Generate camera frames for streaming"""
+        while True:
+            ret, frame = self.cap.read()
+            if ret:
+                # Process frame for line detection
+                self.process_frame(frame)
                 
-            self._last_emit_time = current_time
-            
-            frame_data = self._encode_frame(frame)
-            self.socketio.emit('robot_update', {
-                'frame': frame_data,
-                'data': {
-                    'position': self.position.tolist(),
-                    'line_position': self.esp32.line_position,
-                    'line_detected': self.esp32.line_detected,
-                    'detected_objects': len(self.detected_objects),  # Just count, not full data
-                    'last_command': self.last_command,
-                    'tracking_quality': self.tracking_quality
-                }
-            })
-        except Exception as e:
-            logging.error(f"Failed to emit update: {e}")
+                # Encode frame as JPEG
+                ret, buffer = cv2.imencode('.jpg', frame)
+                if ret:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            else:
+                break
     
     def process_frame(self, frame):
-        """Process a single camera frame"""
-        # 1. Update position using visual odometry
-        self.position, self.tracking_quality = self.vo.process_frame(frame)
+        """Process frame for OBJECT DETECTION only - not line following!"""
+        height, width = frame.shape[:2]
         
-        # Monitor tracking quality and provide feedback
-        if self.tracking_quality > 0.8 and not self.precision_mode:
-            if self.voice:
-                self.voice.play_sound('high_precision')
-            self.precision_mode = True
-        elif self.tracking_quality < 0.3 and self.tracking_status:
-            if self.voice:
-                self.voice.play_sound('tracking_lost')
-            self.tracking_status = False
-        elif self.tracking_quality > 0.5:
-            self.tracking_status = True
-            self.precision_mode = False
+        # Much smaller detection area to avoid false positives
+        center_region = frame[height//2:3*height//4, 2*width//5:3*width//5]
         
-        if self.tracking_quality > 0.5:
-            self.path_history.append((self.position[0], self.position[1]))
-            if len(self.path_history) > 100:
-                self.path_history.pop(0)
+        # More sophisticated obstacle detection
+        gray = cv2.cvtColor(center_region, cv2.COLOR_BGR2GRAY)
         
-        # 2. Detect objects using YOLO
-        results = self.yolo(frame)
-        self.detected_objects = []
+        # Use edge detection for better obstacle recognition
+        edges = cv2.Canny(gray, 50, 150)
+        edge_count = np.sum(edges > 0)
+        total_pixels = gray.shape[0] * gray.shape[1]
+        edge_ratio = edge_count / total_pixels
         
-        for r in results:
-            boxes = r.boxes
-            for box in boxes:
-                x1, y1, x2, y2 = box.xyxy[0]
-                conf = box.conf[0]
-                cls = box.cls[0]
-                
-                if conf > 0.5:
-                    self.detected_objects.append({
-                        'class': int(cls),
-                        'confidence': float(conf),
-                        'box': (int(x1), int(y1), int(x2), int(y2))
-                    })
+        # Also check for very dark objects (like walls)
+        dark_threshold = np.mean(gray) - 50
+        dark_pixels = np.sum(gray < dark_threshold)
+        dark_ratio = dark_pixels / total_pixels
         
-        # 3. Draw visualizations
-        self.draw_visualizations(frame)
+        # More sensitive obstacle detection
+        obstacle_detected = (edge_ratio > 0.1 or dark_ratio > 0.2)
         
-        # 4. Emit update to web clients
-        self._emit_update(frame)
+        if obstacle_detected:
+            # Prevent spam - only trigger if enough time has passed
+            current_time = time.time()
+            if not hasattr(self, '_last_obstacle_time'):
+                self._last_obstacle_time = 0
+            
+            if current_time - self._last_obstacle_time > 3.0:  # 3 second cooldown
+                logging.info("MAJOR OBSTACLE DETECTED! Making 180° turn")
+                self.current_action = "OBSTACLE! Making 180° turn"
+                #self.speak_savage_roast("YOUR MOM DETECTED, turning around.")
+                self.send_command("TURN_AROUND")
+                self._last_obstacle_time = current_time
+                self.obstacle_detected = True
+            
+            # Add visual indicator on frame
+            cv2.rectangle(frame, (2*width//5, height//2), (3*width//5, 3*height//4), (0, 0, 255), 3)
+            cv2.putText(frame, "OBSTACLE!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        else:
+            self.obstacle_detected = False
         
         return frame
     
-    def draw_visualizations(self, frame):
-        """Draw debug visualizations"""
-        # Draw visual odometry debug info
-        self.vo.draw_debug(frame)
+    def smart_line_following(self):
+        """FAST line following using ESP32 sensor data"""
+        # Get line data from ESP32
+        line_detected = self.esp32.line_detected
+        position = self.esp32.line_position  # -1.0 (left) to +1.0 (right)
         
-        # Draw path history (disabled to reduce visual clutter)
-        # if len(self.path_history) > 1:
-        #     points = np.array(self.path_history, dtype=np.int32)
-        #     cv2.polylines(frame, [points], False, (0, 255, 255), 2)
-        
-        # Draw detected objects
-        for obj in self.detected_objects:
-            x1, y1, x2, y2 = obj['box']
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(
-                frame,
-                f"Class {obj['class']}: {obj['confidence']:.2f}",
-                (x1, y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 0),
-                2
-            )
-        
-        # Draw line following status
-        cv2.putText(
-            frame,
-            f"Line: {'Detected' if self.esp32.line_detected else 'Lost'} "
-            f"Position: {self.esp32.line_position:.2f}",
-            (10, frame.shape[0] - 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 0),
-            2
-        )
-        
-        # Draw current command
-        if self.last_command:
-            cv2.putText(
-                frame,
-                f"Command: {self.last_command}",
-                (10, frame.shape[0] - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 0),
-                2
-            )
-    
-    def calculate_control(self):
-        """Advanced control with PID, obstacle avoidance, and adaptive behavior"""
-        # Check for obstacles first - priority over everything else
-        obstacle_result = self._analyze_obstacles_advanced()
-        if obstacle_result and obstacle_result.get('action') == 'TURN_AROUND':
-            return obstacle_result['action']
-        
-        # Adaptive PID line following when line is detected
-        if self.esp32.line_detected:
-            if not self.line_status:
-                if self.voice:
-                    self.voice.play_sound('line_found')
-                self.line_status = True
-            return self._pid_line_following()
-        else:
-            # Line lost - handle search behavior
-            if self.line_status:
-                if self.voice:
-                    self.voice.play_sound('line_lost')
-                self.line_status = False
-            return self._handle_line_loss()  # Use improved line loss handling
-    
-    def _analyze_obstacles_advanced(self):
-        """Enhanced obstacle detection with 180° turn on object detection"""
-        if not self.detected_objects:
-            return None
-            
-        # Initialize object detection state tracking
-        if not hasattr(self, 'last_object_time'):
-            self.last_object_time = 0
-            
         current_time = time.time()
         
-        for obj in self.detected_objects:
-            x1, y1, x2, y2 = obj['box']
-            width, height = x2 - x1, y2 - y1
-            center_x = (x1 + x2) / 2
+        if line_detected:
+            # Line following mode - FAST and direct
+            self.line_detected = True
+            error = position
             
-            # Estimate distance using object size
-            estimated_distance = self._estimate_distance(width, height, obj['class'])
+            # Direct control based on error - no smoothing
+            abs_error = abs(error)
             
-            # Check if object is in collision path
-            robot_path_width = 120  # pixels - wider detection zone
-            frame_center = 320  # assuming 640px width
+            if abs_error < 0.15:  # Close to center - wider zone
+                command = "FORWARD"
+                self.current_action = "Following line"
+            elif abs_error < 0.4:  # Medium correction - includes 0.5
+                # FIXED: Corrected direction logic
+                command = "SLIGHT_RIGHT" if error > 0 else "SLIGHT_LEFT"
+                self.current_action = "Correcting position"
+            else:  # Big correction needed
+                # FIXED: Corrected direction logic  
+                command = "RIGHT" if error > 0 else "LEFT"
+                self.current_action = "Major turn"
             
-            if (abs(center_x - frame_center) < robot_path_width and 
-                estimated_distance < 2.0 and  # Increased detection distance
-                y2 > 150 and  # Object is in relevant part of frame
-                current_time - self.last_object_time > 5.0):  # Avoid repeated detections
-                
-                # Get object class name for voice
-                class_names = {0: 'person', 1: 'bicycle', 2: 'car', 15: 'cat', 16: 'dog'}
-                obj_name = class_names.get(obj['class'], f'object class {obj["class"]}')
-                
-                # Voice announcement
-                if hasattr(self, 'voice') and self.voice:
-                    self.voice.play_sound(f"Obstacle detected: {obj_name}. Performing 180 degree turn.")
-                
-                print(f"OBSTACLE DETECTED: {obj_name} at distance {estimated_distance:.2f}m - TURNING AROUND")
-                self.last_object_time = current_time
-                
-                return {
-                    'action': 'TURN_AROUND',
-                    'distance': estimated_distance,
-                    'position': center_x,
-                    'object_type': obj_name,
-                    'confidence': obj['confidence']
-                }
-        return None
+            self.send_command(command)
+            
+        else:
+            # No line detected - FAST search
+            self.line_detected = False
+            command = "RIGHT"  # Just spin right to search
+            self.current_action = "Searching for line"
+            self.send_command(command)
     
-    def _estimate_distance(self, width, height, obj_class):
-        """Estimate distance to object based on size and class"""
-        # Known object sizes (in meters) - this should be calibrated
-        object_sizes = {
-            0: 0.6,   # person
-            1: 0.3,   # bicycle wheel
-            2: 1.8,   # car width
-            # Add more object classes as needed
-        }
-        
-        if obj_class in object_sizes:
-            real_size = object_sizes[obj_class]
-            focal_length = 500  # camera focal length in pixels
-            distance = (real_size * focal_length) / width
-            return max(0.1, min(distance, 10.0))  # clamp between 0.1-10m
-        
-        # Fallback: use empirical size-distance relationship
-        return max(0.5, 5.0 - (width / 100))
-    
-    def _execute_smart_avoidance(self, obstacle):
-        """Execute intelligent obstacle avoidance maneuver"""
-        if self.voice:
-            self.voice.play_sound('object_detected')
-        
-        # Choose avoidance strategy based on obstacle position and distance
-        if obstacle['distance'] < 0.8:  # Very close - emergency maneuver
-            if obstacle['position'] < 320:  # Object on left
-                return "EMERGENCY_RIGHT"
-            else:  # Object on right
-                return "EMERGENCY_LEFT"
-        else:  # Planned avoidance
-            return "TURN_AROUND"
+    def calculate_control(self):
+        """Ultra-simplified control focused only on line following"""
+        # Direct line following - no voice, no delays
+        if self.esp32.line_detected:
+            self.line_status = True
+            return self._pid_line_following()
+        else:
+            self.line_status = False
+            return self._handle_line_loss()
     
     def _pid_line_following(self):
         """Responsive but smooth PID controller for line following"""
         if not hasattr(self, 'pid_controller'):
-            self.pid_controller = PIDController(kp=0.7, ki=0.0, kd=0.25)  # More responsive
+            self.pid_controller = PIDController(kp=0.5, ki=0.0, kd=0.15)  # Smoother PID
         
         error = self.esp32.line_position
         line_detected = self.esp32.line_detected
@@ -1058,9 +1171,9 @@ class Robot:
             delattr(self, 'search_direction')
             print("LINE FOUND! Resuming normal following")
         
-        # Moderate smoothing for responsiveness
+        # Enhanced smoothing for silky smooth movement
         if not hasattr(self, 'error_history'):
-            self.error_history = [0.0, 0.0, 0.0]  # 3-point smoothing
+            self.error_history = [0.0, 0.0, 0.0, 0.0, 0.0]  # 5-point smoothing for ultra smooth
         
         self.error_history.append(error)
         self.error_history.pop(0)
@@ -1068,45 +1181,40 @@ class Robot:
         
         control_output = self.pid_controller.update(smooth_error)
         
-        # Responsive but smooth control
-        if abs(smooth_error) < 0.08:  # Wider center zone - less micro-adjustments
+        # FIXED: Corrected control direction logic
+        # Positive error = line to RIGHT of robot = turn LEFT to follow
+        # Negative error = line to LEFT of robot = turn RIGHT to follow
+        if abs(smooth_error) < 0.06:  # Very tight center zone for super smooth following
             return "FORWARD"
-        elif smooth_error > 0.7:  # Sharp turns when moderately far off
-            return "RIGHT" 
-        elif smooth_error < -0.7:
+        elif smooth_error > 0.5:  # Line far to the right - turn LEFT sharply
             return "LEFT"
-        elif smooth_error > 0.12:  # More responsive slight turns
-            return "SLIGHT_RIGHT"
-        elif smooth_error < -0.12:
+        elif smooth_error < -0.5:  # Line far to the left - turn RIGHT sharply
+            return "RIGHT"
+        elif smooth_error > 0.08:  # Line slightly right - turn LEFT gently
             return "SLIGHT_LEFT"
+        elif smooth_error < -0.08:  # Line slightly left - turn RIGHT gently
+            return "SLIGHT_RIGHT"
         else:
             return "FORWARD"
     
     def _handle_line_loss(self):
-        """Handle when robot loses the line - search by spinning"""
+        """Handle when robot loses the line - simplified search"""
         current_time = time.time()
         
-        # Initialize line loss tracking
         if not hasattr(self, 'line_lost_time'):
             self.line_lost_time = current_time
-            # Determine search direction based on last known position
-            if hasattr(self, 'error_history') and self.error_history:
-                last_error = self.error_history[-1]
-                self.search_direction = "RIGHT" if last_error > 0 else "LEFT"
-            else:
-                self.search_direction = "LEFT"  # Default search direction
-            print(f"LINE LOST! Starting search in direction: {self.search_direction}")
+            self.search_direction = "LEFT"  # Default search direction
         
-        # Search for line by spinning
         search_duration = current_time - self.line_lost_time
         
-        if search_duration < 3.0:  # Search for 3 seconds in one direction
+        if search_duration < 1.0:  # Search for 1 second in one direction (faster)
             return self.search_direction
-        elif search_duration < 6.0:  # Then try the other direction
-            opposite_direction = "LEFT" if self.search_direction == "RIGHT" else "RIGHT"
-            return opposite_direction
+        elif search_duration < 2.0:  # Then try the other direction (faster)
+            return "RIGHT" if self.search_direction == "LEFT" else "LEFT"
         else:
-            # If still no line after 6 seconds, continue spinning
+            # Reset search every 3 seconds to prevent getting stuck
+            if search_duration > 3.0:
+                self.line_lost_time = current_time
             return self.search_direction
     
     def _intelligent_line_search(self):
@@ -1139,78 +1247,51 @@ class Robot:
                 return "SLIGHT_RIGHT"
     
     def send_command(self, command):
-        """Send command to ESP32 with rate limiting"""
+        """Send command to ESP32 - simplified for speed"""
         current_time = time.time()
         
-        # Only send new commands if different from last command
-        # or if more than 100ms has passed
         if (command != self.last_command or 
             current_time - self.last_command_time > 0.1):
             
             if self.esp32.send_command(command):
-                # Add voice feedback for turn around completion
-                if command == "TURN_AROUND" and self.last_command != "TURN_AROUND":
-                    # Play turn complete sound after a delay
-                    def delayed_voice():
-                        time.sleep(3)  # Wait for turn to complete
-                        if self.voice:
-                            self.voice.play_sound('turn_complete')
-                    threading.Thread(target=delayed_voice, daemon=True).start()
-                
                 self.last_command = command
                 self.last_command_time = current_time
-                logging.debug(f"Sent command: {command}")
-            else:
-                logging.error("Failed to send command to ESP32")
     
     def run(self):
-        """Main control loop"""
+        """Smart autonomous robot with line following + obstacle avoidance"""
         try:
-            logging.info("Starting robot control loop")
+            logging.info("Starting smart autonomous robot control")
+            
+            # Check camera for obstacle detection
+            camera_available = self.cap and self.cap.isOpened()
+            if camera_available:
+                logging.info("Camera available for obstacle detection")
+            else:
+                logging.warning("No camera - obstacle detection disabled")
+                
+            # Connect to ESP32
+            if not self.esp32.connect():
+                logging.error("Failed to connect to ESP32")
+                return
+                
+            logging.info("ESP32 connected - starting smart line following")
+            
+            frame_count = 0
+            
             while True:
-                # 1. Get camera frame
-                ret, frame = self.cap.read()
-                if not ret:
-                    logging.error("Failed to get camera frame")
-                    continue
+                frame_count += 1
                 
-                # 2. Process frame
-                processed_frame = self.process_frame(frame)
+                # Primary control: Smart line following using ESP32 sensors
+                self.smart_line_following()
                 
-                # 3. Calculate and send control command
-                command = self.calculate_control()
+                # Secondary: Obstacle detection using camera (every 3rd frame)
+                if camera_available and frame_count % 3 == 0:
+                    ret, frame = self.cap.read()
+                    if ret:
+                        self.process_frame(frame)  # Check for obstacles
                 
-                # Debug line sensor data with detailed analysis
-                pos = self.esp32.line_position
-                detected = self.esp32.line_detected
-                
-                if detected:
-                    if pos < -0.5:
-                        direction = "LINE FAR LEFT - should turn LEFT"
-                    elif pos < -0.2:
-                        direction = "LINE SLIGHT LEFT - should turn SLIGHT LEFT"
-                    elif abs(pos) < 0.15:
-                        direction = "LINE CENTERED - should go FORWARD"  
-                    elif pos > 0.2:
-                        direction = "LINE SLIGHT RIGHT - should turn SLIGHT RIGHT"
-                    elif pos > 0.5:
-                        direction = "LINE FAR RIGHT - should turn RIGHT"
-                    else:
-                        direction = "LINE CENTERED"
-                else:
-                    direction = "NO LINE DETECTED"
-                    
-                print(f"Position: {pos:.2f}, {direction}, Command: {command}")
-                
-                self.send_command(command)
-                
-                # 4. Display frame (disabled for headless operation)
-                # cv2.imshow('Robot View', processed_frame)
-                # if cv2.waitKey(1) & 0xFF == ord('q'):
-                #     break
-                
-                # Small delay to prevent excessive CPU usage
-                time.sleep(0.01)
+                # Faster control loop for quicker response
+                time.sleep(0.08)  # ~12Hz - faster response, still manageable for ESP32
                 
         except KeyboardInterrupt:
             logging.info("Shutting down...")
@@ -1221,7 +1302,8 @@ class Robot:
         """Clean up resources"""
         logging.info("Cleaning up...")
         self.send_command("STOP")
-        self.cap.release()
+        if self.cap:
+                self.cap.release()
         cv2.destroyAllWindows()
         self.esp32.close()
 
