@@ -12,6 +12,18 @@ import os
 from pathlib import Path
 import pygame
 
+# Optional: YOLO object detection (Ultralytics)
+try:
+    from ultralytics import YOLO  # pip install ultralytics
+    YOLO_AVAILABLE = True
+except Exception:
+    YOLO_AVAILABLE = False
+
+# YOLO settings
+USE_YOLO = True  # Toggle to enable/disable YOLO at runtime
+YOLO_MODEL_PATH = "yolo11n.pt"  # Nano model for speed
+YOLO_CONFIDENCE_THRESHOLD = 0.5  # Minimum confidence for detection
+
 # HTML template for web interface
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
@@ -952,6 +964,19 @@ class Robot:
         
         # Start with a savage roast announcement
         #self.speak_savage_roast(" roast robot activated and ready to insult your moms while following lines. Starting up because")
+        
+        # YOLO model (optional)
+        self.use_yolo = USE_YOLO and YOLO_AVAILABLE
+        self.yolo_model = None
+
+        if self.use_yolo:
+            try:
+                logging.info(f"Loading YOLO model: {YOLO_MODEL_PATH}")
+                self.yolo_model = YOLO(YOLO_MODEL_PATH)
+                logging.info("YOLO model loaded successfully")
+            except Exception as e:
+                logging.error(f"Failed to load YOLO model: {e}")
+                self.use_yolo = False
     
     def index(self):
         """Serve the web interface"""
@@ -1064,6 +1089,33 @@ class Robot:
         """Process frame for OBJECT DETECTION only - not line following!"""
         height, width = frame.shape[:2]
         
+        # ---------------------------------------------------------
+        # YOLO object detection (runs every 5th call for efficiency)
+        # ---------------------------------------------------------
+        if self.use_yolo:
+            if not hasattr(self, '_yolo_frame_counter'):
+                self._yolo_frame_counter = 0
+            self._yolo_frame_counter += 1
+
+            if self._yolo_frame_counter % 5 == 0:
+                if self._detect_objects_yolo(frame):
+                    current_time = time.time()
+                    if not hasattr(self, '_last_obstacle_time'):
+                        self._last_obstacle_time = 0
+
+                    # Cool-down to avoid repeated turns
+                    if current_time - self._last_obstacle_time > 5.0:
+                        logging.info("YOLO object detected – executing 180° turn")
+                        self.current_action = "YOLO object – 180° turn"
+                        self.send_command("TURN_AROUND")
+                        self._last_obstacle_time = current_time
+                        self.obstacle_detected = True
+
+                    # Visual overlay
+                    cv2.putText(frame, "YOLO OBJECT!", (40, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    # Early return: we already handled obstacle reaction
+                    return frame
+        
         # Smaller detection area focused on immediate path ahead
         center_region = frame[int(height*0.6):int(height*0.8), int(width*0.4):int(width*0.6)]
         
@@ -1161,11 +1213,11 @@ class Robot:
         """Ultra-simplified control focused only on line following"""
         # Direct line following - no voice, no delays
         if self.esp32.line_detected:
-                self.line_status = True
+            self.line_status = True
             return self._pid_line_following()
         else:
-                self.line_status = False
-                return self._handle_line_loss()
+            self.line_status = False
+            return self._handle_line_loss()
     
     def _pid_line_following(self):
         """Responsive but smooth PID controller for line following"""
@@ -1330,9 +1382,33 @@ class Robot:
         logging.info("Cleaning up...")
         self.send_command("STOP")
         if self.cap:
-        self.cap.release()
+            self.cap.release()
         cv2.destroyAllWindows()
         self.esp32.close()
+
+    # -------------------------------------------------------------
+    # YOLO OBJECT DETECTION
+    # -------------------------------------------------------------
+    def _detect_objects_yolo(self, frame):
+        """Return True if any object is detected with confidence above threshold"""
+        if not self.use_yolo or self.yolo_model is None:
+            return False
+
+        # Run inference (suppress verbose)
+        try:
+            results = self.yolo_model(frame, conf=YOLO_CONFIDENCE_THRESHOLD, verbose=False)
+            if not results:
+                return False
+
+            result = results[0]  # Single image
+            # If no boxes => no detection
+            if result.boxes is None or len(result.boxes) == 0:
+                return False
+
+            return True  # At least one object detected
+        except Exception as e:
+            logging.error(f"YOLO inference error: {e}")
+            return False
 
 if __name__ == "__main__":
     # Set up logging
