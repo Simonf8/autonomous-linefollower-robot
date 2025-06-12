@@ -4,14 +4,14 @@ import socket
 from machine import Pin, ADC, PWM
 
 # Network Configuration
-WIFI_SSID = ""  # Fill in your WiFi name
-WIFI_PASSWORD = ""  # Fill in your WiFi password
+WIFI_SSID = "CJ"  # Fill in your WiFi name
+WIFI_PASSWORD = "4533simon"  # Fill in your WiFi password
 SERVER_PORT = 1234
 
 # Motor Configuration
-FORWARD_SPEED = 55
-TURN_SPEED = 50
-EMERGENCY_SPEED = 85
+FORWARD_SPEED = 50  # Reduced for stability
+TURN_SPEED = 50     # Reduced for stability  
+EMERGENCY_SPEED = 50
 STOP_SPEED = 0
 
 # Motor Pins
@@ -57,22 +57,63 @@ class LineSensor:
                     values.append(0)  # Default value if read fails
             else:
                 values.append(0)  # Default value for failed sensors
-        return values
+        
+        # Apply reflection filtering for more stable readings
+        return self._filter_reflections(values)
+    
+    def _filter_reflections(self, sensor_values):
+        """Filter out reflection-caused false readings using temporal consistency"""
+        # Initialize sensor history for reflection detection
+        if not hasattr(self, 'sensor_history'):
+            self.sensor_history = []
+        
+        self.sensor_history.append(sensor_values.copy())
+        if len(self.sensor_history) > 5:  # Keep last 5 readings
+            self.sensor_history.pop(0)
+        
+        # If we have enough history, apply filtering
+        if len(self.sensor_history) >= 3:
+            filtered_values = []
+            for i in range(len(sensor_values)):
+                # Get last 3 readings for this sensor
+                recent_readings = [reading[i] for reading in self.sensor_history[-3:]]
+                
+                # Use majority vote to filter reflections
+                if sum(recent_readings) >= 2:  # 2 out of 3 readings show line
+                    filtered_values.append(1)
+                else:
+                    filtered_values.append(0)
+                    
+            return filtered_values
+        else:
+            # Not enough history yet, return current values
+            return sensor_values
     
     def get_line_position(self):
         values = self.read_digital()
-        weighted_sum = 0
-        total = sum(values)
         
+        # Special case: If middle 3 sensors are all 0 (black), robot is perfectly centered
+        if len(values) == 5:
+            if values[1] == 0 and values[2] == 0 and values[3] == 0:
+                print(f"PERFECT CENTER: All 3 middle sensors on line: {values}")
+                self.last_position = 0.0
+                return 0.0, True
+        
+        # Check if any sensors detect the line
+        total = sum(values)
         if total == 0:
+            print(f"NO LINE: All sensors read 0: {values}")
             return self.last_position, False
         
+        # Calculate weighted position for other cases
+        weighted_sum = 0
         for i, value in enumerate(values):
             weighted_sum += value * (i - (len(values) - 1) / 2)
         
         position = weighted_sum / total
         position = position / ((len(values) - 1) / 2)
         
+        print(f"LINE POS: sensors={values}, pos={position:.2f}")
         self.last_position = position
         return position, True
     
@@ -124,12 +165,12 @@ class Motors:
         self._set_left_motor(speed, False)
         self._set_right_motor(speed, False)
     
-    def left(self, speed=TURN_SPEED):
+    def left(self, speed=35):  # Slower sharp turns
         print(f"MOTOR: Left turn at speed {speed}")
         self._set_left_motor(speed, False)
         self._set_right_motor(speed, True)
     
-    def right(self, speed=TURN_SPEED):
+    def right(self, speed=35):  # Slower sharp turns
         print(f"MOTOR: Right turn at speed {speed}")
         self._set_left_motor(speed, True)
         self._set_right_motor(speed, False)
@@ -155,15 +196,19 @@ class Motors:
         self._set_left_motor(speed, True)
         self._set_right_motor(speed, False)
     
-    def slight_left(self, speed=30):
-        print(f"MOTOR: Slight left - L:{speed//2} R:{speed}")
-        self._set_left_motor(speed // 2, True)
-        self._set_right_motor(speed, True)
+    def slight_left(self, speed=40):  # More responsive differential speed
+        left_speed = int(speed * 0.7)   # 70% speed on inside wheel (more effective)
+        right_speed = speed             # 100% speed on outside wheel
+        print(f"MOTOR: Slight left - L:{left_speed} R:{right_speed}")
+        self._set_left_motor(left_speed, True)
+        self._set_right_motor(right_speed, True)
     
-    def slight_right(self, speed=30):
-        print(f"MOTOR: Slight right - L:{speed} R:{speed//2}")
-        self._set_left_motor(speed, True)
-        self._set_right_motor(speed // 2, True)
+    def slight_right(self, speed=40):  # More responsive differential speed
+        left_speed = speed              # 100% speed on outside wheel  
+        right_speed = int(speed * 0.7)  # 70% speed on inside wheel (more effective)
+        print(f"MOTOR: Slight right - L:{left_speed} R:{right_speed}")
+        self._set_left_motor(left_speed, True)
+        self._set_right_motor(right_speed, True)
     
     def stop(self):
         print("Stop")

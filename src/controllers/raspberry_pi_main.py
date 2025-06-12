@@ -481,16 +481,13 @@ class VisualOdometry:
     
     def _robust_feature_matching(self, des1, des2):
         """Robust feature matching with ratio test and cross-check"""
-        # Use FLANN matcher for better performance
-        FLANN_INDEX_LSH = 6
-        index_params = dict(algorithm=FLANN_INDEX_LSH,
-                           table_number=6,
-                           key_size=12,
-                           multi_probe_level=1)
-        search_params = dict(checks=50)
-        
-        flann = cv2.FlannBasedMatcher(index_params, search_params)
-        matches = flann.knnMatch(des1, des2, k=2)
+        # Use BF matcher for reliability (avoid FLANN crashes)
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        try:
+            matches = bf.knnMatch(des1, des2, k=2)
+        except cv2.error:
+            # Fallback to simple matching if knn fails
+            matches = [[m] for m in bf.match(des1, des2)]
         
         # Apply ratio test
         good_matches = []
@@ -563,66 +560,86 @@ class VisualOdometry:
         cv2.arrowedLine(frame, center, end_point, (0, 255, 0), 2)
 
 class VoiceSystem:
-    """High-quality voice system using Bark TTS"""
+    """Robust voice system with multiple TTS fallbacks"""
     
     def __init__(self):
         # Initialize pygame mixer for audio playback
-        pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
+        try:
+            pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
+            print("Audio system initialized successfully")
+        except Exception as e:
+            print(f"Audio system failed: {e}")
+        
         self.cache_dir = Path("voice_cache")
         self.cache_dir.mkdir(exist_ok=True)
+        self.is_playing = False
+        self.tts_method = None
         
-        # Import Bark
-        from bark import SAMPLE_RATE, generate_audio, preload_models
-        from scipy.io.wavfile import write as write_wav
+        # Try to initialize TTS systems in order of preference
+        if self._init_bark():
+            print("Bark TTS system ready!")
+        elif self._init_pyttsx3():
+            print("pyttsx3 TTS system ready!")
+        elif self._init_espeak():
+            print("espeak TTS system ready!")
+        else:
+            print("No TTS system available - voice disabled")
         
-        self.SAMPLE_RATE = SAMPLE_RATE
-        self.generate_audio = generate_audio
-        self.write_wav = write_wav
-        
-        # Preload models for faster generation
-        print("Loading Bark TTS models...")
-        preload_models()
-        print("Bark TTS ready!")
-        
-        # Voice presets with different speakers and emotions
+        # Voice messages
         self.voices = {
-            'obstacle': {
-                'text': "Obstacle detected. Initiating turn around maneuver.",
-                'voice_preset': "v2/en_speaker_6"  # Confident male voice
-            },
-            'line_lost': {
-                'text': "Line signal lost. Activating intelligent search protocol.",
-                'voice_preset': "v2/en_speaker_3"  # Concerned voice
-            },
-            'line_found': {
-                'text': "Line detected. Resuming PID navigation control.",
-                'voice_preset': "v2/en_speaker_9"  # Excited voice
-            },
-            'startup': {
-                'text': "Advanced autonomous navigation system activated. All sensors online.",
-                'voice_preset': "v2/en_speaker_6"  # Dramatic voice
-            },
-            'turn_complete': {
-                'text': "Avoidance maneuver complete. Resuming line following.",
-                'voice_preset': "v2/en_speaker_5"  # Satisfied voice
-            },
-            'object_detected': {
-                'text': "Critical obstacle detected. Executing emergency avoidance.",
-                'voice_preset': "v2/en_speaker_8"  # Alert voice
-            },
-            'tracking_lost': {
-                'text': "Visual tracking quality degraded. Switching to backup navigation.",
-                'voice_preset': "v2/en_speaker_3"  # Concerned voice
-            },
-            'high_precision': {
-                'text': "High precision mode engaged. Optimal tracking achieved.",
-                'voice_preset': "v2/en_speaker_9"  # Confident voice
-            }
+            'obstacle': "Obstacle detected. Initiating turn around maneuver.",
+            'line_lost': "Line signal lost. Activating search protocol.",
+            'line_found': "Line detected. Resuming navigation control.",
+            'startup': "Autonomous navigation system activated.",
+            'turn_complete': "Avoidance maneuver complete. Resuming line following.",
+            'object_detected': "Critical obstacle detected. Executing emergency avoidance.",
+            'tracking_lost': "Visual tracking degraded. Switching to backup navigation.",
+            'high_precision': "High precision mode engaged."
         }
         
-        # Cache for storing generated audio files
         self.audio_cache = {}
-        self.is_playing = False
+    
+    def _init_bark(self):
+        """Try to initialize Bark TTS"""
+        try:
+            from bark import SAMPLE_RATE, generate_audio, preload_models
+            from scipy.io.wavfile import write as write_wav
+            
+            self.SAMPLE_RATE = SAMPLE_RATE
+            self.generate_audio = generate_audio
+            self.write_wav = write_wav
+            self.tts_method = 'bark'
+            
+            # Preload models (optional - comment out for faster startup)
+            # preload_models()
+            return True
+        except Exception as e:
+            print(f"Bark TTS not available: {e}")
+            return False
+    
+    def _init_pyttsx3(self):
+        """Try to initialize pyttsx3 TTS"""
+        try:
+            import pyttsx3
+            self.tts_engine = pyttsx3.init()
+            self.tts_engine.setProperty('rate', 150)
+            self.tts_engine.setProperty('volume', 0.8)
+            self.tts_method = 'pyttsx3'
+            return True
+        except Exception as e:
+            print(f"pyttsx3 TTS not available: {e}")
+            return False
+    
+    def _init_espeak(self):
+        """Try to initialize espeak TTS"""
+        try:
+            import subprocess
+            result = subprocess.run(['espeak', '--version'], capture_output=True, check=True)
+            self.tts_method = 'espeak'
+            return True
+        except Exception as e:
+            print(f"espeak TTS not available: {e}")
+            return False
         
     def _get_cached_audio(self, text, voice_preset):
         """Get cached audio file or generate new one"""
@@ -648,32 +665,77 @@ class VoiceSystem:
             logging.error(f"Failed to generate audio with Bark: {e}")
             return None
     
-    def play_sound(self, event):
-        """Play a sound for a specific event"""
-        if self.is_playing:
-            return  # Don't interrupt current playback
+    def play_sound(self, event_or_text):
+        """Play a sound for a specific event or custom text"""
+        if self.is_playing or not self.tts_method:
+            return  # Don't interrupt current playback or if no TTS
+        
+        # Handle both predefined events and custom text
+        if event_or_text in self.voices:
+            text = self.voices[event_or_text]
+        else:
+            text = str(event_or_text)  # Use the text directly
+        
+        try:
+            self.is_playing = True
             
-        if event in self.voices:
-            voice_data = self.voices[event]
-            audio_file = self._get_cached_audio(voice_data['text'], voice_data['voice_preset'])
+            if self.tts_method == 'bark':
+                self._play_bark_tts(text)
+            elif self.tts_method == 'pyttsx3':
+                self._play_pyttsx3_tts(text)
+            elif self.tts_method == 'espeak':
+                self._play_espeak_tts(text)
+                
+        except Exception as e:
+            print(f"Failed to play TTS audio: {e}")
+            self.is_playing = False
+    
+    def _play_bark_tts(self, text):
+        """Play TTS using Bark"""
+        try:
+            audio_array = self.generate_audio(text, history_prompt="v2/en_speaker_6")
+            temp_file = self.cache_dir / f"temp_{int(time.time())}.wav"
+            self.write_wav(str(temp_file), self.SAMPLE_RATE, audio_array)
             
-            if audio_file:
-                try:
-                    self.is_playing = True
-                    pygame.mixer.music.load(audio_file)
-                    pygame.mixer.music.play()
-                    
-                    # Start a thread to reset playing status when done
-                    def reset_playing():
-                        while pygame.mixer.music.get_busy():
-                            time.sleep(0.1)
-                        self.is_playing = False
-                    
-                    threading.Thread(target=reset_playing, daemon=True).start()
-                    
-                except Exception as e:
-                    logging.error(f"Failed to play audio: {e}")
-                    self.is_playing = False
+            pygame.mixer.music.load(str(temp_file))
+            pygame.mixer.music.play()
+            
+            def cleanup():
+                while pygame.mixer.music.get_busy():
+                    time.sleep(0.1)
+                self.is_playing = False
+                temp_file.unlink(missing_ok=True)
+            
+            threading.Thread(target=cleanup, daemon=True).start()
+        except Exception as e:
+            print(f"Bark TTS failed: {e}")
+            self.is_playing = False
+    
+    def _play_pyttsx3_tts(self, text):
+        """Play TTS using pyttsx3"""
+        try:
+            def speak():
+                self.tts_engine.say(text)
+                self.tts_engine.runAndWait()
+                self.is_playing = False
+            
+            threading.Thread(target=speak, daemon=True).start()
+        except Exception as e:
+            print(f"pyttsx3 TTS failed: {e}")
+            self.is_playing = False
+    
+    def _play_espeak_tts(self, text):
+        """Play TTS using espeak"""
+        try:
+            def speak():
+                import subprocess
+                subprocess.run(['espeak', text], check=True)
+                self.is_playing = False
+            
+            threading.Thread(target=speak, daemon=True).start()
+        except Exception as e:
+            print(f"espeak TTS failed: {e}")
+            self.is_playing = False
     
     def add_custom_voice(self, event_name, text, voice_preset="v2/en_speaker_6"):
         """Add a custom voice line"""
@@ -706,7 +768,7 @@ class Robot:
         # Initialize components
         self.esp32 = ESP32Interface(esp32_ip, esp32_port)
         self.vo = VisualOdometry()
-        self.yolo = YOLO("yolov8n.pt")
+        self.yolo = YOLO("yolo11n.pt")  # Use YOLO11n model
         
         # Initialize voice system (optional)
         try:
@@ -876,13 +938,13 @@ class Robot:
             )
     
     def calculate_control(self):
-        """Advanced control with PID, predictive obstacle avoidance, and adaptive behavior"""
-        # Advanced obstacle detection with depth estimation
-        critical_obstacle = self._analyze_obstacles_advanced()
-        if critical_obstacle:
-            return self._execute_smart_avoidance(critical_obstacle)
+        """Advanced control with PID, obstacle avoidance, and adaptive behavior"""
+        # Check for obstacles first - priority over everything else
+        obstacle_result = self._analyze_obstacles_advanced()
+        if obstacle_result and obstacle_result.get('action') == 'TURN_AROUND':
+            return obstacle_result['action']
         
-        # Adaptive PID line following
+        # Adaptive PID line following when line is detected
         if self.esp32.line_detected:
             if not self.line_status:
                 if self.voice:
@@ -890,37 +952,57 @@ class Robot:
                 self.line_status = True
             return self._pid_line_following()
         else:
+            # Line lost - handle search behavior
             if self.line_status:
                 if self.voice:
                     self.voice.play_sound('line_lost')
                 self.line_status = False
-            return self._intelligent_line_search()
+            return self._handle_line_loss()  # Use improved line loss handling
     
     def _analyze_obstacles_advanced(self):
-        """Advanced obstacle analysis with depth estimation and trajectory prediction"""
+        """Enhanced obstacle detection with 180° turn on object detection"""
         if not self.detected_objects:
             return None
             
+        # Initialize object detection state tracking
+        if not hasattr(self, 'last_object_time'):
+            self.last_object_time = 0
+            
+        current_time = time.time()
+        
         for obj in self.detected_objects:
             x1, y1, x2, y2 = obj['box']
             width, height = x2 - x1, y2 - y1
             center_x = (x1 + x2) / 2
             
-            # Estimate distance using object size (assuming known object types)
+            # Estimate distance using object size
             estimated_distance = self._estimate_distance(width, height, obj['class'])
             
             # Check if object is in collision path
-            robot_path_width = 100  # pixels
+            robot_path_width = 120  # pixels - wider detection zone
             frame_center = 320  # assuming 640px width
             
             if (abs(center_x - frame_center) < robot_path_width and 
-                estimated_distance < 1.5 and  # meters
-                y2 > 200):  # object is in lower part of frame
+                estimated_distance < 2.0 and  # Increased detection distance
+                y2 > 150 and  # Object is in relevant part of frame
+                current_time - self.last_object_time > 5.0):  # Avoid repeated detections
+                
+                # Get object class name for voice
+                class_names = {0: 'person', 1: 'bicycle', 2: 'car', 15: 'cat', 16: 'dog'}
+                obj_name = class_names.get(obj['class'], f'object class {obj["class"]}')
+                
+                # Voice announcement
+                if hasattr(self, 'voice') and self.voice:
+                    self.voice.play_sound(f"Obstacle detected: {obj_name}. Performing 180 degree turn.")
+                
+                print(f"OBSTACLE DETECTED: {obj_name} at distance {estimated_distance:.2f}m - TURNING AROUND")
+                self.last_object_time = current_time
                 
                 return {
+                    'action': 'TURN_AROUND',
                     'distance': estimated_distance,
                     'position': center_x,
-                    'size': width * height,
+                    'object_type': obj_name,
                     'confidence': obj['confidence']
                 }
         return None
@@ -959,26 +1041,73 @@ class Robot:
             return "TURN_AROUND"
     
     def _pid_line_following(self):
-        """Advanced PID controller for smooth line following"""
+        """Responsive but smooth PID controller for line following"""
         if not hasattr(self, 'pid_controller'):
-            self.pid_controller = PIDController(kp=2.0, ki=0.0, kd=0.1)
+            self.pid_controller = PIDController(kp=0.7, ki=0.0, kd=0.25)  # More responsive
         
         error = self.esp32.line_position
-        control_output = self.pid_controller.update(error)
+        line_detected = self.esp32.line_detected
         
-        # Convert PID output to motor commands with improved thresholds
-        if abs(error) < 0.1:
+        # If no line detected, initiate search behavior
+        if not line_detected:
+            return self._handle_line_loss()
+        
+        # Reset line loss tracking when line is found
+        if hasattr(self, 'line_lost_time'):
+            delattr(self, 'line_lost_time')
+            delattr(self, 'search_direction')
+            print("LINE FOUND! Resuming normal following")
+        
+        # Moderate smoothing for responsiveness
+        if not hasattr(self, 'error_history'):
+            self.error_history = [0.0, 0.0, 0.0]  # 3-point smoothing
+        
+        self.error_history.append(error)
+        self.error_history.pop(0)
+        smooth_error = sum(self.error_history) / len(self.error_history)
+        
+        control_output = self.pid_controller.update(smooth_error)
+        
+        # Responsive but smooth control
+        if abs(smooth_error) < 0.08:  # Wider center zone - less micro-adjustments
             return "FORWARD"
-        elif error > 0.5:  # Line is to the right
+        elif smooth_error > 0.7:  # Sharp turns when moderately far off
             return "RIGHT" 
-        elif error < -0.5:  # Line is to the left
+        elif smooth_error < -0.7:
             return "LEFT"
-        elif error > 0.2:
+        elif smooth_error > 0.12:  # More responsive slight turns
             return "SLIGHT_RIGHT"
-        elif error < -0.2:
+        elif smooth_error < -0.12:
             return "SLIGHT_LEFT"
         else:
             return "FORWARD"
+    
+    def _handle_line_loss(self):
+        """Handle when robot loses the line - search by spinning"""
+        current_time = time.time()
+        
+        # Initialize line loss tracking
+        if not hasattr(self, 'line_lost_time'):
+            self.line_lost_time = current_time
+            # Determine search direction based on last known position
+            if hasattr(self, 'error_history') and self.error_history:
+                last_error = self.error_history[-1]
+                self.search_direction = "RIGHT" if last_error > 0 else "LEFT"
+            else:
+                self.search_direction = "LEFT"  # Default search direction
+            print(f"LINE LOST! Starting search in direction: {self.search_direction}")
+        
+        # Search for line by spinning
+        search_duration = current_time - self.line_lost_time
+        
+        if search_duration < 3.0:  # Search for 3 seconds in one direction
+            return self.search_direction
+        elif search_duration < 6.0:  # Then try the other direction
+            opposite_direction = "LEFT" if self.search_direction == "RIGHT" else "RIGHT"
+            return opposite_direction
+        else:
+            # If still no line after 6 seconds, continue spinning
+            return self.search_direction
     
     def _intelligent_line_search(self):
         """Intelligent line search using visual odometry and memory"""
@@ -990,6 +1119,24 @@ class Robot:
             self.path_history,
             self.tracking_quality
         )
+    
+    def _simple_line_search(self):
+        """Simple line search based on last known position"""
+        last_position = self.esp32.line_position
+        
+        # Search in the direction where line was last seen
+        if last_position > 0.3:  # Line was to the right
+            return "RIGHT"
+        elif last_position < -0.3:  # Line was to the left  
+            return "LEFT"
+        else:
+            # Line was center, do a slow search pattern
+            import time
+            search_time = time.time() % 4  # 4 second cycle
+            if search_time < 2:
+                return "SLIGHT_LEFT"
+            else:
+                return "SLIGHT_RIGHT"
     
     def send_command(self, command):
         """Send command to ESP32 with rate limiting"""
@@ -1033,8 +1180,27 @@ class Robot:
                 # 3. Calculate and send control command
                 command = self.calculate_control()
                 
-                # Debug line sensor data
-                print(f"Line detected: {self.esp32.line_detected}, Position: {self.esp32.line_position:.2f}, Command: {command}")
+                # Debug line sensor data with detailed analysis
+                pos = self.esp32.line_position
+                detected = self.esp32.line_detected
+                
+                if detected:
+                    if pos < -0.5:
+                        direction = "LINE FAR LEFT - should turn LEFT"
+                    elif pos < -0.2:
+                        direction = "LINE SLIGHT LEFT - should turn SLIGHT LEFT"
+                    elif abs(pos) < 0.15:
+                        direction = "LINE CENTERED - should go FORWARD"  
+                    elif pos > 0.2:
+                        direction = "LINE SLIGHT RIGHT - should turn SLIGHT RIGHT"
+                    elif pos > 0.5:
+                        direction = "LINE FAR RIGHT - should turn RIGHT"
+                    else:
+                        direction = "LINE CENTERED"
+                else:
+                    direction = "NO LINE DETECTED"
+                    
+                print(f"Position: {pos:.2f}, {direction}, Command: {command}")
                 
                 self.send_command(command)
                 
