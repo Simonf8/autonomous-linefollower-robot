@@ -98,18 +98,21 @@ class LineSensor:
             print(f"NO LINE: All sensors read 0 (white surface): {values}")
             return self.last_position, 1  # Return 1 for "no line detected"
         
-        # Calculate weighted position
+        # Calculate weighted position with correct indexing
+        # Sensors: [0, 1, 2, 3, 4] where 2 is center
+        # Position: [-2, -1, 0, 1, 2] relative to center
         weighted_sum = 0
         for i, value in enumerate(values):
-            weighted_sum += value * (i - 2)  # Center sensor is index 2, so subtract 2
+            sensor_position = i - 2  # Convert index to position relative to center
+            weighted_sum += value * sensor_position
         
         position = weighted_sum / total
         
-        # Normalize position to -1.0 to +1.0 range
-        # Divide by 2 because max distance from center is 2 positions
+        # Position is already in correct range (-2 to +2)
+        # Normalize to -1.0 to +1.0 range
         position = position / 2.0
         
-        print(f"LINE POS: sensors={values}, pos={position:.2f}")
+        print(f"LINE POS: sensors={values}, weighted_sum={weighted_sum}, total={total}, pos={position:.2f}")
         self.last_position = position
         return position, 0  # Return 0 for "line detected"
     
@@ -162,12 +165,12 @@ class Motors:
         self._set_right_motor(speed, False)
     
     def left(self, speed=TURN_SPEED):  # Use faster turn speed
-        print(f"MOTOR: Left turn at speed {speed}")
+        print(f"MOTOR: Left turn at speed {speed} - LEFT BACKWARD, RIGHT FORWARD")
         self._set_left_motor(speed, False)
         self._set_right_motor(speed, True)
     
     def right(self, speed=TURN_SPEED):  # Use faster turn speed
-        print(f"MOTOR: Right turn at speed {speed}")
+        print(f"MOTOR: Right turn at speed {speed} - LEFT FORWARD, RIGHT BACKWARD")
         self._set_left_motor(speed, True)
         self._set_right_motor(speed, False)
     
@@ -243,30 +246,40 @@ def connect_wifi():
 def process_command(command, motors):
     try:
         command = command.strip().upper()
-        print(f"Received command: '{command}'")
+        print(f"ESP32 RECEIVED COMMAND: '{command}'")
         
         if command == 'FORWARD':
+            print("EXECUTING: Forward")
             motors.forward()
         elif command == 'LEFT':
+            print("EXECUTING: Left turn")
             motors.left()
         elif command == 'RIGHT':
+            print("EXECUTING: Right turn")
             motors.right()
         elif command == 'SLIGHT_LEFT':
+            print("EXECUTING: Slight left")
             motors.slight_left()
         elif command == 'SLIGHT_RIGHT':
+            print("EXECUTING: Slight right")
             motors.slight_right()
         elif command == 'BACKWARD':
+            print("EXECUTING: Backward")
             motors.backward()
         elif command == 'TURN_AROUND':
+            print("EXECUTING: Turn around")
             motors.turn_around()
         elif command == 'EMERGENCY_LEFT':
+            print("EXECUTING: Emergency left")
             motors.emergency_left()
         elif command == 'EMERGENCY_RIGHT':
+            print("EXECUTING: Emergency right")
             motors.emergency_right()
         elif command == 'STOP':
+            print("EXECUTING: Stop")
             motors.stop()
         else:
-            print(f"Unknown command: '{command}'")
+            print(f"UNKNOWN COMMAND: '{command}'")
             return False
         return True
         

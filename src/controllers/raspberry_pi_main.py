@@ -1064,25 +1064,37 @@ class Robot:
         """Process frame for OBJECT DETECTION only - not line following!"""
         height, width = frame.shape[:2]
         
-        # Much smaller detection area to avoid false positives
-        center_region = frame[height//2:3*height//4, 2*width//5:3*width//5]
+        # Smaller detection area focused on immediate path ahead
+        center_region = frame[int(height*0.6):int(height*0.8), int(width*0.4):int(width*0.6)]
         
-        # More sophisticated obstacle detection
+        # More sophisticated obstacle detection with better filtering
         gray = cv2.cvtColor(center_region, cv2.COLOR_BGR2GRAY)
         
-        # Use edge detection for better obstacle recognition
-        edges = cv2.Canny(gray, 50, 150)
+        # Use edge detection for obstacle recognition with higher thresholds
+        edges = cv2.Canny(gray, 80, 200)  # Higher thresholds = less sensitive
         edge_count = np.sum(edges > 0)
         total_pixels = gray.shape[0] * gray.shape[1]
         edge_ratio = edge_count / total_pixels
         
-        # Also check for very dark objects (like walls)
-        dark_threshold = np.mean(gray) - 50
+        # Check for very dark/large objects with stricter criteria
+        mean_brightness = np.mean(gray)
+        dark_threshold = mean_brightness - 70  # Stricter threshold
         dark_pixels = np.sum(gray < dark_threshold)
         dark_ratio = dark_pixels / total_pixels
         
-        # More sensitive obstacle detection
-        obstacle_detected = (edge_ratio > 0.1 or dark_ratio > 0.2)
+        # Much less sensitive obstacle detection - avoid false positives
+        # Require BOTH high edge density AND significant dark area for obstacle
+        significant_obstacle = (edge_ratio > 0.25 and dark_ratio > 0.4)
+        
+        # Add temporal filtering - require consistent detection
+        if not hasattr(self, '_obstacle_detections'):
+            self._obstacle_detections = [False, False, False]  # 3-frame buffer
+        
+        self._obstacle_detections.append(significant_obstacle)
+        self._obstacle_detections.pop(0)
+        
+        # Only trigger if 2 out of 3 recent frames detected obstacle
+        obstacle_detected = sum(self._obstacle_detections) >= 2
         
         if obstacle_detected:
             # Prevent spam - only trigger if enough time has passed
@@ -1090,8 +1102,8 @@ class Robot:
             if not hasattr(self, '_last_obstacle_time'):
                 self._last_obstacle_time = 0
             
-            if current_time - self._last_obstacle_time > 3.0:  # 3 second cooldown
-                logging.info("MAJOR OBSTACLE DETECTED! Making 180° turn")
+            if current_time - self._last_obstacle_time > 5.0:  # 5 second cooldown - longer
+                logging.info(f"MAJOR OBSTACLE DETECTED! Edge ratio: {edge_ratio:.3f}, Dark ratio: {dark_ratio:.3f}")
                 self.current_action = "OBSTACLE! Making 180° turn"
                 #self.speak_savage_roast("YOUR MOM DETECTED, turning around.")
                 self.send_command("TURN_AROUND")
@@ -1099,10 +1111,12 @@ class Robot:
                 self.obstacle_detected = True
             
             # Add visual indicator on frame
-            cv2.rectangle(frame, (2*width//5, height//2), (3*width//5, 3*height//4), (0, 0, 255), 3)
-            cv2.putText(frame, "OBSTACLE!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.rectangle(frame, (int(width*0.4), int(height*0.6)), (int(width*0.6), int(height*0.8)), (0, 0, 255), 3)
+            cv2.putText(frame, f"OBSTACLE! E:{edge_ratio:.2f} D:{dark_ratio:.2f}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         else:
             self.obstacle_detected = False
+            # Show detection values for debugging
+            cv2.putText(frame, f"Clear - E:{edge_ratio:.2f} D:{dark_ratio:.2f}", (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         
         return frame
     
@@ -1122,15 +1136,18 @@ class Robot:
             # Direct control based on error - no smoothing
             abs_error = abs(error)
             
-            if abs_error < 0.15:  # Close to center - wider zone
+            # INVERTED CONTROL LOGIC:
+            # The following logic is intentionally INVERTED to compensate for
+            # what appears to be swapped motor wiring.
+            if abs_error < 0.15:  # Close to center - go straight
                 command = "FORWARD"
                 self.current_action = "Following line"
-            elif abs_error < 0.4:  # Medium correction - includes 0.5
-                # FIXED: Corrected direction logic
+            elif abs_error < 0.4:  # Medium correction
+                # Positive error = line to RIGHT = turn RIGHT (inverted)
                 command = "SLIGHT_RIGHT" if error > 0 else "SLIGHT_LEFT"
                 self.current_action = "Correcting position"
             else:  # Big correction needed
-                # FIXED: Corrected direction logic  
+                # Positive error = line to RIGHT = turn RIGHT (inverted)
                 command = "RIGHT" if error > 0 else "LEFT"
                 self.current_action = "Major turn"
             
@@ -1181,21 +1198,33 @@ class Robot:
         
         control_output = self.pid_controller.update(smooth_error)
         
-        # FIXED: Corrected control direction logic
-        # Positive error = line to RIGHT of robot = turn LEFT to follow
-        # Negative error = line to LEFT of robot = turn RIGHT to follow
-        if abs(smooth_error) < 0.06:  # Very tight center zone for super smooth following
-            return "FORWARD"
-        elif smooth_error > 0.5:  # Line far to the right - turn LEFT sharply
-            return "LEFT"
-        elif smooth_error < -0.5:  # Line far to the left - turn RIGHT sharply
-            return "RIGHT"
-        elif smooth_error > 0.08:  # Line slightly right - turn LEFT gently
-            return "SLIGHT_LEFT"
-        elif smooth_error < -0.08:  # Line slightly left - turn RIGHT gently
-            return "SLIGHT_RIGHT"
+        # INVERTED CONTROL LOGIC:
+        # The following logic is intentionally INVERTED to compensate for
+        # what appears to be swapped motor wiring.
+        # Positive error = line to RIGHT of robot = SHOULD turn LEFT, but we turn RIGHT.
+        # Negative error = line to LEFT of robot = SHOULD turn RIGHT, but we turn LEFT.
+        if abs(smooth_error) < 0.15:  # Wider center zone - go straight when close to center
+            command = "FORWARD"
+        elif smooth_error > 0.5:  # Line far to the right - turn RIGHT sharply (inverted)
+            command = "RIGHT"
+        elif smooth_error < -0.5:  # Line far to the left - turn LEFT sharply (inverted)
+            command = "LEFT"
+        elif smooth_error > 0.1:  # Line slightly right - turn RIGHT gently (inverted)
+            command = "SLIGHT_RIGHT"
+        elif smooth_error < -0.1:  # Line slightly left - turn LEFT gently (inverted)
+            command = "SLIGHT_LEFT"
         else:
-            return "FORWARD"
+            command = "FORWARD"
+        
+        # DEBUG: Show what's happening
+        if hasattr(self, '_last_debug_time'):
+            if time.time() - self._last_debug_time > 1.0:  # Print every second
+                print(f"DEBUG: Raw error={error:.3f}, Smooth error={smooth_error:.3f}, Command={command}")
+                self._last_debug_time = time.time()
+        else:
+            self._last_debug_time = time.time()
+        
+        return command
     
     def _handle_line_loss(self):
         """Handle when robot loses the line - simplified search"""
@@ -1303,7 +1332,7 @@ class Robot:
         logging.info("Cleaning up...")
         self.send_command("STOP")
         if self.cap:
-                self.cap.release()
+            self.cap.release()
         cv2.destroyAllWindows()
         self.esp32.close()
 
