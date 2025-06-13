@@ -20,11 +20,21 @@ from typing import List, Tuple, Set, Dict, Optional
 # ============================================================================
 # -- Grid Configuration --
 # Define start and goal cells for grid-based placement.
-# Coordinates are (column, row) from the top-left of the maze grid.
+# Coordinates are (column, row) from the top-left of the UNMAPPED maze grid.
 CELL_WIDTH_M = 0.12     # Width of a single grid cell in meters (12cm)
-START_CELL = (10, 14)   # (column, row)
-GOAL_CELL = (10, 2)     # (column, row)
-START_DIRECTION = 'UP'  # Initial robot orientation ('UP', 'DOWN', 'LEFT', 'RIGHT')
+_START_CELL_RAW = (0, 14)   # (column, row)
+_GOAL_CELL_RAW = (20, 0)     # (column, row)
+_START_DIRECTION_RAW = 'UP'  # Initial robot orientation ('UP', 'DOWN', 'LEFT', 'RIGHT')
+
+# -- Map Mirroring Correction --
+# The physical maze is a horizontal mirror of the one defined in the code.
+# We correct this by flipping the grid and all related coordinates.
+MAZE_WIDTH_CELLS = 21
+START_CELL = (MAZE_WIDTH_CELLS - 1 - _START_CELL_RAW[0], _START_CELL_RAW[1])
+GOAL_CELL = (MAZE_WIDTH_CELLS - 1 - _GOAL_CELL_RAW[0], _GOAL_CELL_RAW[1])
+
+_DIRECTION_FLIP_MAP = {'LEFT': 'RIGHT', 'RIGHT': 'LEFT'}
+START_DIRECTION = _DIRECTION_FLIP_MAP.get(_START_DIRECTION_RAW.upper(), _START_DIRECTION_RAW)
 
 # -- Odometry Calibration --
 # These values MUST be calibrated for your specific robot for accurate tracking.
@@ -199,7 +209,9 @@ class Mapper:
             [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
             [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
         ]
-        return maze
+        # To fix the horizontal mirroring, we flip each row of the maze.
+        flipped_maze = [row[::-1] for row in maze]
+        return flipped_maze
 
     def update_robot_position(self, x, y, heading):
         """Update the robot's state and path history."""
@@ -263,42 +275,180 @@ class Mapper:
 
         return vis_img
 
-class SimpleLineFollower:
-    """Pattern-based line following with object detection"""
+class Pathfinder:
+    """
+    Finds the shortest path using D* Lite and handles dynamic replanning.
+    """
+    def __init__(self, grid: List[List[int]], start_cell: Tuple[int, int], goal_cell: Tuple[int, int]):
+        self.grid = [row[:] for row in grid] # Make a copy
+        self.start_cell = start_cell
+        self.goal_cell = goal_cell
+        
+        self.width = len(grid[0])
+        self.height = len(grid)
+        
+        # D* Lite state
+        self.g_scores = {}
+        self.rhs_scores = {}
+        self.U = []  # Priority queue (min-heap)
+        
+        self.km = 0
+        self.last_pos = self.start_cell
+        
+        # Initialize D* Lite
+        self._initialize()
+
+    def _h(self, s1, s2):
+        """Heuristic (Manhattan distance)"""
+        return abs(s1[0] - s2[0]) + abs(s1[1] - s2[1])
+
+    def _get_g(self, s):
+        return self.g_scores.get(s, float('inf'))
+
+    def _get_rhs(self, s):
+        return self.rhs_scores.get(s, float('inf'))
+
+    def _calculate_key(self, s):
+        h = self._h(self.start_cell, s)
+        val = min(self._get_g(s), self._get_rhs(s))
+        return (val + h + self.km, val)
+
+    def _initialize(self):
+        """Initialize the D* Lite algorithm"""
+        self.U = []
+        self.km = 0
+        self.g_scores = {(c, r): float('inf') for r in range(self.height) for c in range(self.width)}
+        self.rhs_scores = {(c, r): float('inf') for r in range(self.height) for c in range(self.width)}
+        
+        self.rhs_scores[self.goal_cell] = 0
+        heapq.heappush(self.U, (self._calculate_key(self.goal_cell), self.goal_cell))
+
+    def _update_vertex(self, u):
+        """Update a vertex's position in the priority queue."""
+        if u != self.goal_cell:
+            min_rhs = float('inf')
+            for v in self._get_successors(u):
+                min_rhs = min(min_rhs, self._get_g(v) + self._cost(u, v))
+            self.rhs_scores[u] = min_rhs
+
+        # Remove from queue if it's there
+        self.U = [(key, s) for key, s in self.U if s != u]
+        heapq.heapify(self.U)
+        
+        if self._get_g(u) != self._get_rhs(u):
+            heapq.heappush(self.U, (self._calculate_key(u), u))
+
+    def _compute_shortest_path(self):
+        """Compute the path until the start node is consistent."""
+        while self.U and (heapq.nsmallest(1, self.U)[0][0] < self._calculate_key(self.start_cell) or \
+               self._get_rhs(self.start_cell) != self._get_g(self.start_cell)):
+            
+            key, u = heapq.heappop(self.U)
+            
+            if self._get_g(u) > self._get_rhs(u):
+                self.g_scores[u] = self._get_rhs(u)
+                for s_pred in self._get_predecessors(u):
+                    self._update_vertex(s_pred)
+            else:
+                self.g_scores[u] = float('inf')
+                self._update_vertex(u)
+                for s_pred in self._get_predecessors(u):
+                    self._update_vertex(s_pred)
+
+    def _get_neighbors(self, cell):
+        """Get valid neighbors (up, down, left, right) of a cell."""
+        neighbors = []
+        x, y = cell
+        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < self.width and 0 <= ny < self.height and self.grid[ny][nx] == 0:
+                neighbors.append((nx, ny))
+        return neighbors
+
+    def _get_successors(self, cell):
+        return self._get_neighbors(cell)
+    
+    def _get_predecessors(self, cell):
+        return self._get_neighbors(cell)
+
+    def _cost(self, s1, s2):
+        """Cost between adjacent cells."""
+        if self.grid[s2[1]][s2[0]] == 1: # Obstacle
+            return float('inf')
+        return 1 # Normal movement cost
+
+    def get_path(self) -> Optional[List[Tuple[int, int]]]:
+        """Generate the path from start to goal."""
+        self._compute_shortest_path()
+        
+        if self._get_g(self.start_cell) == float('inf'):
+            return None # No path exists
+
+        path = [self.start_cell]
+        curr = self.start_cell
+        
+        while curr != self.goal_cell:
+            successors = self._get_successors(curr)
+            if not successors:
+                return None # Dead end
+            
+            next_cell = min(successors, key=lambda s: self._cost(curr, s) + self._get_g(s))
+            path.append(next_cell)
+            curr = next_cell
+            
+            if len(path) > self.width * self.height: # Failsafe
+                return None 
+                
+        return path
+    
+    def update_obstacle(self, cell_x: int, cell_y: int, is_obstacle: bool):
+        """Update the map with a new obstacle and trigger replanning."""
+        if 0 <= cell_x < self.width and 0 <= cell_y < self.height:
+            # Update grid cost
+            self.grid[cell_y][cell_x] = 1 if is_obstacle else 0
+            
+            # Update the vertex for the changed cell and its neighbors
+            self.km += self._h(self.last_pos, self.start_cell)
+            self.last_pos = self.start_cell
+
+            self._update_vertex((cell_x, cell_y))
+            for neighbor in self._get_neighbors((cell_x, cell_y)):
+                self._update_vertex(neighbor)
+
+
+class RobotController:
+    """Controls the robot using D* Lite for pathfinding and YOLO for obstacle detection."""
     
     def __init__(self, esp32_ip):
         self.esp32 = ESP32Interface(esp32_ip)
         
-        # Simple states
-        self.state = "SEARCHING"
-        self.last_turn_direction = "right"  # Remember last turn for search
+        # -- Navigation State --
+        self.path: Optional[List[Tuple[int, int]]] = None
+        self.current_waypoint_idx = 0
+        self.state = "PLANNING" # PLANNING, NAVIGATING, AT_INTERSECTION, AVOIDING, GOAL_REACHED
+
+        # -- Speed & Control Settings --
+        self.forward_speed = 32 # Slower speed for more reliable line following
+        self.turn_speed_factor = 0.8
+        self.gentle_turn_factor = 0.68
+        self.sharp_turn_speed = 45
+        self.waypoint_threshold = 0.12 # 12cm tolerance for reaching a waypoint
         
-        # Speed settings - immediate but controlled corrections
-        self.forward_speed = 32  # Slower forward speed for better control
-        self.gentle_turn_factor = 0.68  # Immediate but gentle corrections (68% balanced)
-        self.sharp_turn_speed = 50
-        self.search_speed = 35
-        
-        # State tracking
-        self.line_lost_time = 0
-        self.last_correction = "NONE"  # Track last correction to avoid abrupt changes
-        
-        # Object detection setup
+        # -- Object Detection --
         self.camera = None
         self.yolo_model = None
         self.setup_camera_and_yolo()
+        self.obstacle_detected = False
         
-        # Object detection state
-        self.object_detected = False
-        self.turning_180 = False
-        self.turn_180_start_time = 0
-
-        # Position tracking with wheel odometry
+        # -- Position & Mapping --
         initial_pose = (START_POSITION[0], START_POSITION[1], START_HEADING)
         self.odometry = WheelOdometry(initial_pose=initial_pose)
         self.mapper = Mapper()
         self.current_position = self.odometry.x, self.odometry.y, self.odometry.heading # x, y, heading
         self.goal_reached = False
+
+        # -- D* Lite Path Planner --
+        self.planner = Pathfinder(self.mapper.create_maze_grid(), START_CELL, GOAL_CELL)
 
     def setup_camera_and_yolo(self):
         """Initialize camera and YOLO model"""
@@ -318,111 +468,293 @@ class SimpleLineFollower:
             self.camera = None
             self.yolo_model = None
 
-    def detect_objects(self):
-        """Detect objects using YOLO and return True if any obstacle is detected"""
-        if not self.camera or not self.yolo_model:
-            return False
-            
-        try:
-            ret, frame = self.camera.read()
-            if not ret:
-                return False
-                
-            # Run YOLO detection
-            results = self.yolo_model(frame, verbose=False)
-            
-            # Objects to ignore (not real obstacles)
-            ignore_objects = {
-                'tie', 'necktie', 'person', 'chair', 'dining table', 'laptop', 
-                'mouse', 'remote', 'keyboard', 'cell phone', 'book', 'clock',
-                'scissors', 'teddy bear', 'hair drier', 'toothbrush'
-            }
-            
-            # Objects that ARE obstacles (things robot should avoid)
-            obstacle_objects = {
-                'bottle', 'cup', 'bowl', 'banana', 'apple', 'orange', 'broccoli',
-                'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'potted plant',
-                'vase', 'backpack', 'handbag', 'suitcase', 'sports ball',
-                'baseball bat', 'skateboard', 'surfboard', 'tennis racket'
-            }
-            
-            # Check if any obstacle objects detected with confidence > 0.6
-            for result in results:
-                if result.boxes is not None and len(result.boxes) > 0:
-                    for box in result.boxes:
-                        confidence = float(box.conf[0])
-                        if confidence > 0.6:  # Higher confidence for obstacles
-                            class_id = int(box.cls[0])
-                            class_name = self.yolo_model.names[class_id]
-                            
-                            # Only trigger on actual obstacles, ignore ties and other non-obstacles
-                            if class_name.lower() in obstacle_objects:
-                                logging.info(f"Obstacle detected: {class_name} (confidence: {confidence:.2f})")
-                                return True
-                            elif class_name.lower() in ignore_objects:
-                                logging.debug(f"Ignoring non-obstacle: {class_name} (confidence: {confidence:.2f})")
-                            else:
-                                # Unknown object - be cautious and treat as obstacle
-                                logging.info(f"Unknown object detected: {class_name} (confidence: {confidence:.2f})")
-                                return True
-            
-            return False
-            
-        except Exception as e:
-            logging.debug(f"Object detection error: {e}")
-            return False
-
     def run(self):
-        """Main control loop for line following and obstacle detection."""
-        logging.info("Starting pattern-based line follower with odometry tracking")
+        """Main control loop for D* Lite navigation and obstacle avoidance."""
+        logging.info("Starting D* Lite navigation controller.")
         
-        # Try to connect to ESP32 in a separate thread to avoid blocking
-        def connect_esp32():
-            esp32_connected = self.esp32.connect()
-            if esp32_connected:
-                print("ESP32 connected successfully!")
-            else:
-                print("ESP32 connection failed - continuing without motor control")
+        # Connect to ESP32
+        if self.esp32.connect():
+            print("ESP32 connected successfully!")
+        else:
+            print("ESP32 connection failed - continuing without motor control")
         
-        # Start ESP32 connection in background
-        esp32_thread = threading.Thread(target=connect_esp32, daemon=True)
-        esp32_thread.start()
-        
+        # Get initial path
+        self.plan_initial_path()
+
         try:
             while not self.goal_reached:
-                # Get camera frame for object detection
-                frame = None
-                if self.camera:
-                    ret, frame = self.camera.read()
-                
-                # Check for objects every few cycles (not every cycle for performance)
-                if not hasattr(self, '_detection_counter'):
-                    self._detection_counter = 0
-                
-                self._detection_counter += 1
-                if self._detection_counter >= 5 and frame is not None:  # Check every 5 cycles
-                    self.object_detected = self.detect_objects_from_frame(frame)
-                    self._detection_counter = 0
-                
-                self.control_loop()
+                # 1. Update robot's current position from odometry
                 self.update_position_tracking()
-                
-                # Check if goal is reached
-                dist_to_goal = math.sqrt(
-                    (self.current_position[0] - GOAL_POSITION[0])**2 +
-                    (self.current_position[1] - GOAL_POSITION[1])**2
-                )
-                if dist_to_goal < GOAL_THRESHOLD:
-                    print(f"Goal reached! Distance: {dist_to_goal:.3f}m")
-                    self.goal_reached = True
 
-                time.sleep(0.05)  # 20Hz - stable control
+                # 2. Check for obstacles
+                self.check_for_obstacles()
+                
+                # 3. Main navigation logic
+                if self.state == "NAVIGATING":
+                    self.navigate_path()
+                elif self.state == "AT_INTERSECTION":
+                    # This state is handled within navigate_path, but motors are stopped briefly
+                    pass
+                elif self.state == "AVOIDING":
+                    # Stop, replan, and then resume navigation
+                    self.handle_obstacle_and_replan()
+                elif self.state == "PLANNING":
+                    # Waiting for a path
+                    self.stop_motors()
+                
+                # 4. Check if goal is reached
+                self.check_if_goal_reached()
+                
+                time.sleep(0.05) # 20Hz control loop
                 
         except KeyboardInterrupt:
             logging.info("Stopping...")
         finally:
             self.stop()
     
+    def plan_initial_path(self):
+        """Computes the first path to the goal."""
+        print("Planning initial path...")
+        self.state = "PLANNING"
+        self.path = self.planner.get_path()
+        if self.path:
+            self.current_waypoint_idx = 0
+            self.state = "NAVIGATING"
+            print(f"Path found! Length: {len(self.path)} waypoints.")
+        else:
+            self.state = "NO_PATH"
+            print("No path to goal could be found.")
+
+    def navigate_path(self):
+        """Follows the line and uses the D* path to make decisions at intersections."""
+        if not self.path or self.current_waypoint_idx >= len(self.path):
+            self.state = "GOAL_REACHED"
+            self.stop_motors()
+            return
+            
+        # Get current waypoint world coordinates
+        waypoint_cell = self.path[self.current_waypoint_idx]
+        waypoint_world_x = (waypoint_cell[0] + 0.5) * CELL_WIDTH_M
+        waypoint_world_y = (waypoint_cell[1] + 0.5) * CELL_WIDTH_M
+        
+        # Check distance to the waypoint
+        dist_to_waypoint = math.sqrt(
+            (self.current_position[0] - waypoint_world_x)**2 +
+            (self.current_position[1] - waypoint_world_y)**2
+        )
+        
+        # Detect if we are at an intersection using sensors
+        sensors = self.esp32.sensors
+        is_intersection = sum(sensors) >= 4 or (sensors[0] and sensors[4])
+
+        # If we are close to a waypoint AND the sensors see an intersection, it's time to decide the next turn
+        if dist_to_waypoint < self.waypoint_threshold and is_intersection:
+            self.state = "AT_INTERSECTION"
+            self.stop_motors()
+            time.sleep(0.25) # Pause briefly at the intersection to stabilize
+
+            # Get the direction for the next turn
+            turn_direction = self.get_turn_direction_for_next_waypoint()
+            print(f"Intersection at {waypoint_cell}. Turning: {turn_direction}")
+            
+            # Execute the turn, then resume line following
+            self.execute_intersection_turn(turn_direction)
+
+            # Move to the next waypoint in the path
+            self.current_waypoint_idx += 1
+            if self.current_waypoint_idx >= len(self.path):
+                self.state = "GOAL_REACHED"
+                return
+            
+            # After turning, go back to navigating/line-following
+            self.state = "NAVIGATING"
+            return
+
+        # Default behavior: follow the line
+        self.line_follower_control_loop()
+
+    def get_turn_direction_for_next_waypoint(self) -> str:
+        """Calculates if the next waypoint requires a left, right, or straight movement."""
+        # Ensure we have a "next" waypoint to look at
+        if self.current_waypoint_idx + 1 >= len(self.path):
+            return "STRAIGHT" # Final approach to goal
+
+        # Current robot pose
+        robot_x, robot_y, robot_heading = self.current_position
+        
+        # Next waypoint in world coordinates
+        next_waypoint_cell = self.path[self.current_waypoint_idx + 1]
+        next_waypoint_world_x = (next_waypoint_cell[0] + 0.5) * CELL_WIDTH_M
+        next_waypoint_world_y = (next_waypoint_cell[1] + 0.5) * CELL_WIDTH_M
+
+        # Calculate the angle from the robot to the next waypoint
+        angle_to_target = math.atan2(next_waypoint_world_y - robot_y, next_waypoint_world_x - robot_x)
+        
+        # Calculate the difference between the robot's heading and the target angle
+        heading_error = angle_to_target - robot_heading
+        while heading_error > math.pi: heading_error -= 2 * math.pi
+        while heading_error < -math.pi: heading_error += 2 * math.pi
+        
+        # Determine turn direction based on the heading error
+        if -math.pi / 4 <= heading_error <= math.pi / 4:
+            return "STRAIGHT"
+        elif heading_error > math.pi / 4:
+            return "LEFT"
+        else:
+            return "RIGHT"
+    
+    def execute_intersection_turn(self, direction: str):
+        """Executes a timed turn at an intersection."""
+        # Move forward slightly to enter the intersection center
+        self.esp32.send_motor_speeds(self.forward_speed, self.forward_speed)
+        time.sleep(0.3) # Adjust time as needed
+
+        if direction == "LEFT":
+            # Pivot turn left
+            self.esp32.send_motor_speeds(-self.sharp_turn_speed, self.sharp_turn_speed)
+            time.sleep(0.5) # Adjust turn duration
+        elif direction == "RIGHT":
+            # Pivot turn right
+            self.esp32.send_motor_speeds(self.sharp_turn_speed, -self.sharp_turn_speed)
+            time.sleep(0.5) # Adjust turn duration
+        
+        # After turning (or going straight), stop briefly to allow sensors to re-acquire the line
+        self.stop_motors()
+        time.sleep(0.2)
+
+    def line_follower_control_loop(self):
+        """Single control loop for following a line based on sensor patterns."""
+        sensors = self.esp32.sensors
+        L2, L1, C, R1, R2 = sensors
+        
+        left_speed, right_speed = 0, 0
+
+        # Pattern analysis for line following
+        if not L2 and L1 and C and R1 and not R2: # 01110
+            # Centered or nearly centered
+            left_speed = self.forward_speed
+            right_speed = self.forward_speed
+        elif not L2 and not L1 and C and not R1 and not R2: # 00100
+            # Perfectly centered
+            left_speed = self.forward_speed
+            right_speed = self.forward_speed
+        elif not L2 and not L1 and C and R1 and not R2: # 00110 - Drifting right
+            left_speed = int(self.forward_speed * self.gentle_turn_factor)
+            right_speed = self.forward_speed
+        elif not L2 and L1 and C and not R1 and not R2: # 01100 - Drifting left
+            left_speed = self.forward_speed
+            right_speed = int(self.forward_speed * self.gentle_turn_factor)
+        elif not L2 and not L1 and not C and R1 and R2: # 00011 - Overshot left
+            left_speed = self.forward_speed
+            right_speed = int(self.forward_speed * self.gentle_turn_factor * 0.8) # Stronger correction
+        elif L2 and L1 and not C and not R1 and not R2: # 11000 - Overshot right
+            left_speed = int(self.forward_speed * self.gentle_turn_factor * 0.8) # Stronger correction
+            right_speed = self.forward_speed
+        elif not L2 and not L1 and not C and not R1 and R2: # 00001 - Far right
+            left_speed = self.sharp_turn_speed
+            right_speed = -self.sharp_turn_speed // 2
+        elif L2 and not L1 and not C and not R1 and not R2: # 10000 - Far left
+            left_speed = -self.sharp_turn_speed // 2
+            right_speed = self.sharp_turn_speed
+        elif sum(sensors) == 0:
+            # Lost line, stop for now. A more advanced search could be added here.
+            self.stop_motors()
+        else:
+            # Default to gentle forward if pattern is unusual but line is present
+            left_speed = self.forward_speed
+            right_speed = self.forward_speed
+
+        self.esp32.send_motor_speeds(left_speed, right_speed)
+
+    def navigate_to_point(self, target_x, target_y):
+        """Steers the robot towards a specific world coordinate."""
+        robot_x, robot_y, robot_heading = self.current_position
+        
+        # Calculate heading to target
+        angle_to_target = math.atan2(target_y - robot_y, target_x - robot_x)
+        
+        # Calculate heading error
+        heading_error = angle_to_target - robot_heading
+        # Normalize error to [-pi, pi]
+        while heading_error > math.pi: heading_error -= 2 * math.pi
+        while heading_error < -math.pi: heading_error += 2 * math.pi
+        
+        # Proportional controller for turning
+        turn_adjustment = heading_error * self.turn_speed_factor
+        
+        # Slow down if turning sharply
+        if abs(heading_error) > math.pi / 4: # 45 degrees
+            forward_speed = self.forward_speed * 0.5
+        else:
+            forward_speed = self.forward_speed
+        
+        # Set motor speeds
+        left_speed = int(forward_speed - (forward_speed * turn_adjustment))
+        right_speed = int(forward_speed + (forward_speed * turn_adjustment))
+        
+        self.esp32.send_motor_speeds(left_speed, right_speed)
+
+    def check_for_obstacles(self):
+        """Periodically checks for obstacles using YOLO."""
+        if not hasattr(self, '_detection_counter'):
+            self._detection_counter = 0
+        
+        self._detection_counter += 1
+        if self._detection_counter >= 5: # Check every 5 cycles
+            self._detection_counter = 0
+            if self.camera:
+                ret, frame = self.camera.read()
+                if ret:
+                    if self.detect_objects_from_frame(frame):
+                        self.obstacle_detected = True
+                        self.state = "AVOIDING"
+                    else:
+                        self.obstacle_detected = False
+
+    def handle_obstacle_and_replan(self):
+        """Stops the robot, updates the map, and triggers a replan."""
+        print("Obstacle detected! Stopping and replanning...")
+        self.stop_motors()
+        
+        # Estimate obstacle position (cell in front of the robot)
+        robot_x, robot_y, robot_heading = self.current_position
+        obstacle_dist_m = 0.2 # Assume obstacle is 20cm in front
+        
+        obstacle_world_x = robot_x + math.cos(robot_heading) * obstacle_dist_m
+        obstacle_world_y = robot_y + math.sin(robot_heading) * obstacle_dist_m
+        
+        obstacle_cell_x = int(obstacle_world_x / CELL_WIDTH_M)
+        obstacle_cell_y = int(obstacle_world_y / CELL_WIDTH_M)
+
+        print(f"Updating map. Obstacle at cell: ({obstacle_cell_x}, {obstacle_cell_y})")
+        self.planner.update_obstacle(obstacle_cell_x, obstacle_cell_y, is_obstacle=True)
+        
+        # Replan path
+        self.planner.start_cell = self.planner.last_pos # Start replanning from current pos
+        new_path = self.planner.get_path()
+        if new_path:
+            print("New path found!")
+            self.path = new_path
+            self.current_waypoint_idx = 0 # Start from the beginning of the new path
+            self.state = "NAVIGATING"
+        else:
+            print("Failed to find a new path around the obstacle.")
+            self.state = "NO_PATH" # Stuck
+        
+        self.obstacle_detected = False # Reset detection flag
+
+    def check_if_goal_reached(self):
+        """Checks if the robot is within the goal threshold."""
+        dist_to_goal = math.sqrt(
+            (self.current_position[0] - GOAL_POSITION[0])**2 +
+            (self.current_position[1] - GOAL_POSITION[1])**2
+        )
+        if dist_to_goal < GOAL_THRESHOLD:
+            print(f"Goal reached! Distance: {dist_to_goal:.3f}m")
+            self.goal_reached = True
+            self.state = "GOAL_REACHED"
+            self.stop_motors()
+
     def detect_objects_from_frame(self, frame):
         """Detect objects from provided frame (for efficiency)"""
         if not self.yolo_model:
@@ -459,12 +791,14 @@ class SimpleLineFollower:
                             # Only trigger on actual obstacles, ignore ties and other non-obstacles
                             if class_name.lower() in obstacle_objects:
                                 logging.info(f"Obstacle detected: {class_name} (confidence: {confidence:.2f})")
+                                self.state = "AVOIDING" # Set state to avoiding
                                 return True
                             elif class_name.lower() in ignore_objects:
                                 logging.debug(f"Ignoring non-obstacle: {class_name} (confidence: {confidence:.2f})")
                             else:
                                 # Unknown object - be cautious and treat as obstacle
                                 logging.info(f"Unknown object detected: {class_name} (confidence: {confidence:.2f})")
+                                self.state = "AVOIDING" # Set state to avoiding
                                 return True
             
             return False
@@ -485,181 +819,13 @@ class SimpleLineFollower:
         # Update the mapper for visualization
         self.mapper.update_robot_position(x, y, heading)
 
-    def control_loop(self):
-        """Single control loop using sensor patterns with object detection."""
-        
-        # Priority 1: Handle 180-degree turn if object detected
-        if self.object_detected and not self.turning_180:
-            logging.info("Object detected! Starting 180-degree turn")
-            self.turning_180 = True
-            self.turn_180_start_time = time.time()
-            self.state = "TURN_180"
-            self.execute_state()
-            return
-        
-        # Priority 2: Continue 180-degree turn if in progress
-        if self.turning_180:
-            elapsed_time = time.time() - self.turn_180_start_time
-            if elapsed_time < 3.0:  # Turn for 3 seconds (adjust as needed)
-                self.state = "TURN_180"
-                self.execute_state()
-                return
-            else:
-                # Finished 180 turn, reset and resume line following
-                logging.info("180-degree turn completed, resuming line following")
-                self.turning_180 = False
-                self.object_detected = False
-                self.state = "SEARCH"  # Start searching for line again
-        
-        # Priority 3: Normal line following
-        # Get sensor pattern [L2, L1, C, R1, R2]
-        sensors = self.esp32.sensors
-        L2, L1, C, R1, R2 = sensors
-        
-        # Determine state based on 5cm tape + 7cm sensor array
-        # IDEAL: Middle 3 sensors (01110) should be on tape when centered
-        
-        if not L2 and L1 and C and R1 and not R2:
-            # Pattern: 01110 - Perfect center (3 middle sensors on 5cm tape)
-            self.state = "FORWARD"
-            
-        elif not L2 and not L1 and C and not R1 and not R2:
-            # Pattern: 00100 - Only center sensor - PERFECT, go forward
-            self.state = "FORWARD"
-            
-        elif not L2 and not L1 and C and R1 and not R2:
-            # Pattern: 00110 - Drifting right, correct LEFT immediately
-            self.state = "TURN_LEFT_GENTLE"
-            self.last_turn_direction = "left"
-            
-        elif not L2 and L1 and C and not R1 and not R2:
-            # Pattern: 01100 - Drifting left, correct RIGHT immediately
-            self.state = "TURN_RIGHT_GENTLE"
-            self.last_turn_direction = "right"
-            
-        elif not L2 and L1 and C and R1 and R2:
-            # Pattern: 01111 - Drifting right (right edge sensor active)
-            self.state = "TURN_LEFT_GENTLE"
-            self.last_turn_direction = "left"
-            
-        elif L2 and L1 and C and R1 and not R2:
-            # Pattern: 11110 - Drifting left (left edge sensor active)  
-            self.state = "TURN_RIGHT_GENTLE"
-            self.last_turn_direction = "right"
-            
-        elif not L2 and not L1 and not C and R1 and R2:
-            # Pattern: 00011 - Robot overshot left, line on right side, turn RIGHT to center
-            self.state = "TURN_RIGHT_GENTLE"
-            self.last_turn_direction = "right"
-            
-        elif L2 and L1 and not C and not R1 and not R2:
-            # Pattern: 11000 - Robot overshot right, line on left side, turn LEFT to center
-            self.state = "TURN_LEFT_GENTLE"
-            self.last_turn_direction = "left"
-            
-        elif not L2 and L1 and not C and not R1 and not R2:
-            # Pattern: 01000 - Left sensor only, gentle right turn
-            self.state = "TURN_RIGHT_GENTLE"
-            self.last_turn_direction = "right"
-            
-        elif L2 and not L1 and not C and not R1 and not R2:
-            # Pattern: 10000 - Far left sensor only, gentle right turn
-            self.state = "TURN_RIGHT_GENTLE"
-            self.last_turn_direction = "right"
-            
-        elif not L2 and not L1 and not C and R1 and not R2:
-            # Pattern: 00010 - Right sensor only, gentle left turn
-            self.state = "TURN_LEFT_GENTLE"
-            self.last_turn_direction = "left"
-            
-        elif not L2 and not L1 and not C and not R1 and R2:
-            # Pattern: 00001 - Far right sensor only, gentle left turn
-            self.state = "TURN_LEFT_GENTLE"
-            self.last_turn_direction = "left"
-            
-        elif L1 and C and R1:
-            # Pattern: X111X - Wide line (intersection or corner approach)
-            self.state = "FORWARD"  # Go straight through
-            
-        elif (L2 and L1 and C) or (C and R1 and R2):
-            # Patterns like 111XX or XX111 - Corner detected, use gentle turns
-            if L2 and L1 and C:
-                self.state = "TURN_LEFT_GENTLE"
-                self.last_turn_direction = "left"
-            else:
-                self.state = "TURN_RIGHT_GENTLE"
-                self.last_turn_direction = "right"
-                
-        elif sum(sensors) >= 4:
-            # Pattern: 4+ sensors active - very wide line or intersection
-            self.state = "FORWARD"
-            
-        elif sum(sensors) == 0:
-            # Pattern: 00000 - No line detected
-            if self.state != "SEARCH":
-                self.line_lost_time = time.time()
-            self.state = "SEARCH"
-            
-        else:
-            # Any other pattern - continue with last known direction or search
-            if hasattr(self, 'line_lost_time') and time.time() - self.line_lost_time > 1.0:
-                self.state = "SEARCH"
-            # Otherwise keep current state
-        
-        # Execute the determined state
-        self.execute_state()
-        
-        # Control loop active
-    
-    def execute_state(self):
-        """Execute motor commands based on current state"""
-        left_speed = 0
-        right_speed = 0
-        
-        if self.state == "FORWARD":
-            left_speed = self.forward_speed
-            right_speed = self.forward_speed
-            
-        elif self.state == "TURN_LEFT_GENTLE":
-            # Gentle left: slow down left wheel
-            left_speed = int(self.forward_speed * self.gentle_turn_factor)
-            right_speed = self.forward_speed
-            
-        elif self.state == "TURN_LEFT_SHARP":
-            # Sharp left: stop left wheel, turn right wheel
-            left_speed = 0
-            right_speed = self.sharp_turn_speed
-            
-        elif self.state == "TURN_RIGHT_GENTLE":
-            # Gentle right: slow down right wheel
-            left_speed = self.forward_speed
-            right_speed = int(self.forward_speed * self.gentle_turn_factor)
-            
-        elif self.state == "TURN_RIGHT_SHARP":
-            # Sharp right: turn left wheel, stop right wheel
-            left_speed = self.sharp_turn_speed
-            right_speed = 0
-            
-        elif self.state == "TURN_180":
-            # 180-degree turn: spin in place
-            left_speed = -self.sharp_turn_speed  # Turn left (reverse left wheel)
-            right_speed = self.sharp_turn_speed   # Turn left (forward right wheel)
-            
-        elif self.state == "SEARCH":
-            # Search based on last known direction
-            if self.last_turn_direction == "left":
-                left_speed = -self.search_speed  # Spin left
-                right_speed = self.search_speed
-            else:
-                left_speed = self.search_speed   # Spin right
-                right_speed = -self.search_speed
-        
-        # Send commands to ESP32
-        self.esp32.send_motor_speeds(left_speed, right_speed)
-    
+    def stop_motors(self):
+        """Convenience function to stop motors."""
+        self.esp32.send_motor_speeds(0, 0)
+
     def stop(self):
         """Stop the robot and cleanup resources"""
-        self.esp32.send_motor_speeds(0, 0)
+        self.stop_motors()
         self.esp32.close()
         
         # Cleanup camera
@@ -832,7 +998,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
     # Replace with your ESP32 IP
-    robot = SimpleLineFollower("192.168.2.21")
+    robot = RobotController("192.168.2.21")
     
     # Create and start web visualization automatically
     try:
@@ -854,9 +1020,10 @@ if __name__ == "__main__":
     print("╔════════════════════════════════════════════════════════════╗")
     print("║            CYBERPUNK ROBOT NAVIGATION MATRIX              ║")
     print("╠════════════════════════════════════════════════════════════╣")
-    print("║ > Simple line-following with IR sensors                   ║")
+    print("║ > D* Lite pathfinding with dynamic replanning             ║")
+    print("║ > Hybrid Navigation (Line Following + Waypoints)          ║")
     print("║ > Odometry-based position tracking                        ║")
-    print("║ > YOLO11n obstacle detection with evasive maneuvers      ║")
+    print("║ > YOLOv8n obstacle detection with evasive maneuvers      ║")
     print("║ > Live camera feed with cyberpunk overlay effects        ║")
     print("║ > Interactive dashboard at http://192.168.2.20:5000      ║")
     print("╚════════════════════════════════════════════════════════════╝")
