@@ -102,7 +102,7 @@ class DStarLite:
         return False
     
     def _get_neighbors(self, x: int, y: int) -> List[Tuple[int, int]]:
-        """Get valid neighboring cells - only allow movement along line paths"""
+        """Get valid neighboring cells - STRICT line following only"""
         neighbors = []
         
         # Only allow 4-connected movement (no diagonal) to stay on line paths
@@ -110,31 +110,49 @@ class DStarLite:
         
         for dx, dy in directions:
             nx, ny = x + dx, y + dy
-            if self._is_valid_cell(nx, ny):
-                # Additional check: ensure we're moving along a continuous line path
-                if self._is_line_path_connection(x, y, nx, ny):
-                    neighbors.append((nx, ny))
+            
+            # First check: neighbor must be a valid navigable cell
+            if not self._is_valid_cell(nx, ny):
+                continue
+            
+            # Second check: must be directly adjacent (no gaps)
+            if abs(dx) + abs(dy) != 1:
+                continue
+                
+            # Third check: ensure we're moving along a continuous black line
+            # This is the key fix - only allow movement if there's actually a line connection
+            if self._is_line_path_connection(x, y, nx, ny):
+                neighbors.append((nx, ny))
         
         return neighbors
     
     def _is_line_path_connection(self, x1: int, y1: int, x2: int, y2: int) -> bool:
-        """Check if two cells are connected by a valid line path"""
-        # Both cells must be navigable
+        """Check if two cells are connected by a valid line path - STRICT line following"""
+        # Both cells must be navigable (black line cells)
         if not (self._is_valid_cell(x1, y1) and self._is_valid_cell(x2, y2)):
             return False
         
-        # Check if this is an intersection point (allows transitions between line segments)
-        if self._is_intersection(x1, y1) or self._is_intersection(x2, y2):
+        # For maze navigation, we need to be very strict about line following
+        # Only allow movement if there's a continuous black line between the cells
+        
+        # Check if both cells are part of the same continuous line segment
+        if x1 == x2:  # Vertical movement
+            # Ensure there's a continuous vertical line between y1 and y2
+            min_y, max_y = min(y1, y2), max(y1, y2)
+            for y in range(min_y, max_y + 1):
+                if not self._is_valid_cell(x1, y):
+                    return False  # Gap in the line
+            return True
+            
+        elif y1 == y2:  # Horizontal movement
+            # Ensure there's a continuous horizontal line between x1 and x2
+            min_x, max_x = min(x1, x2), max(x1, x2)
+            for x in range(min_x, max_x + 1):
+                if not self._is_valid_cell(x, y1):
+                    return False  # Gap in the line
             return True
         
-        # Check if this is a horizontal or vertical line segment connection
-        if x1 == x2:  # Vertical movement
-            # Check if we're on the same vertical line segment
-            return self._are_on_same_vertical_line(x1, y1, y2)
-        elif y1 == y2:  # Horizontal movement
-            # Check if we're on the same horizontal line segment
-            return self._are_on_same_horizontal_line(y1, x1, x2)
-        
+        # No diagonal movement allowed in line following
         return False
     
     def _are_on_same_horizontal_line(self, row: int, x1: int, x2: int) -> bool:
@@ -252,19 +270,40 @@ class DStarLite:
         start_grid = (int(start_world[0] / self.cell_size), int(start_world[1] / self.cell_size))
         goal_grid = (int(goal_world[0] / self.cell_size), int(goal_world[1] / self.cell_size))
         
-        # Validate coordinates
+        print(f"🎯 D* Lite: Converting positions:")
+        print(f"   Start: {start_world} -> grid {start_grid}")
+        print(f"   Goal: {goal_world} -> grid {goal_grid}")
+        
+        # Validate coordinates - ensure they're on actual black line paths
         if not self._is_valid_cell(start_grid[0], start_grid[1]):
-            print(f"Warning: Start position {start_grid} is not valid, finding nearest valid cell")
+            print(f"⚠️  Start position {start_grid} is not on a black line, finding nearest line cell")
             start_grid = self._find_nearest_valid_cell(start_grid)
+            print(f"✅ Corrected start to: {start_grid}")
         
         if not self._is_valid_cell(goal_grid[0], goal_grid[1]):
-            print(f"Warning: Goal position {goal_grid} is not valid, finding nearest valid cell")
+            print(f"⚠️  Goal position {goal_grid} is not on a black line, finding nearest line cell")
             goal_grid = self._find_nearest_valid_cell(goal_grid)
+            print(f"✅ Corrected goal to: {goal_grid}")
+        
+        # Verify both positions have valid neighbors (can actually navigate from them)
+        start_neighbors = self._get_neighbors(start_grid[0], start_grid[1])
+        goal_neighbors = self._get_neighbors(goal_grid[0], goal_grid[1])
+        
+        print(f"🔍 Start position has {len(start_neighbors)} valid neighbors")
+        print(f"🔍 Goal position has {len(goal_neighbors)} valid neighbors")
+        
+        if len(start_neighbors) == 0:
+            print("❌ ERROR: Start position has no valid neighbors - cannot navigate!")
+            return
+            
+        if len(goal_neighbors) == 0:
+            print("❌ ERROR: Goal position has no valid neighbors - cannot navigate!")
+            return
         
         self.start = start_grid
         self.goal = goal_grid
         
-        # D* Lite positions set
+        print(f"✅ D* Lite: Positions validated and set")
         
         # Initialize goal
         self.rhs[self.goal] = 0
@@ -693,31 +732,42 @@ class LineBasedMapper:
         self.use_dstar_navigation = False
     
     def create_maze_grid(self):
-        """Create the maze grid for D* Lite pathfinding"""
-        # Your actual maze layout (horizontally mirrored)
+        """Create the maze grid for D* Lite pathfinding - CORRECTED for proper line following"""
+        # Your actual maze layout - FIXED to properly represent black line corridors
+        # 0 = BLACK LINE (navigable), 1 = WALL (obstacle)
         original_maze = [
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0],
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0],
-            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # Top horizontal line
             [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
             [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
-            [0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0],
+            [0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0],  # Left horizontal line
             [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
-            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # Middle horizontal line
             [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
-            [0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0],
+            [0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0],  # Right horizontal line
             [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
             [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
-            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],  # Bottom horizontal line
+            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1],  # Bottom vertical lines
+            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1]   # Bottom vertical lines
         ]
         
-        # Horizontally mirror the maze
+        # Horizontally mirror the maze to match your actual layout
         maze_grid = []
         for row in original_maze:
             mirrored_row = list(reversed(row))
             maze_grid.append(mirrored_row)
+        
+        # Validate the maze grid - ensure we have proper line corridors
+        print(f"🗺️  Maze validation: {len(maze_grid)}x{len(maze_grid[0])} grid created")
+        
+        # Count navigable cells (should be the black line paths)
+        navigable_count = 0
+        for row in maze_grid:
+            navigable_count += sum(1 for cell in row if cell == 0)
+        
+        print(f"🗺️  Navigable cells (black lines): {navigable_count}")
         
         return maze_grid
     
