@@ -799,14 +799,14 @@ if __name__ == "__main__":
     # Create and start web visualization automatically
     try:
         web_viz = WebVisualization(robot)
-        print("✅ Cyberpunk web visualization initialized")
+        print("Cyberpunk web visualization initialized")
         
         # Start web server automatically in background
         web_thread = threading.Thread(target=web_viz.start_web_server, daemon=True)
         web_thread.start()
-        print("✅ Cyberpunk dashboard started at http://0.0.0.0:5000")
+        print("Cyberpunk dashboard started at http://0.0.0.0:5000")
     except Exception as e:
-        print(f"❌ Could not initialize web visualization: {e}")
+        print(f"Could not initialize web visualization: {e}")
         web_viz = None
     
     print("\n" + "="*60)
