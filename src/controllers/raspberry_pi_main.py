@@ -203,7 +203,7 @@ HTML_TEMPLATE = '''
 </html>'''
 
 class ESP32Interface:
-    """Handles communication with ESP32"""
+    """IMPROVED: Handles communication with ESP32 with heartbeat and message queuing"""
     
     VALID_COMMANDS = [
         'FORWARD', 'LEFT', 'RIGHT', 'STOP', 'BACKWARD',
@@ -217,25 +217,50 @@ class ESP32Interface:
         self.socket = None
         self.connected = False
         self.logger = logging.getLogger(__name__)
+        
+        # IMPROVED: Sensor fusion system
         self.line_position = 0
         self.line_detected = False
+        self.sensor_confidence = 0.0
+        self.position_history = []
+        self.confidence_history = []
+        self.fusion_window = 5
+        
+        # IMPROVED: Communication reliability
+        self.message_queue = []
+        self.last_heartbeat_time = time.time()
+        self.last_sensor_time = time.time()
+        self.heartbeat_interval = 2.0  # Expect heartbeat every 2 seconds
+        self.connection_stable = False
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
     
     def connect(self):
-        """Establish connection to ESP32"""
+        """IMPROVED: Establish connection to ESP32 with better reliability"""
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(10.0)  # Longer timeout
+            self.socket.settimeout(5.0)  # Reasonable timeout
             # Enable keep-alive to maintain connection
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             # Disable Nagle's algorithm for faster response
             self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.socket.connect((self.ip_address, self.port))
+            
+            # IMPROVED: Set non-blocking mode after connection
+            self.socket.settimeout(0.1)  # Short timeout for non-blocking operation
+            
             self.connected = True
+            self.connection_stable = True
+            self.reconnect_attempts = 0
+            self.last_heartbeat_time = time.time()
+            self.message_queue.clear()
+            
             self.logger.info(f"Connected to ESP32 at {self.ip_address}:{self.port}")
             return True
         except Exception as e:
             self.logger.error(f"Failed to connect to ESP32: {e}")
             self.connected = False
+            self.connection_stable = False
             if self.socket:
                 try:
                     self.socket.close()
@@ -245,13 +270,18 @@ class ESP32Interface:
             return False
     
     def reconnect(self):
-        """Attempt to reconnect to ESP32"""
+        """IMPROVED: Attempt to reconnect with exponential backoff"""
         # Don't spam reconnection attempts
         if hasattr(self, '_last_reconnect_time'):
-            if time.time() - self._last_reconnect_time < 2.0:
+            if time.time() - self._last_reconnect_time < (2.0 ** min(self.reconnect_attempts, 4)):
                 return False
         
-        self.logger.info("Attempting to reconnect to ESP32...")
+        self.reconnect_attempts += 1
+        if self.reconnect_attempts > self.max_reconnect_attempts:
+            self.logger.error(f"Max reconnection attempts ({self.max_reconnect_attempts}) reached")
+            return False
+        
+        self.logger.info(f"Attempting to reconnect to ESP32 (attempt {self.reconnect_attempts}/{self.max_reconnect_attempts})")
         self._last_reconnect_time = time.time()
         
         if self.socket:
@@ -261,60 +291,182 @@ class ESP32Interface:
                 pass
         self.socket = None
         self.connected = False
-        time.sleep(1.0)  # Longer delay before reconnection
+        self.connection_stable = False
+        
+        # Clear message queue on reconnection
+        self.message_queue.clear()
+        
         return self.connect()
     
     def send_command(self, command):
-        """Send command to ESP32 and receive line sensor data"""
+        """IMPROVED: Send command with non-blocking communication and message queuing"""
         if not command in self.VALID_COMMANDS:
             self.logger.error(f"Invalid command: {command}")
             return False
         
-        # Only try reconnection if really needed
-        if not self.connected:
+        # Check connection health
+        if not self._check_connection_health():
             if not self.reconnect():
                 return False
         
         try:
-            # Send command with reasonable timeout
-            self.socket.settimeout(2.0)
-            self.socket.send(command.encode('utf-8'))
+            # Add command to queue for reliable delivery
+            self.message_queue.append({
+                'command': command,
+                'timestamp': time.time(),
+                'attempts': 0
+            })
             
-            # Receive line sensor data with timeout
-            self.socket.settimeout(2.0)
-            data = self.socket.recv(64).decode('utf-8').strip()
-            if data:
-                try:
-                    position, detected = map(float, data.split(','))
-                    self.line_position = position
-                    # ESP32 sends: 0 = line detected, 1 = no line detected
-                    self.line_detected = (detected == 0.0)
-                    # Only print occasionally to reduce spam
-                    if hasattr(self, '_last_print_time'):
-                        if time.time() - self._last_print_time > 3.0:
-                            print(f"ESP32 Data - Position: {position:.2f}, Detected: {detected}")
-                            self._last_print_time = time.time()
-                    else:
-                        self._last_print_time = time.time()
-                except Exception as parse_e:
-                    self.logger.error(f"Failed to parse line sensor data: {parse_e}")
-                    print(f"ESP32 Raw Data: '{data}'")
+            # Process message queue (non-blocking)
+            return self._process_message_queue()
             
-            return True
-        except socket.timeout:
-            # Don't disconnect on timeout - ESP32 might just be busy
-            return False
         except Exception as e:
-            self.logger.error(f"Failed to communicate with ESP32: {e}")
-            self.connected = False
-            # Close the broken socket
-            if self.socket:
-                try:
-                    self.socket.close()
-                except:
-                    pass
-                self.socket = None
+            self.logger.error(f"Failed to queue command: {e}")
+            self.connection_stable = False
             return False
+    
+    def _check_connection_health(self):
+        """Check if connection is healthy based on heartbeat"""
+        current_time = time.time()
+        
+        # Check for heartbeat timeout
+        if current_time - self.last_heartbeat_time > self.heartbeat_interval * 2:
+            self.logger.warning("Heartbeat timeout - connection may be unstable")
+            self.connection_stable = False
+            return False
+        
+        return self.connected and self.connection_stable
+    
+    def _process_message_queue(self):
+        """Process queued messages with non-blocking I/O"""
+        if not self.message_queue or not self.connected:
+            return False
+        
+        try:
+            # Process one message at a time to avoid blocking
+            message = self.message_queue[0]
+            
+            # Send command with timeout
+            self.socket.settimeout(0.1)
+            self.socket.send(message['command'].encode('utf-8'))
+            
+            # Try to receive response (sensor data or heartbeat)
+            self._receive_data()
+            
+            # Remove processed message
+            self.message_queue.pop(0)
+            return True
+            
+        except socket.timeout:
+            # Timeout is normal for non-blocking operation
+            message['attempts'] += 1
+            if message['attempts'] > 3:
+                self.logger.warning(f"Command {message['command']} failed after 3 attempts")
+                self.message_queue.pop(0)
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Failed to process message queue: {e}")
+            self.connected = False
+            self.connection_stable = False
+            return False
+    
+    def _receive_data(self):
+        """IMPROVED: Non-blocking data reception with sensor fusion"""
+        try:
+            # Receive data with short timeout
+            self.socket.settimeout(0.05)
+            data = self.socket.recv(128).decode('utf-8').strip()
+            
+            if not data:
+                return
+            
+            # Process different types of messages
+            for line in data.split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                
+                if line == "HEARTBEAT":
+                    self.last_heartbeat_time = time.time()
+                    self.connection_stable = True
+                elif ',' in line:
+                    # Sensor data: position,detected
+                    try:
+                        parts = line.split(',')
+                        if len(parts) >= 2:
+                            position = float(parts[0])
+                            detected = float(parts[1])
+                            
+                            # Apply sensor fusion
+                            self._update_sensor_fusion(position, detected == 0.0)
+                            
+                            self.last_sensor_time = time.time()
+                    except ValueError as e:
+                        self.logger.debug(f"Failed to parse sensor data: {line}")
+                        
+        except socket.timeout:
+            # Normal for non-blocking operation
+            pass
+        except Exception as e:
+            self.logger.debug(f"Data reception error: {e}")
+    
+    def _update_sensor_fusion(self, position, detected):
+        """IMPROVED: Unified sensor fusion for position and detection"""
+        current_time = time.time()
+        
+        # Calculate confidence based on data freshness and consistency
+        confidence = 1.0 if detected else 0.5
+        
+        # Add to history
+        self.position_history.append({
+            'position': position,
+            'confidence': confidence,
+            'timestamp': current_time
+        })
+        
+        # Maintain history size
+        if len(self.position_history) > self.fusion_window:
+            self.position_history.pop(0)
+        
+        # Apply temporal fusion
+        if len(self.position_history) >= 2:
+            # Weighted average based on confidence and recency
+            total_weight = 0
+            weighted_sum = 0
+            
+            for i, data in enumerate(self.position_history):
+                # Recent data gets higher weight
+                age = current_time - data['timestamp']
+                recency_weight = max(0.1, 1.0 - age * 0.5)  # Decay over 2 seconds
+                
+                # Confidence weight
+                conf_weight = data['confidence']
+                
+                # Combined weight
+                weight = recency_weight * conf_weight
+                
+                weighted_sum += data['position'] * weight
+                total_weight += weight
+            
+            if total_weight > 0:
+                fused_position = weighted_sum / total_weight
+            else:
+                fused_position = position
+        else:
+            fused_position = position
+        
+        # Update state
+        self.line_position = fused_position
+        self.line_detected = detected
+        self.sensor_confidence = confidence
+        
+        # Debug output (reduced frequency)
+        if not hasattr(self, '_last_fusion_debug'):
+            self._last_fusion_debug = 0
+        if current_time - self._last_fusion_debug > 2.0:
+            self.logger.debug(f"Sensor fusion: pos={fused_position:.3f}, detected={detected}, conf={confidence:.2f}")
+            self._last_fusion_debug = current_time
     
     def close(self):
         """Close connection to ESP32"""
@@ -706,224 +858,6 @@ class VisualOdometry:
         )
         cv2.arrowedLine(frame, center, end_point, (0, 255, 0), 2)
 
-#class VoiceSystem:
-#    """Robust voice system with multiple TTS fallbacks"""
-#    
-#    def __init__(self):
-#        # Initialize pygame mixer for audio playback
-#        try:
-#            pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
-#            print("Audio system initialized successfully")
-#        except Exception as e:
-#            print(f"Audio system failed: {e}")
-#        
-#        self.cache_dir = Path("voice_cache")
-#        self.cache_dir.mkdir(exist_ok=True)
-#        self.is_playing = False
-#        self.tts_method = None
-#        
-#        # Try to initialize TTS systems in order of preference
-#        if self._init_bark():
-#            print("Bark TTS system ready!")
-#        elif self._init_pyttsx3():
-#            print("pyttsx3 TTS system ready!")
-#        elif self._init_espeak():
-#            print("espeak TTS system ready!")
-#        else:
-#            print("No TTS system available - voice disabled")
-#        
-#        # Voice messages with SAVAGE your mom jokes
-#        self.savage_mom_jokes = [
-#            "Your mom is so big, she shows up on satellite navigation as a permanent obstacle!",
-#            "Your mom is so slow, she makes this robot look like Formula 1!",
-#            "Your mom is so wide, she blocks more sensors than a solar eclipse!",
-#            "Your mom is so heavy, she caused a seismic shift in my line detection algorithm!",
-#            "Your mom is so large, NASA classified her as a small moon!",
-#            "Your mom is so massive, she has her own gravitational field affecting my gyroscope!",
-#            "Your mom is so huge, she appears in every frame of my camera feed!",
-#            "Your mom is so enormous, she triggered my emergency avoidance protocols from 3 miles away!",
-#            "Your mom is so gigantic, she makes elephants look like ants in my object detection!",
-#            "Your mom is so colossal, she broke my distance sensors just by existing!",
-#            "Your mom is so immense, she caused a buffer overflow in my memory just thinking about her size!",
-#            "Your mom is so vast, she's visible from the International Space Station!",
-#            "Your mom is so tremendous, she has her own zip code in my mapping system!",
-#            "Your mom is so monumental, she appears as a mountain range in my terrain analysis!",
-#            "Your mom is so gargantuan, she makes blue whales jealous of her size!"
-#        ]
-#        
-#        self.voices = {
-#            'obstacle': "Obstacle detected. Initiating turn around maneuver.",
-#            'line_lost': "Line signal lost. Activating search protocol.",
-#            'line_found': "Line detected. Resuming navigation control.",
-#            'startup': "Autonomous navigation system activated. Ready to roast some moms!",
-#            'turn_complete': "Avoidance maneuver complete. Resuming line following.",
-#            'object_detected': "Critical obstacle detected. Executing emergency avoidance.",
-#            'tracking_lost': "Visual tracking degraded. Switching to backup navigation.",
-#            'high_precision': "High precision mode engaged.",
-#            'savage_roast': "Time for a savage roast!"
-#        }
-#        
-#        self.audio_cache = {}
-#    
-#    def _init_bark(self):
-#        """Try to initialize Bark TTS"""
-#        try:
-#                from bark import SAMPLE_RATE, generate_audio, preload_models
-#            from scipy.io.wavfile import write as write_wav
-#            
-#            self.SAMPLE_RATE = SAMPLE_RATE
-#            self.generate_audio = generate_audio
-#            self.write_wav = write_wav
-#            self.tts_method = 'bark'
-#            
-#            # Preload models (optional - comment out for faster startup)
-#            # preload_models()
-#            return True
-#        except ImportError:
-#            print("Bark TTS not available: 'bark' package not installed")
-#            return False
-#        except Exception as e:
-#            print(f"Bark TTS not available: {e}")
-#            return False
-#    
-#    def _init_pyttsx3(self):
-#        """Try to initialize pyttsx3 TTS"""
-#        try:
-#            import pyttsx3
-#            self.tts_engine = pyttsx3.init()
-#            self.tts_engine.setProperty('rate', 150)
-#            self.tts_engine.setProperty('volume', 0.8)
-#            self.tts_method = 'pyttsx3'
-#            return True
-#        except Exception as e:
-#            print(f"pyttsx3 TTS not available: {e}")
-#            return False
-#    
-#    def _init_espeak(self):
-#        """Try to initialize espeak TTS"""
-#        try:
-#            import subprocess
-#            result = subprocess.run(['espeak', '--version'], capture_output=True, check=True)
-#            self.tts_method = 'espeak'
-#            return True
-#        except Exception as e:
-#            print(f"espeak TTS not available: {e}")
-#            return False
-#        
-#    def _get_cached_audio(self, text, voice_preset):
-#        """Get cached audio file or generate new one"""
-#        cache_key = f"{text}_{voice_preset}"
-#        cache_file = self.cache_dir / f"{abs(hash(cache_key))}.wav"
-#        
-#        if cache_file.exists():
-#            return str(cache_file)
-#            
-#        # Generate audio using Bark
-#        try:
-#            print(f"Generating voice: {text[:50]}...")
-#            
-#            # Generate audio with Bark
-#            audio_array = self.generate_audio(text, history_prompt=voice_preset)
-#            
-#            # Save to file
-#            self.write_wav(str(cache_file), self.SAMPLE_RATE, audio_array)
-#            print(f"Voice generated and cached: {cache_file.name}")
-#            return str(cache_file)
-#                
-#        except Exception as e:
-#            logging.error(f"Failed to generate audio with Bark: {e}")
-#            return None
-#    
-#    def play_sound(self, event_or_text):
-#        """Play a sound for a specific event or custom text"""
-#        if self.is_playing or not self.tts_method:
-#            return  # Don't interrupt current playback or if no TTS
-#        
-#        # Handle both predefined events and custom text
-#        if event_or_text in self.voices:
-#            text = self.voices[event_or_text]
-#        else:
-#            text = str(event_or_text)  # Use the text directly
-#        
-#        try:
-#            self.is_playing = True
-#            
-#            if self.tts_method == 'bark':
-#                self._play_bark_tts(text)
-#            elif self.tts_method == 'pyttsx3':
-#                self._play_pyttsx3_tts(text)
-#            elif self.tts_method == 'espeak':
-#                self._play_espeak_tts(text)
-#                
-#        except Exception as e:
-#            print(f"Failed to play TTS audio: {e}")
-#            self.is_playing = False
-#    
-#    def _play_bark_tts(self, text):
-#        """Play TTS using Bark"""
-#        try:
-#            audio_array = self.generate_audio(text, history_prompt="v2/en_speaker_6")
-#            temp_file = self.cache_dir / f"temp_{int(time.time())}.wav"
-#            self.write_wav(str(temp_file), self.SAMPLE_RATE, audio_array)
-#            
-#            pygame.mixer.music.load(str(temp_file))
-#            pygame.mixer.music.play()
-#            
-#            def cleanup():
-#                while pygame.mixer.music.get_busy():
-#                    time.sleep(0.1)
-#                self.is_playing = False
-#            temp_file.unlink(missing_ok=True)
-#            
-#            threading.Thread(target=cleanup, daemon=True).start()
-#        except Exception as e:
-#            print(f"Bark TTS failed: {e}")
-#            self.is_playing = False
-#    
-#    def _play_pyttsx3_tts(self, text):
-#        """Play TTS using pyttsx3"""
-#        try:
-#            def speak():
-#                self.tts_engine.say(text)
-#                self.tts_engine.runAndWait()
-#                self.is_playing = False
-#            
-#            threading.Thread(target=speak, daemon=True).start()
-#        except Exception as e:
-#            print(f"pyttsx3 TTS failed: {e}")
-#            self.is_playing = False
-#    
-#    def _play_espeak_tts(self, text):
-#        """Play TTS using espeak"""
-#        try:
-#            def speak():
-#                import subprocess
-#                subprocess.run(['espeak', text], check=True)
-#                self.is_playing = False
-#            
-#            threading.Thread(target=speak, daemon=True).start()
-#        except Exception as e:
-#            print(f"espeak TTS failed: {e}")
-#            self.is_playing = False
-#    
-#    def get_savage_roast(self):
-#        """Get a random savage your mom joke"""
-#        import random
-#        return random.choice(self.savage_mom_jokes)
-#    
-#    def speak_with_roast(self, main_text):
-#        """Speak main text followed by a savage roast"""
-#        roast = self.get_savage_roast()
-#        combined_text = f"{main_text} {roast}"
-#        self.play_sound(combined_text)
-#    
-#    def add_custom_voice(self, event_name, text, voice_preset="v2/en_speaker_6"):
-#        """Add a custom voice line"""
-##        self.voices[event_name] = {
-#            'text': text,
-#            'voice_preset': voice_preset
-#        }
-#
 class Robot:
     """Simple robot control class for line following"""
     
@@ -977,6 +911,55 @@ class Robot:
             except Exception as e:
                 logging.error(f"Failed to load YOLO model: {e}")
                 self.use_yolo = False
+
+        # Enhanced 3-phase obstacle avoidance state with mapping
+        self.object_detected = False
+        self.object_position = 0.0
+        self.current_obstacle = None       # Current obstacle being avoided
+        self.obstacle_map = {}            # Persistent obstacle memory
+        self.avoidance_phase = 'none'     # 'none', 'turnaround', 'search_after_turn', 'return_to_line'
+        self.turnaround_direction = 'right'  # 'left' or 'right' - which way to turn around
+        self.avoidance_duration = 0
+        self.turnaround_start_time = 0.0    # Track actual time for turnaround verification
+        self.planned_path = None          # Calculated path around obstacle
+        self.corner_warning = False
+        self.corner_prediction_frames = 0
+        self.object_detection_frames = 0
+        self.OBJECT_DETECTION_PERSISTENCE = 0  # Immediate detection for faster avoidance
+
+        # Dynamic avoidance parameters
+        self.MAX_TURN_DURATION = 20          # Maximum frames to turn if object still visible
+        self.AVOIDANCE_CLEAR_DURATION = 12   # Phase 2: Move forward to clear object  
+        self.AVOIDANCE_RETURN_DURATION = 15  # Phase 3: Turn back to find line
+        self.OBJECT_CLEAR_THRESHOLD = 3      # Frames without seeing object to consider it cleared
+
+        # 180-DEGREE TURNAROUND AVOIDANCE - ENHANCED WITH RETURN-TO-LINE
+        # PROBLEM: Robot not completing full 180° turn AND not finding line afterward
+        # SOLUTION: Dramatically increased duration + systematic line recovery
+        self.TURNAROUND_FRAMES = 200        # MUCH longer - 40 seconds at 5 FPS to ensure full turn
+        self.TURNAROUND_SEARCH_FRAMES = 50  # Initial search frames after turnaround
+        self.TURNAROUND_IGNORE_LINE = True  # Ignore line detection during turnaround to prevent early exit
+        self.TURNAROUND_COMMAND = 'RIGHT'   # Use strong RIGHT command for turnaround
+
+        # NEW: Enhanced return-to-line system after turnaround
+        self.RETURN_TO_LINE_PHASES = {
+            'initial_search': 30,      # 6 seconds: Quick search in likely directions
+            'systematic_sweep': 60,    # 12 seconds: Left-right sweep pattern
+            'spiral_search': 80,       # 16 seconds: Expanding spiral search
+            'recovery_mode': 100       # 20 seconds: Aggressive recovery attempts
+        }
+
+        # Return-to-line state variables
+        self.return_phase = 'none'          # Current return phase
+        self.return_phase_counter = 0       # Frames left in current phase
+        self.last_line_direction = 0.0      # Remember which way line was going before obstacle
+        self.pre_turnaround_position = 0.0  # Line position before we started avoiding
+        self.search_pattern_step = 0        # Current step in search pattern
+        self.successful_returns = 0         # Track success rate for learning
+
+        # Alternative settings if robot still doesn't turn enough:
+        # TURNAROUND_FRAMES = 300  # 60 seconds - try this if 200 isn't enough
+        # TURNAROUND_FRAMES = 400  # 80 seconds - last resort
     
     def index(self):
         """Serve the web interface"""
@@ -1057,13 +1040,99 @@ class Robot:
         self.app.run(host='0.0.0.0', port=5001, debug=False)
     
     def send_command(self, command):
-        """Send command to ESP32"""
-        if self.esp32.send_command(command):
-            self.last_command = command
-            logging.info(f"Command sent: {command}")
-            return True
-        return False
-    
+        """Send command to ESP32 - simplified for speed"""
+        current_time = time.time()
+        
+        if (command != self.last_command or 
+            current_time - self.last_command_time > 0.1):
+            
+            if self.esp32.send_command(command):
+                self.last_command = command
+                self.last_command_time = current_time
+
+    def run(self):
+        """ENHANCED: Non-blocking autonomous robot with obstacle avoidance and return-to-line recovery"""
+        try:
+            logging.info("Starting enhanced autonomous robot control with obstacle avoidance")
+            
+            # Check camera for obstacle detection
+            camera_available = self.cap and self.cap.isOpened()
+            if camera_available:
+                logging.info("Camera available for obstacle detection")
+            else:
+                logging.warning("No camera - obstacle detection disabled")
+                
+            # Connect to ESP32
+            if not self.esp32.connect():
+                logging.error("Failed to connect to ESP32")
+                return
+                
+            logging.info("ESP32 connected - starting enhanced line following with obstacle avoidance")
+            
+            frame_count = 0
+            last_control_time = time.time()
+            last_camera_time = time.time()
+            control_interval = 0.05  # 20Hz control loop (much faster)
+            camera_interval = 0.1    # 10Hz camera processing
+            
+            while True:
+                current_time = time.time()
+                frame_count += 1
+                
+                # ENHANCED: High-frequency control loop (20Hz) with obstacle avoidance
+                if current_time - last_control_time >= control_interval:
+                    # Always try to receive sensor data (non-blocking)
+                    self.esp32._receive_data()
+                    
+                    # Primary control: Enhanced line following with obstacle avoidance
+                    self.smart_line_following()
+                    last_control_time = current_time
+                
+                # ENHANCED: Camera processing for obstacle detection (10Hz)
+                if camera_available and (current_time - last_camera_time >= camera_interval):
+                    ret, frame = self.cap.read()
+                    if ret:
+                        self.process_frame(frame)  # Check for obstacles and update avoidance state
+                    last_camera_time = current_time
+                
+                # ENHANCED: Much shorter sleep for responsiveness
+                time.sleep(0.01)  # 1ms sleep - much more responsive
+                
+        except KeyboardInterrupt:
+            logging.info("Shutting down...")
+        finally:
+            self.cleanup()
+
+    def cleanup(self):
+        """Clean up resources"""
+        logging.info("Cleaning up...")
+        self.send_command("STOP")
+        if self.cap:
+            self.cap.release()
+        cv2.destroyAllWindows()
+        self.esp32.close()
+
+    def _detect_objects_yolo(self, frame):
+        """Return True if any object is detected with confidence above threshold"""
+        if not self.use_yolo or self.yolo_model is None:
+            return False
+
+        # Run inference (suppress verbose)
+        try:
+            results = self.yolo_model(frame, conf=0.5, verbose=False)  # Use 0.5 confidence threshold
+            if not results:
+                return False
+
+            result = results[0]  # Single image
+            # If no boxes => no detection
+            if result.boxes is None or len(result.boxes) == 0:
+                return False
+
+            return True  # At least one object detected
+        except Exception as e:
+            logging.error(f"YOLO inference error: {e}")
+            return False
+
     def video_feed(self):
         """Video streaming route"""
         return Response(self.generate_frames(),
@@ -1086,330 +1155,378 @@ class Robot:
                 break
     
     def process_frame(self, frame):
-        """Process frame for OBJECT DETECTION only - not line following!"""
-        height, width = frame.shape[:2]
+        """Process camera frame for obstacle detection"""
+        if not self.use_yolo:
+            return
         
-        # ---------------------------------------------------------
-        # YOLO object detection (runs every 5th call for efficiency)
-        # ---------------------------------------------------------
-        if self.use_yolo:
-            if not hasattr(self, '_yolo_frame_counter'):
-                self._yolo_frame_counter = 0
-            self._yolo_frame_counter += 1
-
-            if self._yolo_frame_counter % 5 == 0:
-                if self._detect_objects_yolo(frame):
-                    current_time = time.time()
-                    if not hasattr(self, '_last_obstacle_time'):
-                        self._last_obstacle_time = 0
-
-                    # Cool-down to avoid repeated turns
-                    if current_time - self._last_obstacle_time > 5.0:
-                        logging.info("YOLO object detected – executing 180° turn")
-                        self.current_action = "YOLO object – 180° turn"
-                        self.send_command("TURN_AROUND")
-                        self._last_obstacle_time = current_time
-                        self.obstacle_detected = True
-
-                    # Visual overlay
-                    cv2.putText(frame, "YOLO OBJECT!", (40, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    # Early return: we already handled obstacle reaction
-                    return frame
-        
-        # Smaller detection area focused on immediate path ahead
-        center_region = frame[int(height*0.6):int(height*0.8), int(width*0.4):int(width*0.6)]
-        
-        # More sophisticated obstacle detection with better filtering
-        gray = cv2.cvtColor(center_region, cv2.COLOR_BGR2GRAY)
-        
-        # Use edge detection for obstacle recognition with higher thresholds
-        edges = cv2.Canny(gray, 80, 200)  # Higher thresholds = less sensitive
-        edge_count = np.sum(edges > 0)
-        total_pixels = gray.shape[0] * gray.shape[1]
-        edge_ratio = edge_count / total_pixels
-        
-        # Check for very dark/large objects with stricter criteria
-        mean_brightness = np.mean(gray)
-        dark_threshold = mean_brightness - 70  # Stricter threshold
-        dark_pixels = np.sum(gray < dark_threshold)
-        dark_ratio = dark_pixels / total_pixels
-        
-        # Much less sensitive obstacle detection - avoid false positives
-        # Require BOTH high edge density AND significant dark area for obstacle
-        significant_obstacle = (edge_ratio > 0.25 and dark_ratio > 0.4)
-        
-        # Add temporal filtering - require consistent detection
-        if not hasattr(self, '_obstacle_detections'):
-            self._obstacle_detections = [False, False, False]  # 3-frame buffer
-        
-        self._obstacle_detections.append(significant_obstacle)
-        self._obstacle_detections.pop(0)
-        
-        # Only trigger if 2 out of 3 recent frames detected obstacle
-        obstacle_detected = sum(self._obstacle_detections) >= 2
-        
-        if obstacle_detected:
-            # Prevent spam - only trigger if enough time has passed
-            current_time = time.time()
-            if not hasattr(self, '_last_obstacle_time'):
-                self._last_obstacle_time = 0
+        try:
+            # Run YOLO detection
+            results = self.yolo_model(frame)
             
-            if current_time - self._last_obstacle_time > 5.0:  # 5 second cooldown - longer
-                logging.info(f"MAJOR OBSTACLE DETECTED! Edge ratio: {edge_ratio:.3f}, Dark ratio: {dark_ratio:.3f}")
-                self.current_action = "OBSTACLE! Making 180° turn"
-                #self.speak_savage_roast("YOUR MOM DETECTED, turning around.")
-                self.send_command("TURN_AROUND")
-                self._last_obstacle_time = current_time
-                self.obstacle_detected = True
+            # Process detections
+            detected_objects = []
+            for result in results:
+                boxes = result.boxes
+                if boxes is not None:
+                    for box in boxes:
+                        # Get class and confidence
+                        cls = int(box.cls[0])
+                        conf = float(box.conf[0])
+                        
+                        # Check if it's a class we want to avoid and confidence is high enough
+                        if cls in self.classes_to_avoid and conf > 0.5:
+                            # Get bounding box coordinates
+                            x1, y1, x2, y2 = box.xyxy[0].tolist()
+                            
+                            # Calculate object position (-1.0 to 1.0, left to right)
+                            frame_width = frame.shape[1]
+                            object_center_x = (x1 + x2) / 2
+                            object_position = (object_center_x / frame_width) * 2 - 1
+                            
+                            detected_objects.append({
+                                'class': cls,
+                                'confidence': conf,
+                                'position': object_position,
+                                'bbox': (x1, y1, x2, y2)
+                            })
             
-            # Add visual indicator on frame
-            cv2.rectangle(frame, (int(width*0.4), int(height*0.6)), (int(width*0.6), int(height*0.8)), (0, 0, 255), 3)
-            cv2.putText(frame, f"OBSTACLE! E:{edge_ratio:.2f} D:{dark_ratio:.2f}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            # Update obstacle detection state
+            if detected_objects:
+                self.object_detected = True
+                # Use the most confident detection
+                best_detection = max(detected_objects, key=lambda x: x['confidence'])
+                self.object_position = best_detection['position']
+                
+                # Remember line state before starting avoidance
+                if self.avoidance_phase == 'none' and self.esp32.line_detected:
+                    self.pre_turnaround_position = self.esp32.line_position
+                    self.last_line_direction = self.esp32.line_position
+                    logging.info(f"🎯 OBSTACLE DETECTED! Remembering line position: {self.pre_turnaround_position:.2f}")
+            else:
+                self.object_detected = False
+                
+        except Exception as e:
+            logging.error(f"Error in obstacle detection: {e}")
+
+    def get_turn_command_with_avoidance(self, steering, line_detected_now=False, line_offset_now=0.0):
+        """Enhanced 180-degree turnaround with systematic return-to-line recovery"""
+        
+        # START 180-DEGREE TURNAROUND when obstacle detected
+        if self.object_detected and self.avoidance_phase == 'none':
+            self.turnaround_direction = 'right'  # Always turn right for consistency
+            self.avoidance_phase = 'turnaround'
+            self.avoidance_duration = self.TURNAROUND_FRAMES
+            self.turnaround_start_time = time.time()
+            
+            logging.info(f"🚨 OBSTACLE DETECTED - Starting 180-DEGREE TURNAROUND! Duration: {self.TURNAROUND_FRAMES} frames")
+            logging.info(f"📍 Pre-turnaround line position: {self.pre_turnaround_position:.2f}")
+            
+            return 'RIGHT'  # Start turnaround immediately
+        
+        # PHASE 1: Complete 180-degree turnaround (IGNORE LINE DETECTION)
+        elif self.avoidance_phase == 'turnaround':
+            if self.avoidance_duration > 0:
+                self.avoidance_duration -= 1
+                
+                # Log progress every 20 frames
+                if self.avoidance_duration % 20 == 0:
+                    progress_percent = ((self.TURNAROUND_FRAMES - self.avoidance_duration) / self.TURNAROUND_FRAMES) * 100
+                    elapsed_time = time.time() - self.turnaround_start_time
+                    logging.info(f"🔄 TURNAROUND PROGRESS: {progress_percent:.0f}% - {elapsed_time:.1f}s elapsed")
+                
+                return 'RIGHT'  # Force continuous right turn
+            else:
+                # Turnaround complete - start systematic line recovery
+                total_time = time.time() - self.turnaround_start_time
+                self.avoidance_phase = 'return_to_line'
+                self.return_phase = 'initial_search'
+                self.return_phase_counter = self.RETURN_TO_LINE_PHASES['initial_search']
+                self.search_pattern_step = 0
+                
+                logging.info(f"✅ TURNAROUND COMPLETE - Total time: {total_time:.1f}s")
+                logging.info(f"🔍 Starting systematic line recovery - Phase: {self.return_phase}")
+                
+                return 'FORWARD'
+        
+        # PHASE 2: Systematic return-to-line recovery
+        elif self.avoidance_phase == 'return_to_line':
+            # Check if we found the line
+            if line_detected_now:
+                logging.info(f"✅ LINE FOUND during {self.return_phase}! Recovery successful")
+                self.avoidance_phase = 'none'
+                self.return_phase = 'none'
+                self.successful_returns += 1
+                
+                # Resume normal line following
+                if abs(line_offset_now) < 0.1:
+                    return 'FORWARD'
+                else:
+                    return 'LEFT' if line_offset_now > 0 else 'RIGHT'
+            
+            # Execute current return phase
+            self.return_phase_counter -= 1
+            
+            if self.return_phase == 'initial_search':
+                return self._initial_search_pattern()
+            elif self.return_phase == 'systematic_sweep':
+                return self._systematic_sweep_pattern()
+            elif self.return_phase == 'spiral_search':
+                return self._spiral_search_pattern()
+            elif self.return_phase == 'recovery_mode':
+                return self._recovery_mode_pattern()
+            
+            # Check if current phase is complete
+            if self.return_phase_counter <= 0:
+                self._advance_to_next_return_phase()
+                
+            return 'FORWARD'  # Default action
+        
+        # NORMAL LINE FOLLOWING BEHAVIOR
+        if abs(steering) < 0.15:  # Deadzone
+            return 'FORWARD'
+        elif steering > 0.4:
+            return 'LEFT'
+        elif steering < -0.4:
+            return 'RIGHT'
         else:
-            self.obstacle_detected = False
-            # Show detection values for debugging
-            cv2.putText(frame, f"Clear - E:{edge_ratio:.2f} D:{dark_ratio:.2f}", (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            return 'LEFT' if steering > 0 else 'RIGHT'
+
+    def _initial_search_pattern(self):
+        """Phase 1: Quick search in likely directions based on pre-turnaround memory"""
+        step = self.search_pattern_step % 20
+        self.search_pattern_step += 1
         
-        return frame
-    
+        # Use memory of where line was before turnaround
+        if self.pre_turnaround_position > 0.2:  # Line was to the right
+            if step < 10:
+                return 'RIGHT'  # Search right first
+            else:
+                return 'LEFT'   # Then search left
+        elif self.pre_turnaround_position < -0.2:  # Line was to the left
+            if step < 10:
+                return 'LEFT'   # Search left first
+            else:
+                return 'RIGHT'  # Then search right
+        else:  # Line was center - alternate search
+            return 'RIGHT' if step < 10 else 'LEFT'
+
+    def _systematic_sweep_pattern(self):
+        """Phase 2: Left-right sweep pattern with increasing amplitude"""
+        step = self.search_pattern_step % 40
+        self.search_pattern_step += 1
+        
+        if step < 15:
+            return 'LEFT'
+        elif step < 20:
+            return 'FORWARD'
+        elif step < 35:
+            return 'RIGHT'
+        else:
+            return 'FORWARD'
+
+    def _spiral_search_pattern(self):
+        """Phase 3: Expanding spiral search pattern"""
+        step = self.search_pattern_step % 60
+        self.search_pattern_step += 1
+        
+        if step < 10:
+            return 'FORWARD'
+        elif step < 20:
+            return 'RIGHT'
+        elif step < 30:
+            return 'FORWARD'
+        elif step < 45:
+            return 'LEFT'
+        elif step < 55:
+            return 'FORWARD'
+        else:
+            return 'RIGHT'
+
+    def _recovery_mode_pattern(self):
+        """Phase 4: Aggressive recovery attempts"""
+        step = self.search_pattern_step % 30
+        self.search_pattern_step += 1
+        
+        # More aggressive movements
+        if step < 8:
+            return 'LEFT'
+        elif step < 12:
+            return 'FORWARD'
+        elif step < 20:
+            return 'RIGHT'
+        elif step < 24:
+            return 'FORWARD'
+        else:
+            return 'LEFT'
+
+    def _advance_to_next_return_phase(self):
+        """Advance to the next phase of return-to-line recovery"""
+        if self.return_phase == 'initial_search':
+            self.return_phase = 'systematic_sweep'
+            self.return_phase_counter = self.RETURN_TO_LINE_PHASES['systematic_sweep']
+            logging.info("🔍 Advancing to systematic sweep phase")
+        elif self.return_phase == 'systematic_sweep':
+            self.return_phase = 'spiral_search'
+            self.return_phase_counter = self.RETURN_TO_LINE_PHASES['spiral_search']
+            logging.info("🔍 Advancing to spiral search phase")
+        elif self.return_phase == 'spiral_search':
+            self.return_phase = 'recovery_mode'
+            self.return_phase_counter = self.RETURN_TO_LINE_PHASES['recovery_mode']
+            logging.info("🔍 Advancing to recovery mode phase")
+        else:
+            # Recovery complete - give up and resume normal operation
+            logging.warning("⚠️ All recovery phases exhausted - resuming normal operation")
+            self.avoidance_phase = 'none'
+            self.return_phase = 'none'
+        
+        self.search_pattern_step = 0  # Reset pattern step for new phase
+
     def smart_line_following(self):
-        """FAST line following using ESP32 sensor data"""
-        # Get line data from ESP32
+        """ENHANCED: Line following with obstacle avoidance and systematic return-to-line recovery"""
+        # Get fused sensor data from ESP32
         line_detected = self.esp32.line_detected
         position = self.esp32.line_position  # -1.0 (left) to +1.0 (right)
+        confidence = self.esp32.sensor_confidence
         
         current_time = time.time()
         
-        if line_detected:
-            # Line following mode - FAST and direct
+        # PRIORITY 1: Handle obstacle avoidance phases
+        if self.avoidance_phase != 'none':
+            # Calculate steering for avoidance system
+            if line_detected and confidence > 0.3:
+                steering = position  # Use actual line position when available
+            else:
+                steering = 0.0  # No line detected
+            
+            # Get avoidance command
+            command = self.get_turn_command_with_avoidance(
+                steering, 
+                line_detected_now=line_detected, 
+                line_offset_now=position
+            )
+            
+            # Update status based on avoidance phase
+            if self.avoidance_phase == 'turnaround':
+                progress = ((self.TURNAROUND_FRAMES - self.avoidance_duration) / self.TURNAROUND_FRAMES) * 100
+                self.current_action = f"🔄 TURNAROUND: {progress:.0f}% complete"
+            elif self.avoidance_phase == 'return_to_line':
+                self.current_action = f"🔍 RECOVERY: {self.return_phase} phase ({self.return_phase_counter} frames left)"
+            
+            self.send_command(command)
+            return
+        
+        # PRIORITY 2: Normal line following when no avoidance needed
+        if line_detected and confidence > 0.3:  # Use confidence threshold
+            # Line following mode - IMPROVED with confidence-based control
             self.line_detected = True
             error = position
             
-            # Direct control based on error - no smoothing
+            # IMPROVED: Confidence-based control sensitivity
+            # Higher confidence = more aggressive control
+            # Lower confidence = more conservative control
+            confidence_factor = min(confidence, 1.0)
+            
+            # IMPROVED: Better control logic with confidence weighting
             abs_error = abs(error)
             
-            if abs_error < 0.15:  # Close to center - go straight
+            # Adjust thresholds based on confidence
+            center_threshold = 0.05 * (2.0 - confidence_factor)  # Wider when less confident
+            gentle_threshold = 0.2 * (2.0 - confidence_factor)
+            moderate_threshold = 0.5 * (2.0 - confidence_factor)
+            
+            # Perfect center detection - when ESP32 reports very low error
+            if abs_error < center_threshold:
                 command = "FORWARD"
-                self.current_action = "Following line"
-            elif abs_error < 0.4:  # Medium correction
-                # Positive error = line to RIGHT => turn RIGHT to follow
-                command = "SLIGHT_RIGHT" if error > 0 else "SLIGHT_LEFT"
-                self.current_action = "Correcting position"
-            else:  # Big correction needed
-                # Positive error = line to RIGHT => turn RIGHT to follow
-                command = "RIGHT" if error > 0 else "LEFT"
-                self.current_action = "Major turn"
+                self.current_action = f"Center (conf: {confidence:.2f})"
+            elif abs_error < gentle_threshold:  # Close to center - gentle correction
+                if error > 0:
+                    command = "SLIGHT_RIGHT"  # Line slightly to right, turn right gently
+                    self.current_action = f"Gentle right (conf: {confidence:.2f})"
+                else:
+                    command = "SLIGHT_LEFT"   # Line slightly to left, turn left gently
+                    self.current_action = f"Gentle left (conf: {confidence:.2f})"
+            elif abs_error < moderate_threshold:  # Medium offset - moderate correction
+                if error > 0:
+                    command = "RIGHT"  # Line to right, turn right
+                    self.current_action = f"Turn right (conf: {confidence:.2f})"
+                else:
+                    command = "LEFT"   # Line to left, turn left
+                    self.current_action = f"Turn left (conf: {confidence:.2f})"
+            else:  # Large offset - sharp correction needed
+                if error > 0:
+                    command = "RIGHT"  # Line far to right, turn right sharply
+                    self.current_action = f"Sharp right (conf: {confidence:.2f})"
+                else:
+                    command = "LEFT"   # Line far to left, turn left sharply
+                    self.current_action = f"Sharp left (conf: {confidence:.2f})"
             
+            # Check for obstacle avoidance override
+            if self.object_detected:
+                # Start avoidance - this will be handled in next iteration
+                self.current_action = f"🚨 OBSTACLE DETECTED - Starting avoidance"
+                command = self.get_turn_command_with_avoidance(
+                    error, 
+                    line_detected_now=line_detected, 
+                    line_offset_now=position
+                )
+            
+            # Send command
             self.send_command(command)
             
+            # Debug output every 3 seconds to avoid spam
+            if not hasattr(self, '_last_debug_time'):
+                self._last_debug_time = 0
+            if current_time - self._last_debug_time > 3.0:
+                print(f"LINE FOLLOW: pos={position:.3f}, conf={confidence:.2f}, cmd={command}")
+                self._last_debug_time = current_time
+            
         else:
-            # No line detected - FAST search
+            # No line detected or low confidence - IMPROVED search pattern
             self.line_detected = False
-            command = "RIGHT"  # Just spin right to search
-            self.current_action = "Searching for line"
-            self.send_command(command)
-    
-    def calculate_control(self):
-        """Ultra-simplified control focused only on line following"""
-        # Direct line following - no voice, no delays
-        if self.esp32.line_detected:
             
-            self.line_status = True
-            return self._pid_line_following()
-        else:
-            self.line_status = False
-            return self._handle_line_loss()
-    
-    def _pid_line_following(self):
-        """Responsive but smooth PID controller for line following"""
-        if not hasattr(self, 'pid_controller'):
-            self.pid_controller = PIDController(kp=0.5, ki=0.0, kd=0.15)  # Smoother PID
-        
-        error = self.esp32.line_position
-        line_detected = self.esp32.line_detected
-        
-        # If no line detected, initiate search behavior
-        if not line_detected:
-            return self._handle_line_loss()
-        
-        # Reset line loss tracking when line is found
-        if hasattr(self, 'line_lost_time'):
-            delattr(self, 'line_lost_time')
-            delattr(self, 'search_direction')
-            print("LINE FOUND! Resuming normal following")
-        
-        # Enhanced smoothing for silky smooth movement
-        if not hasattr(self, 'error_history'):
-            self.error_history = [0.0, 0.0, 0.0, 0.0, 0.0]  # 5-point smoothing for ultra smooth
-        
-        self.error_history.append(error)
-        self.error_history.pop(0)
-        smooth_error = sum(self.error_history) / len(self.error_history)
-        
-        control_output = self.pid_controller.update(smooth_error)
-        
-        # DEBUG: Print control decision details
-        command = None
-        # CORRECTED: Control direction logic
-        # Position 0.0 = line centered = go FORWARD
-        # Positive error = line to RIGHT of robot = turn RIGHT to follow
-        # Negative error = line to LEFT of robot = turn LEFT to follow
-        if abs(smooth_error) < 0.15:  # Wider center zone - go straight when close to center
-            command = "FORWARD"
-        elif smooth_error > 0.5:  # Line far to the right - turn RIGHT sharply
-            command = "RIGHT"
-        elif smooth_error < -0.5:  # Line far to the left - turn LEFT sharply
-            command = "LEFT"
-        elif smooth_error > 0.1:  # Line slightly right - turn RIGHT gently
-            command = "SLIGHT_RIGHT"
-        elif smooth_error < -0.1:  # Line slightly left - turn LEFT gently
-            command = "SLIGHT_LEFT"
-        else:
-            command = "FORWARD"
-        
-        # DEBUG: Show what's happening
-        if hasattr(self, '_last_debug_time'):
-            if time.time() - self._last_debug_time > 1.0:  # Print every second
-                print(f"DEBUG: Raw error={error:.3f}, Smooth error={smooth_error:.3f}, Command={command}")
-                self._last_debug_time = time.time()
-        else:
-            self._last_debug_time = time.time()
-        
-        return command
-    
-    def _handle_line_loss(self):
-        """Handle when robot loses the line - simplified search"""
-        current_time = time.time()
-        
-        if not hasattr(self, 'line_lost_time'):
-            self.line_lost_time = current_time
-            self.search_direction = "LEFT"  # Default search direction
-        
-        search_duration = current_time - self.line_lost_time
-        
-        if search_duration < 1.0:  # Search for 1 second in one direction (faster)
-            return self.search_direction
-        elif search_duration < 2.0:  # Then try the other direction (faster)
-            return "RIGHT" if self.search_direction == "LEFT" else "LEFT"
-        else:
-            # Reset search every 3 seconds to prevent getting stuck
-            if search_duration > 3.0:
-                self.line_lost_time = current_time
-            return self.search_direction
-    
-    def _intelligent_line_search(self):
-        """Intelligent line search using visual odometry and memory"""
-        if not hasattr(self, 'search_strategy'):
-            self.search_strategy = LineSearchStrategy()
-        
-        return self.search_strategy.get_search_command(
-            self.position, 
-            self.path_history,
-            self.tracking_quality
-        )
-    
-    def _simple_line_search(self):
-        """Simple line search based on last known position"""
-        last_position = self.esp32.line_position
-        
-        # Search in the direction where line was last seen
-        if last_position > 0.3:  # Line was to the right
-            return "RIGHT"
-        elif last_position < -0.3:  # Line was to the left  
-            return "LEFT"
-        else:
-            # Line was center, do a slow search pattern
-            import time
-            search_time = time.time() % 4  # 4 second cycle
-            if search_time < 2:
-                return "SLIGHT_LEFT"
-            else:
-                return "SLIGHT_RIGHT"
-    
-    def send_command(self, command):
-        """Send command to ESP32 - simplified for speed"""
-        current_time = time.time()
-        
-        if (command != self.last_command or 
-            current_time - self.last_command_time > 0.1):
-            
-            if self.esp32.send_command(command):
-                self.last_command = command
-                self.last_command_time = current_time
-    
-    def run(self):
-        """Smart autonomous robot with line following + obstacle avoidance"""
-        try:
-            logging.info("Starting smart autonomous robot control")
-            
-            # Check camera for obstacle detection
-            camera_available = self.cap and self.cap.isOpened()
-            if camera_available:
-                logging.info("Camera available for obstacle detection")
-            else:
-                logging.warning("No camera - obstacle detection disabled")
-                
-            # Connect to ESP32
-            if not self.esp32.connect():
-                logging.error("Failed to connect to ESP32")
+            # Check if we should start obstacle avoidance during search
+            if self.object_detected:
+                command = self.get_turn_command_with_avoidance(
+                    0.0, 
+                    line_detected_now=False, 
+                    line_offset_now=0.0
+                )
+                self.current_action = f"🚨 OBSTACLE during search - Starting avoidance"
+                self.send_command(command)
                 return
-                
-            logging.info("ESP32 connected - starting smart line following")
             
-            frame_count = 0
+            # Use sensor fusion history to guide search
+            if hasattr(self.esp32, 'position_history') and self.esp32.position_history:
+                # Get recent position trend
+                recent_positions = [data['position'] for data in self.esp32.position_history[-3:]]
+                if recent_positions:
+                    avg_recent_pos = sum(recent_positions) / len(recent_positions)
+                    
+                    if avg_recent_pos > 0.3:  # Line was trending right
+                        command = "RIGHT"
+                        self.current_action = f"Search right (trend: {avg_recent_pos:.2f})"
+                    elif avg_recent_pos < -0.3:  # Line was trending left
+                        command = "LEFT"
+                        self.current_action = f"Search left (trend: {avg_recent_pos:.2f})"
+                    else:
+                        # Line was near center, do time-based alternating search
+                        search_time = int(current_time) % 6  # 6 second cycle
+                        if search_time < 3:
+                            command = "RIGHT"
+                            self.current_action = "Search right (center trend)"
+                        else:
+                            command = "LEFT"
+                            self.current_action = "Search left (center trend)"
+                else:
+                    # No trend data, default search
+                    command = "RIGHT"
+                    self.current_action = "Default search right"
+            else:
+                # No history, default right search
+                command = "RIGHT"
+                self.current_action = "Default search right"
             
-            while True:
-                frame_count += 1
-                
-                # Primary control: Smart line following using ESP32 sensors
-                self.smart_line_following()
-                
-                # Secondary: Obstacle detection using camera (every 3rd frame)
-                if camera_available and frame_count % 3 == 0:
-                    ret, frame = self.cap.read()
-                    if ret:
-                        self.process_frame(frame)  # Check for obstacles
-                
-                # Faster control loop for quicker response
-                time.sleep(0.08)  # ~12Hz - faster response, still manageable for ESP32
-                
-        except KeyboardInterrupt:
-            logging.info("Shutting down...")
-        finally:
-            self.cleanup()
-    
-    def cleanup(self):
-        """Clean up resources"""
-        logging.info("Cleaning up...")
-        self.send_command("STOP")
-        if self.cap:
-            self.cap.release()
-        cv2.destroyAllWindows()
-        self.esp32.close()
-
-    # -------------------------------------------------------------
-    # YOLO OBJECT DETECTION
-    # -------------------------------------------------------------
-    def _detect_objects_yolo(self, frame):
-        """Return True if any object is detected with confidence above threshold"""
-        if not self.use_yolo or self.yolo_model is None:
-            return False
-
-        # Run inference (suppress verbose)
-        try:
-            results = self.yolo_model(frame, conf=YOLO_CONFIDENCE_THRESHOLD, verbose=False)
-            if not results:
-                return False
-
-            result = results[0]  # Single image
-            # If no boxes => no detection
-            if result.boxes is None or len(result.boxes) == 0:
-                return False
-
-            return True  # At least one object detected
-        except Exception as e:
-            logging.error(f"YOLO inference error: {e}")
-            return False
+            self.send_command(command)
 
 if __name__ == "__main__":
     # Set up logging
