@@ -222,7 +222,7 @@ class Mapper:
         if len(self.path_history) > 100: # Keep path history to a reasonable length
             self.path_history.pop(0)
     
-    def get_grid_visualization(self):
+    def get_grid_visualization(self, planned_path: Optional[List[Tuple[int, int]]] = None):
         """Create an image of the maze with the robot's position and trail."""
         cell_size = 25
         maze_h, maze_w = len(self.maze_grid), len(self.maze_grid[0])
@@ -257,6 +257,15 @@ class Mapper:
         goal_px, goal_py = world_to_pixel(GOAL_POSITION[0], GOAL_POSITION[1])
         cv2.circle(vis_img, (goal_px, goal_py), int(cell_size * 0.5), (0, 0, 255), -1)
         cv2.putText(vis_img, "G", (goal_px - 7, goal_py + 7), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
+
+        # Draw the D* Lite planned path
+        if planned_path and len(planned_path) > 1:
+            # Convert grid cells to pixel coordinates (centers of cells)
+            planned_path_pixels = np.array(
+                [world_to_pixel((cell[0] + 0.5) * self.cell_width_m, (cell[1] + 0.5) * self.cell_width_m) for cell in planned_path],
+                dtype=np.int32
+            )
+            cv2.polylines(vis_img, [planned_path_pixels], isClosed=False, color=(255, 255, 0), thickness=1) # Yellow planned path
 
         # Draw the path history
         if len(self.path_history) > 1:
@@ -854,13 +863,13 @@ class WebVisualization:
         
         @self.app.route('/')
         def index():
-            return render_template('index.html')
+            return render_template('navigation.html')
         
         @self.app.route('/api/robot_data')
         def get_robot_data():
             """Get current robot data as JSON"""
             # Get grid visualization
-            grid_img = self.robot.mapper.get_grid_visualization()
+            grid_img = self.robot.mapper.get_grid_visualization(planned_path=self.robot.path)
             _, buffer = cv2.imencode('.png', grid_img)
             grid_base64 = base64.b64encode(buffer).decode('utf-8')
 
