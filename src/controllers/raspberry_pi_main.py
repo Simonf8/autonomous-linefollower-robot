@@ -80,14 +80,15 @@ class SimpleLineFollower:
         self.state = "SEARCHING"
         self.last_turn_direction = "right"  # Remember last turn for search
         
-        # Speed settings - much more active corrections
-        self.forward_speed = 40
-        self.gentle_turn_factor = 0.2  # Reduce inner wheel to 20% (very active)
+        # Speed settings - balanced immediate corrections
+        self.forward_speed = 42
+        self.gentle_turn_factor = 0.78  # Reduce inner wheel to 78% (immediate but controlled)
         self.sharp_turn_speed = 50
         self.search_speed = 35
         
         # State tracking
         self.line_lost_time = 0
+        self.last_correction = "NONE"  # Track last correction to avoid abrupt changes
     
     def run(self):
         """Main control loop"""
@@ -143,12 +144,14 @@ class SimpleLineFollower:
             self.last_turn_direction = "right"
             
         elif not L2 and not L1 and not C and R1 and R2:
-            # Pattern: 00011 - Off center right, GO FORWARD (ignore small deviation)
-            self.state = "FORWARD"
+            # Pattern: 00011 - Off center right, gentle left correction
+            self.state = "TURN_LEFT_GENTLE"
+            self.last_turn_direction = "left"
             
         elif L2 and L1 and not C and not R1 and not R2:
-            # Pattern: 11000 - Off center left, GO FORWARD (ignore small deviation)
-            self.state = "FORWARD"
+            # Pattern: 11000 - Off center left, gentle right correction
+            self.state = "TURN_RIGHT_GENTLE"
+            self.last_turn_direction = "right"
             
         elif not L2 and L1 and not C and not R1 and not R2:
             # Pattern: 01000 - Left sensor only, gentle right turn
@@ -175,12 +178,12 @@ class SimpleLineFollower:
             self.state = "FORWARD"  # Go straight through
             
         elif (L2 and L1 and C) or (C and R1 and R2):
-            # Patterns like 111XX or XX111 - True corner detected (3+ consecutive sensors)
+            # Patterns like 111XX or XX111 - Corner detected, use gentle turns
             if L2 and L1 and C:
-                self.state = "TURN_LEFT_SHARP"
+                self.state = "TURN_LEFT_GENTLE"
                 self.last_turn_direction = "left"
             else:
-                self.state = "TURN_RIGHT_SHARP"
+                self.state = "TURN_RIGHT_GENTLE"
                 self.last_turn_direction = "right"
                 
         elif sum(sensors) >= 4:

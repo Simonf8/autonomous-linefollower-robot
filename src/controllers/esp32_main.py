@@ -180,8 +180,8 @@ def run_server(motors, sensors):
             
         except Exception as e:
             print(f"Server error: {e}")
+        finally:
             motors.stop()
-        
             time.sleep(0.01)
 
 def main():
