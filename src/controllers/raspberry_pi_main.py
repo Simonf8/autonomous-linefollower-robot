@@ -3,6 +3,9 @@
 import socket
 import time
 import logging
+import cv2
+import numpy as np
+from ultralytics import YOLO
 
 class ESP32Interface:
     """Simple ESP32 communication for sensor data and motor control"""
@@ -71,7 +74,7 @@ class ESP32Interface:
         self.connected = False
 
 class SimpleLineFollower:
-    """Pattern-based line following using discrete sensor states"""
+    """Pattern-based line following with object detection using discrete sensor states"""
     
     def __init__(self, esp32_ip):
         self.esp32 = ESP32Interface(esp32_ip)
@@ -89,7 +92,89 @@ class SimpleLineFollower:
         # State tracking
         self.line_lost_time = 0
         self.last_correction = "NONE"  # Track last correction to avoid abrupt changes
-    
+        
+        # Object detection setup
+        self.camera = None
+        self.yolo_model = None
+        self.setup_camera_and_yolo()
+        
+                # Object detection state
+        self.object_detected = False
+        self.turning_180 = False
+        self.turn_180_start_time = 0
+
+    def setup_camera_and_yolo(self):
+        """Initialize camera and YOLO model"""
+        try:
+            # Initialize camera
+            self.camera = cv2.VideoCapture(0)
+            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.camera.set(cv2.CAP_PROP_FPS, 10)  # Lower FPS for better performance
+            
+            # Load YOLO model
+            self.yolo_model = YOLO('yolo11n.pt')
+            
+            logging.info("Camera and YOLO model initialized successfully")
+        except Exception as e:
+            logging.error(f"Failed to initialize camera/YOLO: {e}")
+            self.camera = None
+            self.yolo_model = None
+
+    def detect_objects(self):
+        """Detect objects using YOLO and return True if any obstacle is detected"""
+        if not self.camera or not self.yolo_model:
+            return False
+            
+        try:
+            ret, frame = self.camera.read()
+            if not ret:
+                return False
+                
+            # Run YOLO detection
+            results = self.yolo_model(frame, verbose=False)
+            
+            # Objects to ignore (not real obstacles)
+            ignore_objects = {
+                'tie', 'necktie', 'person', 'chair', 'dining table', 'laptop', 
+                'mouse', 'remote', 'keyboard', 'cell phone', 'book', 'clock',
+                'scissors', 'teddy bear', 'hair drier', 'toothbrush'
+            }
+            
+            # Objects that ARE obstacles (things robot should avoid)
+            obstacle_objects = {
+                'bottle', 'cup', 'bowl', 'banana', 'apple', 'orange', 'broccoli',
+                'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'potted plant',
+                'vase', 'backpack', 'handbag', 'suitcase', 'sports ball',
+                'baseball bat', 'skateboard', 'surfboard', 'tennis racket'
+            }
+            
+            # Check if any obstacle objects detected with confidence > 0.6
+            for result in results:
+                if result.boxes is not None and len(result.boxes) > 0:
+                    for box in result.boxes:
+                        confidence = float(box.conf[0])
+                        if confidence > 0.6:  # Higher confidence for obstacles
+                            class_id = int(box.cls[0])
+                            class_name = self.yolo_model.names[class_id]
+                            
+                            # Only trigger on actual obstacles, ignore ties and other non-obstacles
+                            if class_name.lower() in obstacle_objects:
+                                logging.info(f"Obstacle detected: {class_name} (confidence: {confidence:.2f})")
+                                return True
+                            elif class_name.lower() in ignore_objects:
+                                logging.debug(f"Ignoring non-obstacle: {class_name} (confidence: {confidence:.2f})")
+                            else:
+                                # Unknown object - be cautious and treat as obstacle
+                                logging.info(f"Unknown object detected: {class_name} (confidence: {confidence:.2f})")
+                                return True
+            
+            return False
+            
+        except Exception as e:
+            logging.debug(f"Object detection error: {e}")
+            return False
+
     def run(self):
         """Main control loop"""
         logging.info("Starting pattern-based line follower")
@@ -100,6 +185,15 @@ class SimpleLineFollower:
         
         try:
             while True:
+                # Check for objects every few cycles (not every cycle for performance)
+                if not hasattr(self, '_detection_counter'):
+                    self._detection_counter = 0
+                
+                self._detection_counter += 1
+                if self._detection_counter >= 5:  # Check every 5 cycles (every ~0.25 seconds)
+                    self.object_detected = self.detect_objects()
+                    self._detection_counter = 0
+                
                 self.control_loop()
                 time.sleep(0.05)  # 20Hz - stable control
                 
@@ -109,7 +203,32 @@ class SimpleLineFollower:
             self.stop()
     
     def control_loop(self):
-        """Single control loop using sensor patterns"""
+        """Single control loop using sensor patterns with object detection"""
+        
+        # Priority 1: Handle 180-degree turn if object detected
+        if self.object_detected and not self.turning_180:
+            logging.info("Object detected! Starting 180-degree turn")
+            self.turning_180 = True
+            self.turn_180_start_time = time.time()
+            self.state = "TURN_180"
+            self.execute_state()
+            return
+        
+        # Priority 2: Continue 180-degree turn if in progress
+        if self.turning_180:
+            elapsed_time = time.time() - self.turn_180_start_time
+            if elapsed_time < 3.0:  # Turn for 3 seconds (adjust as needed)
+                self.state = "TURN_180"
+                self.execute_state()
+                return
+            else:
+                # Finished 180 turn, reset and resume line following
+                logging.info("180-degree turn completed, resuming line following")
+                self.turning_180 = False
+                self.object_detected = False
+                self.state = "SEARCH"  # Start searching for line again
+        
+        # Priority 3: Normal line following
         # Get sensor pattern [L2, L1, C, R1, R2]
         sensors = self.esp32.sensors
         L2, L1, C, R1, R2 = sensors
@@ -244,6 +363,11 @@ class SimpleLineFollower:
             left_speed = self.sharp_turn_speed
             right_speed = 0
             
+        elif self.state == "TURN_180":
+            # 180-degree turn: spin in place
+            left_speed = -self.sharp_turn_speed  # Turn left (reverse left wheel)
+            right_speed = self.sharp_turn_speed   # Turn left (forward right wheel)
+            
         elif self.state == "SEARCH":
             # Search based on last known direction
             if self.last_turn_direction == "left":
@@ -267,9 +391,15 @@ class SimpleLineFollower:
         self.esp32.send_motor_speeds(left_speed, right_speed)
     
     def stop(self):
-        """Stop the robot"""
+        """Stop the robot and cleanup resources"""
         self.esp32.send_motor_speeds(0, 0)
         self.esp32.close()
+        
+        # Cleanup camera
+        if self.camera:
+            self.camera.release()
+            cv2.destroyAllWindows()
+            logging.info("Camera resources cleaned up")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
