@@ -11,10 +11,440 @@ from collections import deque
 import threading
 import json
 import base64
-from flask import Flask, render_template, jsonify, Response
+from flask import Flask, render_template, jsonify, Response, request
+import heapq
+from typing import List, Tuple, Set, Dict, Optional
+
+# ============================================================================
+# SIMPLE NAVIGATION CONTROL - Set your start and goal positions here
+# ============================================================================
+
+def setup_navigation(robot):
+    """Simple function to set up D* navigation - edit these coordinates"""
+    
+    print("\nNAVIGATION SETUP")
+    print("Available positions in your maze:")
+    print("  Top-left corner: (0.06, 0.30)")
+    print("  Top-right corner: (2.46, 0.30)")
+    print("  Center: (1.26, 0.90)")
+    print("  Bottom-left: (0.06, 1.50)")
+    print("  Bottom-right: (2.46, 1.50)")
+    
+    # EDIT THESE COORDINATES TO SET YOUR START AND GOAL
+    start_position = (0.06, 0.30)   # Top-left corner
+    goal_position = (2.46, 1.50)   # Bottom-right corner
+    
+    print(f"Setting START: {start_position}")
+    print(f"Setting GOAL: {goal_position}")
+    
+    # Set the navigation goal
+    path = robot.set_navigation_goal(start_position, goal_position)
+    if path:
+        print(f" D* Navigation ready! Path has {len(path)} waypoints")
+        robot.enable_dstar_navigation()
+        return True
+    else:
+        print("Failed to create navigation path")
+        return False
+
+# ============================================================================
 
 # Web visualization is now integrated in this file
 WebVisualization = None  # Will be defined below
+
+class DStarLite:
+    """D* Lite algorithm for dynamic pathfinding in robotics"""
+    
+    def __init__(self, maze_grid: List[List[int]], cell_size: float = 0.12):
+        """
+        Initialize D* Lite pathfinder
+        
+        Args:
+            maze_grid: 2D grid where 0 = navigable, 1 = obstacle
+            cell_size: Size of each cell in meters (default 12cm)
+        """
+        self.maze = maze_grid
+        self.height = len(maze_grid)
+        self.width = len(maze_grid[0])
+        self.cell_size = cell_size
+        
+        # D* Lite data structures
+        self.U = []  # Priority queue
+        self.rhs = {}  # Right-hand side values
+        self.g = {}  # Cost-to-come values
+        self.km = 0  # Key modifier
+        
+        # Robot state
+        self.start = None
+        self.goal = None
+        self.last_start = None
+        
+        # Path storage
+        self.current_path = []
+        self.path_changed = False
+        
+        # Initialize all cells
+        self._initialize_grid()
+        
+        # D* Lite initialized
+    
+    def _initialize_grid(self):
+        """Initialize g and rhs values for all cells"""
+        for y in range(self.height):
+            for x in range(self.width):
+                self.g[(x, y)] = float('inf')
+                self.rhs[(x, y)] = float('inf')
+    
+    def _is_valid_cell(self, x: int, y: int) -> bool:
+        """Check if cell coordinates are valid and navigable"""
+        if 0 <= x < self.width and 0 <= y < self.height:
+            return self.maze[y][x] == 0  # 0 = navigable, 1 = obstacle
+        return False
+    
+    def _get_neighbors(self, x: int, y: int) -> List[Tuple[int, int]]:
+        """Get valid neighboring cells - only allow movement along line paths"""
+        neighbors = []
+        
+        # Only allow 4-connected movement (no diagonal) to stay on line paths
+        directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]  # up, down, right, left
+        
+        for dx, dy in directions:
+            nx, ny = x + dx, y + dy
+            if self._is_valid_cell(nx, ny):
+                # Additional check: ensure we're moving along a continuous line path
+                if self._is_line_path_connection(x, y, nx, ny):
+                    neighbors.append((nx, ny))
+        
+        return neighbors
+    
+    def _is_line_path_connection(self, x1: int, y1: int, x2: int, y2: int) -> bool:
+        """Check if two cells are connected by a valid line path"""
+        # Both cells must be navigable
+        if not (self._is_valid_cell(x1, y1) and self._is_valid_cell(x2, y2)):
+            return False
+        
+        # Check if this is an intersection point (allows transitions between line segments)
+        if self._is_intersection(x1, y1) or self._is_intersection(x2, y2):
+            return True
+        
+        # Check if this is a horizontal or vertical line segment connection
+        if x1 == x2:  # Vertical movement
+            # Check if we're on the same vertical line segment
+            return self._are_on_same_vertical_line(x1, y1, y2)
+        elif y1 == y2:  # Horizontal movement
+            # Check if we're on the same horizontal line segment
+            return self._are_on_same_horizontal_line(y1, x1, x2)
+        
+        return False
+    
+    def _are_on_same_horizontal_line(self, row: int, x1: int, x2: int) -> bool:
+        """Check if two x positions are on the same horizontal line segment"""
+        if row < 0 or row >= self.height:
+            return False
+        
+        # Find the start and end of the line segment containing x1
+        start_x = x1
+        while start_x > 0 and self.maze[row][start_x - 1] == 0:
+            start_x -= 1
+        
+        end_x = x1
+        while end_x < self.width - 1 and self.maze[row][end_x + 1] == 0:
+            end_x += 1
+        
+        # Check if x2 is within the same line segment
+        return start_x <= x2 <= end_x
+    
+    def _are_on_same_vertical_line(self, col: int, y1: int, y2: int) -> bool:
+        """Check if two y positions are on the same vertical line segment"""
+        if col < 0 or col >= self.width:
+            return False
+        
+        # Find the start and end of the line segment containing y1
+        start_y = y1
+        while start_y > 0 and self.maze[start_y - 1][col] == 0:
+            start_y -= 1
+        
+        end_y = y1
+        while end_y < self.height - 1 and self.maze[end_y + 1][col] == 0:
+            end_y += 1
+        
+        # Check if y2 is within the same line segment
+        return start_y <= y2 <= end_y
+    
+    def _cost(self, from_cell: Tuple[int, int], to_cell: Tuple[int, int]) -> float:
+        """Calculate movement cost between adjacent cells - prefer straight line movement"""
+        x1, y1 = from_cell
+        x2, y2 = to_cell
+        
+        # Only horizontal and vertical movement allowed (no diagonal)
+        if abs(x2 - x1) + abs(y2 - y1) != 1:
+            return float('inf')  # Invalid movement
+        
+        return 1.0  # All valid movements have equal cost
+    
+    def _heuristic(self, from_cell: Tuple[int, int], to_cell: Tuple[int, int]) -> float:
+        """Heuristic function (Euclidean distance)"""
+        x1, y1 = from_cell
+        x2, y2 = to_cell
+        return math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+    
+    def _calculate_key(self, cell: Tuple[int, int]) -> Tuple[float, float]:
+        """Calculate priority key for a cell"""
+        g_val = self.g.get(cell, float('inf'))
+        rhs_val = self.rhs.get(cell, float('inf'))
+        
+        min_val = min(g_val, rhs_val)
+        heuristic_val = self._heuristic(cell, self.start) if self.start else 0
+        
+        return (min_val + heuristic_val + self.km, min_val)
+    
+    def _update_vertex(self, cell: Tuple[int, int]):
+        """Update vertex in the priority queue"""
+        # Remove from queue if present
+        self.U = [(key, c) for key, c in self.U if c != cell]
+        heapq.heapify(self.U)
+        
+        # If locally inconsistent, add to queue
+        if self.g.get(cell, float('inf')) != self.rhs.get(cell, float('inf')):
+            key = self._calculate_key(cell)
+            heapq.heappush(self.U, (key, cell))
+    
+    def _compute_shortest_path(self):
+        """Main D* Lite computation"""
+        while (len(self.U) > 0 and 
+               (self.U[0][0] < self._calculate_key(self.start) or 
+                self.rhs.get(self.start, float('inf')) != self.g.get(self.start, float('inf')))):
+            
+            k_old, u = heapq.heappop(self.U)
+            k_new = self._calculate_key(u)
+            
+            if k_old < k_new:
+                heapq.heappush(self.U, (k_new, u))
+            elif self.g.get(u, float('inf')) > self.rhs.get(u, float('inf')):
+                self.g[u] = self.rhs[u]
+                for neighbor in self._get_neighbors(u[0], u[1]):
+                    if neighbor != self.goal:
+                        cost = self._cost(neighbor, u)
+                        self.rhs[neighbor] = min(self.rhs.get(neighbor, float('inf')), 
+                                               self.g.get(u, float('inf')) + cost)
+                    self._update_vertex(neighbor)
+            else:
+                g_old = self.g[u]
+                self.g[u] = float('inf')
+                
+                cells_to_update = self._get_neighbors(u[0], u[1]) + [u]
+                for cell in cells_to_update:
+                    if (cell != self.goal and 
+                        self.rhs.get(cell, float('inf')) == g_old + self._cost(cell, u)):
+                        
+                        if cell != self.goal:
+                            min_rhs = float('inf')
+                            for neighbor in self._get_neighbors(cell[0], cell[1]):
+                                cost = self._cost(cell, neighbor)
+                                min_rhs = min(min_rhs, self.g.get(neighbor, float('inf')) + cost)
+                            self.rhs[cell] = min_rhs
+                    
+                    self._update_vertex(cell)
+    
+    def set_start_goal(self, start_world: Tuple[float, float], goal_world: Tuple[float, float]):
+        """Set start and goal positions in world coordinates"""
+        # Convert world coordinates to grid coordinates
+        start_grid = (int(start_world[0] / self.cell_size), int(start_world[1] / self.cell_size))
+        goal_grid = (int(goal_world[0] / self.cell_size), int(goal_world[1] / self.cell_size))
+        
+        # Validate coordinates
+        if not self._is_valid_cell(start_grid[0], start_grid[1]):
+            print(f"Warning: Start position {start_grid} is not valid, finding nearest valid cell")
+            start_grid = self._find_nearest_valid_cell(start_grid)
+        
+        if not self._is_valid_cell(goal_grid[0], goal_grid[1]):
+            print(f"Warning: Goal position {goal_grid} is not valid, finding nearest valid cell")
+            goal_grid = self._find_nearest_valid_cell(goal_grid)
+        
+        self.start = start_grid
+        self.goal = goal_grid
+        
+        # D* Lite positions set
+        
+        # Initialize goal
+        self.rhs[self.goal] = 0
+        self._update_vertex(self.goal)
+        
+        # Compute initial path
+        self._compute_shortest_path()
+        self._extract_path()
+    
+    def _find_nearest_valid_cell(self, target: Tuple[int, int]) -> Tuple[int, int]:
+        """Find the nearest valid (navigable) cell to the target"""
+        x, y = target
+        
+        # Search in expanding squares
+        for radius in range(1, max(self.width, self.height)):
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    if abs(dx) == radius or abs(dy) == radius:  # Only check perimeter
+                        nx, ny = x + dx, y + dy
+                        if self._is_valid_cell(nx, ny):
+                            return (nx, ny)
+        
+        # Fallback: return first valid cell found
+        for y in range(self.height):
+            for x in range(self.width):
+                if self._is_valid_cell(x, y):
+                    return (x, y)
+        
+        raise ValueError("No valid cells found in maze!")
+    
+    def _extract_path(self):
+        """Extract the optimal path from start to goal"""
+        if not self.start or not self.goal:
+            return
+        
+        path = []
+        current = self.start
+        
+        # Follow the path by choosing the neighbor with minimum g + cost
+        while current != self.goal:
+            path.append(current)
+            
+            best_neighbor = None
+            best_cost = float('inf')
+            
+            for neighbor in self._get_neighbors(current[0], current[1]):
+                cost = self.g.get(neighbor, float('inf')) + self._cost(current, neighbor)
+                if cost < best_cost:
+                    best_cost = cost
+                    best_neighbor = neighbor
+            
+            if best_neighbor is None:
+                # No path found
+                break
+            
+            current = best_neighbor
+            
+            # Prevent infinite loops
+            if len(path) > self.width * self.height:
+                # Path too long, stopping
+                break
+        
+        path.append(self.goal)
+        
+        # Convert grid coordinates back to world coordinates
+        world_path = []
+        for x, y in path:
+            world_x = (x + 0.5) * self.cell_size  # Center of cell
+            world_y = (y + 0.5) * self.cell_size
+            world_path.append((world_x, world_y))
+        
+        self.current_path = world_path
+        self.path_changed = True
+        
+        # Path found
+        return world_path
+    
+    def update_robot_position(self, new_position: Tuple[float, float]):
+        """Update robot position and replan if necessary"""
+        # Convert to grid coordinates
+        new_start = (int(new_position[0] / self.cell_size), int(new_position[1] / self.cell_size))
+        
+        if new_start != self.start and self._is_valid_cell(new_start[0], new_start[1]):
+            # Update km for replanning
+            if self.last_start:
+                self.km += self._heuristic(self.last_start, new_start)
+            
+            self.last_start = self.start
+            self.start = new_start
+            
+            # Recompute path
+            self._compute_shortest_path()
+            self._extract_path()
+    
+    def update_obstacles(self, changed_cells: List[Tuple[int, int, int]]):
+        """Update obstacle information and replan
+        
+        Args:
+            changed_cells: List of (x, y, new_value) where new_value is 0 (free) or 1 (obstacle)
+        """
+        path_needs_update = False
+        
+        for x, y, new_value in changed_cells:
+            if 0 <= x < self.width and 0 <= y < self.height:
+                old_value = self.maze[y][x]
+                self.maze[y][x] = new_value
+                
+                if old_value != new_value:
+                    path_needs_update = True
+                    cell = (x, y)
+                    
+                    # Update rhs values for affected cells
+                    affected_cells = self._get_neighbors(x, y) + [cell]
+                    for affected in affected_cells:
+                        if affected != self.goal:
+                            min_rhs = float('inf')
+                            for neighbor in self._get_neighbors(affected[0], affected[1]):
+                                if self._is_valid_cell(neighbor[0], neighbor[1]):
+                                    cost = self._cost(affected, neighbor)
+                                    min_rhs = min(min_rhs, self.g.get(neighbor, float('inf')) + cost)
+                            self.rhs[affected] = min_rhs
+                        
+                        self._update_vertex(affected)
+        
+        if path_needs_update:
+            self._compute_shortest_path()
+            self._extract_path()
+            # Replanned due to obstacles
+    
+    def get_path(self) -> List[Tuple[float, float]]:
+        """Get the current optimal path in world coordinates"""
+        return self.current_path.copy()
+    
+    def get_next_waypoint(self, current_pos: Tuple[float, float], lookahead_distance: float = 0.2) -> Optional[Tuple[float, float]]:
+        """Get the next waypoint for the robot to follow
+        
+        Args:
+            current_pos: Current robot position in world coordinates
+            lookahead_distance: How far ahead to look for the next waypoint
+        """
+        if not self.current_path:
+            return None
+        
+        # Find the closest point on the path
+        min_distance = float('inf')
+        closest_index = 0
+        
+        for i, waypoint in enumerate(self.current_path):
+            distance = math.sqrt((waypoint[0] - current_pos[0])**2 + (waypoint[1] - current_pos[1])**2)
+            if distance < min_distance:
+                min_distance = distance
+                closest_index = i
+        
+        # Look ahead from the closest point
+        for i in range(closest_index, len(self.current_path)):
+            waypoint = self.current_path[i]
+            distance = math.sqrt((waypoint[0] - current_pos[0])**2 + (waypoint[1] - current_pos[1])**2)
+            
+            if distance >= lookahead_distance:
+                return waypoint
+        
+        # If no waypoint is far enough, return the last waypoint
+        return self.current_path[-1] if self.current_path else None
+    
+    def _is_intersection(self, x: int, y: int) -> bool:
+        """Check if a cell is an intersection point where multiple line segments meet"""
+        if not self._is_valid_cell(x, y):
+            return False
+        
+        # Count the number of valid directions from this cell
+        directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]  # up, down, right, left
+        valid_directions = 0
+        
+        for dx, dy in directions:
+            nx, ny = x + dx, y + dy
+            if self._is_valid_cell(nx, ny):
+                valid_directions += 1
+        
+        # An intersection has 3 or more valid directions
+        return valid_directions >= 3
 
 class ESP32Interface:
     """Simple ESP32 communication for sensor data and motor control"""
@@ -33,21 +463,19 @@ class ESP32Interface:
         """Connect to ESP32"""
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(2.0)
+            self.socket.settimeout(5.0)  # 5 second timeout instead of 2.0
             self.socket.connect((self.ip_address, self.port))
             self.socket.settimeout(0.1)
             self.connected = True
-            logging.info(f"Connected to ESP32 at {self.ip_address}")
             return True
         except Exception as e:
-            logging.error(f"Failed to connect to ESP32: {e}")
             self.connected = False
             return False
     
     def send_motor_speeds(self, left_speed, right_speed):
         """Send motor speeds directly to ESP32"""
         if not self.connected:
-                return False
+            return False
         
         try:
             command = f"{left_speed},{right_speed}"
@@ -231,7 +659,7 @@ class VisualOdometry:
         return self.x, self.y, self.heading
 
 class LineBasedMapper:
-    """Pure line-based navigation - no grid, just actual line paths"""
+    """Enhanced navigation with D* Lite pathfinding for optimal route planning"""
     
     def __init__(self):
         # Robot tracking in continuous coordinates
@@ -242,18 +670,188 @@ class LineBasedMapper:
         # Path history
         self.path_history = []
         
-        # Define your actual line paths directly (no grid conversion)
-        # Based on your maze layout, these are the real line segments
+        # Create the maze grid for D* Lite
+        self.maze_grid = self.create_maze_grid()
+        
+        # Initialize D* Lite pathfinder
+        self.pathfinder = DStarLite(self.maze_grid, cell_size=0.12)
+        
+        # Navigation state
+        self.start_position = None
+        self.goal_position = None
+        self.optimal_path = []
+        self.current_waypoint_index = 0
+        
+        # Fallback to line segments if needed
         self.line_segments = self.create_actual_line_paths()
         
-        # Current navigation state
         self.current_segment = 0
-        self.position_on_segment = 0.0  # 0.0 to 1.0 along current segment
-        
-        # Waypoints along current path
         self.waypoints = []
         self.current_waypoint = 0
-        self.generate_current_path_waypoints()
+        
+        # Navigation mode
+        self.use_dstar_navigation = False
+    
+    def create_maze_grid(self):
+        """Create the maze grid for D* Lite pathfinding"""
+        # Your actual maze layout (horizontally mirrored)
+        original_maze = [
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0],
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
+            [0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0],
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
+            [0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0],
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+        ]
+        
+        # Horizontally mirror the maze
+        maze_grid = []
+        for row in original_maze:
+            mirrored_row = list(reversed(row))
+            maze_grid.append(mirrored_row)
+        
+        return maze_grid
+    
+    def set_start_goal_positions(self, start_world: Tuple[float, float], goal_world: Tuple[float, float]):
+        """Set start and goal positions for D* Lite pathfinding"""
+        self.start_position = start_world
+        self.goal_position = goal_world
+        
+        # Initialize D* Lite with start and goal
+        self.pathfinder.set_start_goal(start_world, goal_world)
+        
+        # Get the optimal path
+        self.optimal_path = self.pathfinder.get_path()
+        self.current_waypoint_index = 0
+        
+        # Enable D* navigation
+        self.use_dstar_navigation = True
+        
+        # D* Navigation path set
+        
+        return self.optimal_path
+    
+    def get_available_positions(self):
+        """Get list of available start/goal positions in the maze"""
+        positions = []
+        cell_size = 0.12
+        
+        for y in range(len(self.maze_grid)):
+            for x in range(len(self.maze_grid[0])):
+                if self.maze_grid[y][x] == 0:  # Navigable cell
+                    world_x = (x + 0.5) * cell_size
+                    world_y = (y + 0.5) * cell_size
+                    positions.append((world_x, world_y, f"({x},{y})"))
+        
+        return positions
+    
+    def get_corner_positions(self):
+        """Get strategic positions throughout the maze for easy start/goal selection"""
+        positions = [
+            # Top row positions
+            (0.06, 0.30, "Top-Left Corner"),      # Row 2, Col 0
+            (0.90, 0.30, "Top-Left-Center"),      # Row 2, Col 7
+            (1.26, 0.30, "Top-Center"),           # Row 2, Col 10
+            (1.62, 0.30, "Top-Right-Center"),     # Row 2, Col 13
+            (2.46, 0.30, "Top-Right Corner"),     # Row 2, Col 20
+            
+            # Middle-upper row positions
+            (0.06, 0.66, "Upper-Left"),           # Row 5, Col 0
+            (1.26, 0.66, "Upper-Center"),         # Row 5, Col 10
+            (2.46, 0.66, "Upper-Right"),          # Row 5, Col 20
+            
+            # Center row positions
+            (0.06, 0.90, "Center-Left"),          # Row 7, Col 0
+            (0.54, 0.90, "Center-Left-Mid"),      # Row 7, Col 4
+            (1.26, 0.90, "Center"),               # Row 7, Col 10
+            (1.98, 0.90, "Center-Right-Mid"),     # Row 7, Col 16
+            (2.46, 0.90, "Center-Right"),         # Row 7, Col 20
+            
+            # Middle-lower row positions
+            (0.06, 1.14, "Lower-Left"),           # Row 9, Col 0
+            (1.26, 1.14, "Lower-Center"),         # Row 9, Col 10
+            (2.46, 1.14, "Lower-Right"),          # Row 9, Col 20
+            
+            # Bottom row positions
+            (0.06, 1.50, "Bottom-Left"),          # Row 12, Col 0
+            (0.90, 1.50, "Bottom-Left-Center"),   # Row 12, Col 7
+            (1.26, 1.50, "Bottom-Center"),        # Row 12, Col 10
+            (1.62, 1.50, "Bottom-Right-Center"),  # Row 12, Col 13
+            (2.46, 1.50, "Bottom-Right"),         # Row 12, Col 20
+            
+            # Special positions
+            (0.18, 1.68, "Exit-Left"),            # Row 14, Col 1
+            (0.54, 1.68, "Exit-Left-Mid"),        # Row 14, Col 4
+            (1.26, 1.68, "Exit-Center"),          # Row 14, Col 10
+            (2.46, 1.68, "Exit-Right"),           # Row 14, Col 20
+        ]
+        return positions
+    
+    def update_robot_position_dstar(self, robot_pos: Tuple[float, float]):
+        """Update robot position for D* Lite pathfinding"""
+        if self.use_dstar_navigation:
+            # Update pathfinder with new robot position
+            self.pathfinder.update_robot_position(robot_pos)
+            
+            # Check if path changed and update our local copy
+            if self.pathfinder.path_changed:
+                self.optimal_path = self.pathfinder.get_path()
+                self.pathfinder.path_changed = False
+    
+    def get_current_dstar_waypoint(self):
+        """Get current waypoint from D* Lite path"""
+        if not self.use_dstar_navigation or not self.optimal_path:
+            return None
+        
+        current_pos = (self.robot_x, self.robot_y)
+        
+        # Use D* Lite's lookahead waypoint selection
+        next_waypoint = self.pathfinder.get_next_waypoint(current_pos, lookahead_distance=0.15)
+        
+        return next_waypoint
+    
+    def detect_new_obstacles(self, detected_objects_positions: List[Tuple[float, float]]):
+        """Update D* Lite with newly detected obstacles"""
+        if not self.use_dstar_navigation:
+            return
+        
+        changed_cells = []
+        cell_size = 0.12
+        
+        for obj_x, obj_y in detected_objects_positions:
+            # Convert world coordinates to grid coordinates
+            grid_x = int(obj_x / cell_size)
+            grid_y = int(obj_y / cell_size)
+            
+            # Mark as obstacle (value = 1)
+            if (0 <= grid_x < len(self.maze_grid[0]) and 
+                0 <= grid_y < len(self.maze_grid) and
+                self.maze_grid[grid_y][grid_x] == 0):  # Was navigable
+                
+                changed_cells.append((grid_x, grid_y, 1))  # Mark as obstacle
+        
+        if changed_cells:
+            self.pathfinder.update_obstacles(changed_cells)
+            self.optimal_path = self.pathfinder.get_path()
+    
+    def disable_dstar_navigation(self):
+        """Disable D* navigation and fall back to line following"""
+        self.use_dstar_navigation = False
+        self.generate_current_path_waypoints()  # Generate line-following waypoints
+    
+    def enable_dstar_navigation(self):
+        """Re-enable D* navigation if start/goal are set"""
+        if self.start_position and self.goal_position:
+            self.use_dstar_navigation = True
     
     def create_actual_line_paths(self):
         """Define the actual line paths based on your exact maze layout"""
@@ -331,10 +929,7 @@ class LineBasedMapper:
                 else:
                     y += 1
         
-        print(f"Extracted {len(segments)} line segments from your actual maze:")
-        for i, (sx, sy, ex, ey, name) in enumerate(segments):
-            length = math.sqrt((ex-sx)**2 + (ey-sy)**2)
-            print(f"  {i+1}. {name}: ({sx:.2f},{sy:.2f}) -> ({ex:.2f},{ey:.2f}) [{length:.2f}m]")
+        # Line segments extracted
         
         return segments
     
@@ -344,7 +939,6 @@ class LineBasedMapper:
             self.current_segment = 0
         
         if len(self.line_segments) == 0:
-            print("No line segments found!")
             return
         
         segment = self.line_segments[self.current_segment]
@@ -371,7 +965,6 @@ class LineBasedMapper:
         
         self.waypoints = waypoints
         self.current_waypoint = 0
-        print(f"Following line: {name} ({length:.2f}m, {len(waypoints)} waypoints)")
     
     def update_robot_position_from_sensors(self, sensors):
         """Update waypoint progression based on current robot position"""
@@ -387,7 +980,6 @@ class LineBasedMapper:
             # Move to next waypoint if close (robot position is updated from visual odometry)
             if distance < 0.12:  # Within 12cm - larger tolerance for camera-based positioning
                 self.current_waypoint += 1
-                print(f"Reached waypoint {self.current_waypoint-1}, distance was {distance:.3f}m")
                 
                 # If finished current segment, move to next
                 if self.current_waypoint >= len(self.waypoints):
@@ -396,9 +988,7 @@ class LineBasedMapper:
                         self.current_segment = 0  # Loop back
                     self.generate_current_path_waypoints()
                     
-                    if self.current_segment < len(self.line_segments):
-                        segment_name = self.line_segments[self.current_segment][4]
-                        print(f"Starting new line: {segment_name}")
+                    # Starting new line segment
         
         # Update path history with current robot position
         self.path_history.append((self.robot_x, self.robot_y))
@@ -535,9 +1125,81 @@ class LineBasedMapper:
                     trail_color = (trail_brightness, trail_brightness, 0)  # Yellow trail
                     cv2.line(vis_grid, (px1, py1), (px2, py2), trail_color, 3)
         
+        # Draw available start/goal positions as small markers - REMOVED FOR CLICK-TO-SELECT
+        # available_positions = self.get_corner_positions()
+        # for pos_x, pos_y, name in available_positions:
+        #     pos_px = int(pos_x / 0.12 * cell_size + cell_size/2)
+        #     pos_py = int(pos_y / 0.12 * cell_size + cell_size/2)
+        #     
+        #     if 0 <= pos_px < canvas_width and 0 <= pos_py < canvas_height:
+        #         # Small cyan circles for available positions
+        #         cv2.circle(vis_grid, (pos_px, pos_py), 4, (255, 255, 0), 1)  # Yellow outline
+        #         cv2.circle(vis_grid, (pos_px, pos_py), 2, (0, 255, 255), -1)  # Cyan center
+        
+        # Add prominent corner dots for easy reference - REMOVED FOR CLEAN INTERFACE
+        # corner_positions = [
+        #     (0, 0, "Top-Left"),           # Top-left corner
+        #     (canvas_width-1, 0, "Top-Right"),        # Top-right corner
+        #     (0, canvas_height-1, "Bottom-Left"),     # Bottom-left corner
+        #     (canvas_width-1, canvas_height-1, "Bottom-Right")  # Bottom-right corner
+        # ]
+        # 
+        # for corner_x, corner_y, corner_name in corner_positions:
+        #     # Large corner markers
+        #     cv2.circle(vis_grid, (corner_x, corner_y), 8, (0, 255, 255), 2)  # Cyan outline
+        #     cv2.circle(vis_grid, (corner_x, corner_y), 5, (255, 255, 255), -1)  # White center
+        #     cv2.circle(vis_grid, (corner_x, corner_y), 2, (0, 255, 255), -1)  # Cyan inner dot
+        
+        # Draw D* Lite optimal path if available
+        if self.use_dstar_navigation and self.optimal_path:
+            for i in range(1, len(self.optimal_path)):
+                x1, y1 = self.optimal_path[i-1]
+                x2, y2 = self.optimal_path[i]
+                
+                px1 = int(x1 / 0.12 * cell_size + cell_size/2)
+                py1 = int(y1 / 0.12 * cell_size + cell_size/2)
+                px2 = int(x2 / 0.12 * cell_size + cell_size/2)
+                py2 = int(y2 / 0.12 * cell_size + cell_size/2)
+                
+                if (0 <= px1 < canvas_width and 0 <= py1 < canvas_height and 
+                    0 <= px2 < canvas_width and 0 <= py2 < canvas_height):
+                    
+                    # D* path in bright blue with white center
+                    cv2.line(vis_grid, (px1, py1), (px2, py2), (255, 100, 0), 6)  # Bright blue
+                    cv2.line(vis_grid, (px1, py1), (px2, py2), (255, 255, 255), 2)  # White center
+            
+            # Draw start and goal positions
+            if self.start_position:
+                start_x, start_y = self.start_position
+                start_px = int(start_x / 0.12 * cell_size + cell_size/2)
+                start_py = int(start_y / 0.12 * cell_size + cell_size/2)
+                
+                if 0 <= start_px < canvas_width and 0 <= start_py < canvas_height:
+                    # Start position as bright green square
+                    cv2.rectangle(vis_grid, (start_px-12, start_py-12), (start_px+12, start_py+12), (0, 255, 0), -1)
+                    cv2.rectangle(vis_grid, (start_px-8, start_py-8), (start_px+8, start_py+8), (255, 255, 255), -1)
+                    cv2.putText(vis_grid, "S", (start_px-6, start_py+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+            
+            if self.goal_position:
+                goal_x, goal_y = self.goal_position
+                goal_px = int(goal_x / 0.12 * cell_size + cell_size/2)
+                goal_py = int(goal_y / 0.12 * cell_size + cell_size/2)
+                
+                if 0 <= goal_px < canvas_width and 0 <= goal_py < canvas_height:
+                    # Goal position as bright red square
+                    cv2.rectangle(vis_grid, (goal_px-12, goal_py-12), (goal_px+12, goal_py+12), (0, 0, 255), -1)
+                    cv2.rectangle(vis_grid, (goal_px-8, goal_py-8), (goal_px+8, goal_py+8), (255, 255, 255), -1)
+                    cv2.putText(vis_grid, "G", (goal_px-6, goal_py+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        
         # Draw current waypoint with pulsing target effect
-        if self.current_waypoint < len(self.waypoints):
-            wx, wy = self.waypoints[self.current_waypoint]
+        current_waypoint = None
+        if self.use_dstar_navigation:
+            current_waypoint = self.get_current_dstar_waypoint()
+        elif self.current_waypoint < len(self.waypoints):
+            current_waypoint = self.waypoints[self.current_waypoint]
+        
+        if current_waypoint:
+            wx, wy = current_waypoint
             waypoint_px = int(wx / 0.12 * cell_size + cell_size/2)
             waypoint_py = int(wy / 0.12 * cell_size + cell_size/2)
             
@@ -576,28 +1238,46 @@ class LineBasedMapper:
             cv2.arrowedLine(vis_grid, (robot_px, robot_py), (arrow_end_x, arrow_end_y), 
                            (255, 255, 0), 3, tipLength=0.3)  # Yellow arrow
         
-        # Add legend in bottom right
-        legend_x = canvas_width - 200
-        legend_y = canvas_height - 100
-        cv2.rectangle(vis_grid, (legend_x, legend_y), (canvas_width-10, canvas_height-10), (0, 0, 0), -1)
-        cv2.rectangle(vis_grid, (legend_x, legend_y), (canvas_width-10, canvas_height-10), (0, 255, 255), 1)
+        # Add legend in bottom right - REMOVED FOR CLEANER VIEW
+        # legend_x = canvas_width - 200
+        # legend_y = canvas_height - 160  # Increased height for corner dots
+        # cv2.rectangle(vis_grid, (legend_x, legend_y), (canvas_width-10, canvas_height-10), (0, 0, 0), -1)
+        # cv2.rectangle(vis_grid, (legend_x, legend_y), (canvas_width-10, canvas_height-10), (0, 255, 255), 1)
         
         # Font and color for legend only
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        text_color = (0, 255, 255)  # Cyan text
+        # font = cv2.FONT_HERSHEY_SIMPLEX
+        # text_color = (0, 255, 255)  # Cyan text
         
         # Legend items
-        cv2.circle(vis_grid, (legend_x + 15, legend_y + 20), 5, (255, 0, 255), -1)
-        cv2.putText(vis_grid, "Robot", (legend_x + 25, legend_y + 25), font, 0.4, text_color, 1)
+        # cv2.circle(vis_grid, (legend_x + 15, legend_y + 15), 5, (255, 0, 255), -1)
+        # cv2.putText(vis_grid, "Robot", (legend_x + 25, legend_y + 20), font, 0.4, text_color, 1)
         
-        cv2.circle(vis_grid, (legend_x + 15, legend_y + 40), 5, (0, 255, 0), -1)
-        cv2.putText(vis_grid, "Target", (legend_x + 25, legend_y + 45), font, 0.4, text_color, 1)
+        # cv2.circle(vis_grid, (legend_x + 15, legend_y + 35), 5, (0, 255, 0), -1)
+        # cv2.putText(vis_grid, "Target", (legend_x + 25, legend_y + 40), font, 0.4, text_color, 1)
         
-        cv2.line(vis_grid, (legend_x + 10, legend_y + 60), (legend_x + 20, legend_y + 60), (255, 255, 0), 2)
-        cv2.putText(vis_grid, "Trail", (legend_x + 25, legend_y + 65), font, 0.4, text_color, 1)
+        # cv2.line(vis_grid, (legend_x + 10, legend_y + 55), (legend_x + 20, legend_y + 55), (255, 255, 0), 2)
+        # cv2.putText(vis_grid, "Trail", (legend_x + 25, legend_y + 60), font, 0.4, text_color, 1)
         
-        cv2.line(vis_grid, (legend_x + 10, legend_y + 80), (legend_x + 20, legend_y + 80), (0, 255, 255), 3)
-        cv2.putText(vis_grid, "Current Path", (legend_x + 25, legend_y + 85), font, 0.4, text_color, 1)
+        # cv2.line(vis_grid, (legend_x + 10, legend_y + 75), (legend_x + 20, legend_y + 75), (0, 255, 255), 3)
+        # cv2.putText(vis_grid, "Current Path", (legend_x + 25, legend_y + 80), font, 0.4, text_color, 1)
+        
+        # Available positions marker
+        # cv2.circle(vis_grid, (legend_x + 15, legend_y + 95), 4, (255, 255, 0), 1)
+        # cv2.circle(vis_grid, (legend_x + 15, legend_y + 95), 2, (0, 255, 255), -1)
+        # cv2.putText(vis_grid, "Positions", (legend_x + 25, legend_y + 100), font, 0.4, text_color, 1)
+        
+        # Corner dots marker
+        # cv2.circle(vis_grid, (legend_x + 15, legend_y + 115), 5, (255, 255, 255), -1)
+        # cv2.circle(vis_grid, (legend_x + 15, legend_y + 115), 2, (0, 255, 255), -1)
+        # cv2.putText(vis_grid, "Corners", (legend_x + 25, legend_y + 120), font, 0.4, text_color, 1)
+        
+        # D* navigation elements
+        # if self.use_dstar_navigation:
+        #     cv2.line(vis_grid, (legend_x + 10, legend_y + 135), (legend_x + 20, legend_y + 135), (255, 100, 0), 4)
+        #     cv2.putText(vis_grid, "D* Path", (legend_x + 25, legend_y + 140), font, 0.4, text_color, 1)
+        #     
+        #     cv2.rectangle(vis_grid, (legend_x + 10, legend_y + 145), (legend_x + 20, legend_y + 155), (0, 255, 0), -1)
+        #     cv2.putText(vis_grid, "Start", (legend_x + 25, legend_y + 155), font, 0.4, text_color, 1)
         
         # Resize for consistent web display
         target_height = 500  # Increased for better visibility
@@ -711,7 +1391,8 @@ class SimpleLineFollower:
                                 # Unknown object - be cautious and treat as obstacle
                                 logging.info(f"Unknown object detected: {class_name} (confidence: {confidence:.2f})")
                                 return True
-                return False
+            
+            return False
             
         except Exception as e:
             logging.debug(f"Object detection error: {e}")
@@ -721,10 +1402,18 @@ class SimpleLineFollower:
         """Main control loop with visual odometry and navigation"""
         logging.info("Starting pattern-based line follower with visual navigation")
         
-        if not self.esp32.connect():
-            logging.error("Failed to connect to ESP32")
-            return
-                
+        # Try to connect to ESP32 in a separate thread to avoid blocking
+        def connect_esp32():
+            esp32_connected = self.esp32.connect()
+            if esp32_connected:
+                print("✅ ESP32 connected successfully!")
+            else:
+                print("❌ ESP32 connection failed - continuing without motor control")
+        
+        # Start ESP32 connection in background
+        esp32_thread = threading.Thread(target=connect_esp32, daemon=True)
+        esp32_thread.start()
+        
         try:
             while True:
                 # Get camera frame for both object detection and visual odometry
@@ -735,12 +1424,7 @@ class SimpleLineFollower:
                         # Update position tracking
                         x, y, heading = self.update_position_tracking(frame)
                         
-                        # Debug position info
-                        if not hasattr(self, '_last_position_debug'):
-                            self._last_position_debug = 0
-                        if time.time() - self._last_position_debug > 2.0:
-                            print(f"Position: ({x:.2f}, {y:.2f}), Heading: {heading:.2f} rad")
-                            self._last_position_debug = time.time()
+                        # Position tracking active
                 
                 # Check for objects every few cycles (not every cycle for performance)
                 if not hasattr(self, '_detection_counter'):
@@ -804,7 +1488,7 @@ class SimpleLineFollower:
                                 return True
             
             return False
-            
+
         except Exception as e:
             logging.debug(f"Object detection error: {e}")
             return False
@@ -948,24 +1632,7 @@ class SimpleLineFollower:
         # Execute the determined state
         self.execute_state()
         
-        # Debug output
-        if not hasattr(self, '_last_debug'):
-            self._last_debug = 0
-        if time.time() - self._last_debug > 1.0:
-            pattern = ''.join(map(str, sensors))
-            
-            # Determine current mode
-            if self.navigation_mode:
-                nav_command = self.get_navigation_command()
-                if nav_command:
-                    mode = f"NAV->{nav_command}"
-                else:
-                    mode = "NAV->LINE"  # Navigation falling back to line following
-            else:
-                mode = "LINE"
-            
-            print(f"Mode: {mode}, State: {self.state}, Pattern: {pattern}, Sensors: {sensors}")
-            self._last_debug = time.time()
+        # Control loop active
     
     def execute_state(self):
         """Execute motor commands based on current state"""
@@ -1009,9 +1676,6 @@ class SimpleLineFollower:
             else:
                 left_speed = self.search_speed   # Spin right
                 right_speed = -self.search_speed
-        else:
-                left_speed = self.search_speed   # Spin right
-                right_speed = -self.search_speed
         
         # Send commands to ESP32
         self.esp32.send_motor_speeds(left_speed, right_speed)
@@ -1048,7 +1712,10 @@ class SimpleLineFollower:
         self.mapper.robot_y = vo_y
         self.mapper.robot_heading = vo_heading
         
-        # Also update mapper with sensor data for waypoint progression
+        # Update D* Lite pathfinder with new position
+        self.mapper.update_robot_position_dstar((vo_x, vo_y))
+        
+        # Also update mapper with sensor data for waypoint progression (fallback)
         self.mapper.update_robot_position_from_sensors(self.esp32.sensors)
         
         # Use visual odometry position as the authoritative position
@@ -1056,57 +1723,81 @@ class SimpleLineFollower:
         return vo_x, vo_y, vo_heading
     
     def get_navigation_command(self):
-        """Get navigation command when in navigation mode"""
+        """Get navigation command - prioritize D* Lite over line following"""
         if not self.navigation_mode:
             return None
         
         x, y, heading = self.current_position
         
-        # Get next waypoint
+        # Priority 1: Use D* Lite pathfinding if enabled
+        if self.mapper.use_dstar_navigation:
+            waypoint = self.mapper.get_current_dstar_waypoint()
+            if waypoint is None:
+                logging.info("D* Navigation: Goal reached! Disabling D* navigation")
+                self.mapper.disable_dstar_navigation()
+                return None
+            
+            target_x, target_y = waypoint
+            
+            # Calculate distance to target
+            distance = math.sqrt((target_x - x)**2 + (target_y - y)**2)
+            
+            # Get direction to navigate
+            direction = self.get_navigation_direction(x, y, heading, target_x, target_y)
+            
+            # D* navigation active
+            
+            return direction
+        
+        # Priority 2: Fallback to line following navigation
         waypoint = self.mapper.get_current_waypoint()
         if waypoint is None:
             logging.info("All waypoints reached! Restarting waypoint sequence")
-            # Restart waypoint sequence instead of disabling navigation
             self.mapper.current_waypoint = 0
             waypoint = self.mapper.get_current_waypoint()
             if waypoint is None:
-                # If still no waypoints, temporarily use line following
                 return None
         
         target_x, target_y = waypoint
         
-        # Get direction to navigate
-        direction = self.get_navigation_direction(x, y, heading, target_x, target_y)
-        
         # Calculate distance to target
         distance = math.sqrt((target_x - x)**2 + (target_y - y)**2)
         
+        # Get direction to navigate
+        direction = self.get_navigation_direction(x, y, heading, target_x, target_y)
+        
         # For maze navigation, prioritize navigation over line following at longer distances
-        # Only fall back to line following when very close or if we're lost
         if distance < 0.08:  # Within 8cm, use line following for final precision
             return None  # Fall back to line following
         
-        # If distance is getting larger (we might be going wrong way), fall back temporarily
-        if hasattr(self, '_last_distance') and distance > self._last_distance * 1.5:
-            if not hasattr(self, '_fallback_counter'):
-                self._fallback_counter = 0
-            self._fallback_counter += 1
-            if self._fallback_counter > 10:  # Fall back for a few cycles
-                self._fallback_counter = 0
-                return None
-        else:
-            self._fallback_counter = 0
-        
-        self._last_distance = distance
-        
-        # Debug output (less frequent)
-        if not hasattr(self, '_last_nav_debug'):
-            self._last_nav_debug = 0
-        if time.time() - self._last_nav_debug > 3.0:  # Every 3 seconds
-            logging.info(f"Navigating to waypoint {self.mapper.current_waypoint}: ({target_x:.2f}, {target_y:.2f}), distance: {distance:.2f}m, direction: {direction}")
-            self._last_nav_debug = time.time()
+        # Line navigation active
         
         return direction
+    
+    def set_navigation_goal(self, start_pos: Tuple[float, float], goal_pos: Tuple[float, float]):
+        """Set start and goal positions for D* Lite navigation"""
+        try:
+            path = self.mapper.set_start_goal_positions(start_pos, goal_pos)
+            logging.info(f"D* Navigation: Path set with {len(path)} waypoints")
+            return path
+        except Exception as e:
+            logging.error(f"Failed to set navigation goal: {e}")
+            return None
+    
+    def get_available_navigation_positions(self):
+        """Get available positions for start/goal selection"""
+        return self.mapper.get_corner_positions()
+    
+    def enable_dstar_navigation(self):
+        """Enable D* Lite navigation mode"""
+        self.mapper.enable_dstar_navigation()
+        self.navigation_mode = True
+        logging.info("D* Lite navigation enabled")
+    
+    def disable_dstar_navigation(self):
+        """Disable D* Lite navigation and use line following"""
+        self.mapper.disable_dstar_navigation()
+        logging.info("D* Lite navigation disabled, using line following")
 
     def get_navigation_direction(self, x, y, heading, target_x, target_y):
         """Get navigation direction based on current position and target"""
@@ -1150,6 +1841,11 @@ class WebVisualization:
         def index():
             return render_template('index.html')
         
+        @self.app.route('/navigation')
+        def navigation_control():
+            """D* navigation control interface"""
+            return render_template('navigation.html')
+        
         @self.app.route('/test')
         def test_map():
             """Test page for debugging map display"""
@@ -1164,6 +1860,14 @@ class WebVisualization:
             # Get maze visualization
             grid_image = self.create_grid_visualization()
             
+            # Get D* navigation info
+            dstar_info = {
+                'enabled': self.robot.mapper.use_dstar_navigation,
+                'start_position': self.robot.mapper.start_position,
+                'goal_position': self.robot.mapper.goal_position,
+                'path_length': len(self.robot.mapper.optimal_path) if self.robot.mapper.optimal_path else 0
+            }
+            
             data = {
                 'position': {
                     'x': float(x),
@@ -1174,10 +1878,83 @@ class WebVisualization:
                 'sensors': self.robot.esp32.sensors,
                 'current_waypoint': self.robot.mapper.current_waypoint,
                 'total_waypoints': len(self.robot.mapper.waypoints),
-                'grid_image': grid_image
+                'grid_image': grid_image,
+                'dstar_navigation': dstar_info
             }
             
             return jsonify(data)
+        
+        @self.app.route('/api/navigation/positions')
+        def get_navigation_positions():
+            """Get available start/goal positions"""
+            positions = self.robot.get_available_navigation_positions()
+            return jsonify({
+                'positions': [
+                    {'x': pos[0], 'y': pos[1], 'name': pos[2]} 
+                    for pos in positions
+                ]
+            })
+        
+        @self.app.route('/api/navigation/set_goal', methods=['POST'])
+        def set_navigation_goal():
+            """Set start and goal positions for D* navigation"""
+            try:
+                data = request.get_json()
+                start_x = float(data['start_x'])
+                start_y = float(data['start_y'])
+                goal_x = float(data['goal_x'])
+                goal_y = float(data['goal_y'])
+                
+                path = self.robot.set_navigation_goal((start_x, start_y), (goal_x, goal_y))
+                
+                if path:
+                    return jsonify({
+                        'success': True,
+                        'message': f'D* path set with {len(path)} waypoints',
+                        'path_length': len(path),
+                        'path': [{'x': p[0], 'y': p[1]} for p in path[:10]]  # First 10 waypoints
+                    })
+                else:
+                    return jsonify({
+                        'success': False,
+                        'message': 'Failed to compute path'
+                    })
+                    
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'message': f'Error: {str(e)}'
+                })
+        
+        @self.app.route('/api/navigation/enable', methods=['POST'])
+        def enable_navigation():
+            """Enable D* navigation"""
+            try:
+                self.robot.enable_dstar_navigation()
+                return jsonify({
+                    'success': True,
+                    'message': 'D* navigation enabled'
+                })
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'message': f'Error: {str(e)}'
+                })
+        
+        @self.app.route('/api/navigation/disable', methods=['POST'])
+        def disable_navigation():
+            """Disable D* navigation"""
+            try:
+                self.robot.disable_dstar_navigation()
+                return jsonify({
+                    'success': True,
+                    'message': 'D* navigation disabled'
+                })
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'message': f'Error: {str(e)}'
+                })
         
         @self.app.route('/video_feed')
         def video_feed():
@@ -1227,16 +2004,16 @@ class WebVisualization:
                             frame_bytes = buffer.tobytes()
                             yield (b'--frame\r\n'
                                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-                else:
-                    # No camera - send placeholder
-                    placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
-                    cv2.putText(placeholder, 'NO CAMERA DETECTED', (180, 240), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-                    ret, buffer = cv2.imencode('.jpg', placeholder)
-                    if ret:
-                        frame_bytes = buffer.tobytes()
-                        yield (b'--frame\r\n'
-                               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                        else:
+                            # No camera - send placeholder
+                            placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
+                            cv2.putText(placeholder, 'NO CAMERA DETECTED', (180, 240), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                            ret, buffer = cv2.imencode('.jpg', placeholder)
+                            if ret:
+                                frame_bytes = buffer.tobytes()
+                                yield (b'--frame\r\n'
+                                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                 
                 time.sleep(0.1)  # 10 FPS for web streaming
                 
@@ -1304,28 +2081,19 @@ class WebVisualization:
     def create_grid_visualization(self):
         """Create visualization of the predefined maze"""
         try:
-            print("DEBUG: Starting map visualization creation...")
-            
             # Get the maze visualization from mapper
             rgb_grid = self.robot.mapper.get_grid_visualization()
-            print(f"DEBUG: Grid shape: {rgb_grid.shape}")
-            print(f"DEBUG: Grid type: {type(rgb_grid)}")
             
             # Resize for better visibility (make it bigger)
             rgb_grid = cv2.resize(rgb_grid, (500, 400), interpolation=cv2.INTER_NEAREST)
-            print(f"DEBUG: Resized grid shape: {rgb_grid.shape}")
             
             # Convert to base64
             _, buffer = cv2.imencode('.png', rgb_grid)
             img_base64 = base64.b64encode(buffer).decode('utf-8')
-            print(f"DEBUG: Base64 length: {len(img_base64)}")
             
             return img_base64
             
         except Exception as e:
-            print(f"DEBUG: Error creating grid visualization: {e}")
-            logging.error(f"Error creating grid visualization: {e}")
-            
             # Return a simple test image as fallback
             test_img = np.full((400, 500, 3), 64, dtype=np.uint8)  # Dark background
             cv2.putText(test_img, 'MAP ERROR', (150, 200), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
@@ -1333,7 +2101,6 @@ class WebVisualization:
             
             _, buffer = cv2.imencode('.png', test_img)
             fallback_base64 = base64.b64encode(buffer).decode('utf-8')
-            print(f"DEBUG: Fallback image length: {len(fallback_base64)}")
             
             return fallback_base64
     
@@ -1358,15 +2125,20 @@ if __name__ == "__main__":
     # Create and start web visualization automatically
     try:
         web_viz = WebVisualization(robot)
-        print("Cyberpunk web visualization initialized")
+        print("✅ Cyberpunk web visualization initialized")
         
         # Start web server automatically in background
         web_thread = threading.Thread(target=web_viz.start_web_server, daemon=True)
         web_thread.start()
-        print("Cyberpunk dashboard started at http://0.0.0.0:5000")
+        print("✅ Cyberpunk dashboard started at http://0.0.0.0:5000")
     except Exception as e:
-        print(f"Could not initialize web visualization: {e}")
+        print(f"❌ Could not initialize web visualization: {e}")
         web_viz = None
+    
+    # Setup D* navigation with predefined start/goal positions
+    print("\n" + "="*60)
+    setup_navigation(robot)
+    print("="*60)
     
     print("╔════════════════════════════════════════════════════════════╗")
     print("║            CYBERPUNK ROBOT NAVIGATION MATRIX              ║")
@@ -1387,4 +2159,4 @@ if __name__ == "__main__":
         print("\nSYSTEM SHUTDOWN INITIATED...")
         robot.stop()
         if web_viz:
-            web_viz.stop() 
+            web_viz.stop()

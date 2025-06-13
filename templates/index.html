@@ -378,12 +378,205 @@
             }
         }
 
+        // D* Navigation click-to-select functionality
+        let navigationState = {
+            settingStart: false,
+            settingGoal: false,
+            startPosition: null,
+            goalPosition: null
+        };
+
+        function setupMapClickHandlers() {
+            const mapContainer = document.querySelector('.map-container');
+            if (!mapContainer) return;
+
+            // Add click handler to map container
+            mapContainer.addEventListener('click', handleMapClick);
+            
+            // Add navigation control buttons
+            addNavigationControls();
+        }
+
+        function addNavigationControls() {
+            const mapPanel = document.querySelector('.map-panel');
+            if (!mapPanel) return;
+
+            // Check if controls already exist
+            if (mapPanel.querySelector('.nav-controls')) return;
+
+            const controlsHTML = `
+                <div class="nav-controls" style="margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button id="set-start-btn" class="nav-btn" style="background: #00ff00; color: #000; border: none; padding: 8px 12px; border-radius: 3px; cursor: pointer; font-weight: bold;">
+                        SET START
+                    </button>
+                    <button id="set-goal-btn" class="nav-btn" style="background: #ff0000; color: #fff; border: none; padding: 8px 12px; border-radius: 3px; cursor: pointer; font-weight: bold;">
+                        SET GOAL
+                    </button>
+                    <button id="start-nav-btn" class="nav-btn" style="background: #0066ff; color: #fff; border: none; padding: 8px 12px; border-radius: 3px; cursor: pointer; font-weight: bold;" disabled>
+                        START D* NAV
+                    </button>
+                    <button id="stop-nav-btn" class="nav-btn" style="background: #ff6600; color: #fff; border: none; padding: 8px 12px; border-radius: 3px; cursor: pointer; font-weight: bold;">
+                        STOP NAV
+                    </button>
+                </div>
+                <div id="nav-status" style="margin-top: 10px; padding: 8px; background: rgba(0, 255, 255, 0.1); border: 1px solid #00ffff; border-radius: 3px; font-size: 0.9em; color: #00ffff;">
+                    Click SET START, then click on map to set starting position
+                </div>
+            `;
+
+            mapPanel.insertAdjacentHTML('beforeend', controlsHTML);
+
+            // Add event listeners
+            document.getElementById('set-start-btn').addEventListener('click', () => {
+                navigationState.settingStart = true;
+                navigationState.settingGoal = false;
+                updateNavigationUI();
+                updateNavStatus('Click on the map to set START position');
+            });
+
+            document.getElementById('set-goal-btn').addEventListener('click', () => {
+                navigationState.settingStart = false;
+                navigationState.settingGoal = true;
+                updateNavigationUI();
+                updateNavStatus('Click on the map to set GOAL position');
+            });
+
+            document.getElementById('start-nav-btn').addEventListener('click', startDStarNavigation);
+            document.getElementById('stop-nav-btn').addEventListener('click', stopDStarNavigation);
+        }
+
+        function handleMapClick(event) {
+            const mapImg = event.target.closest('.map-image');
+            if (!mapImg) return;
+
+            // Get click coordinates relative to the image
+            const rect = mapImg.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+
+            // Convert pixel coordinates to world coordinates
+            // Map image is 500x400 pixels, world is ~2.5m x 1.8m (21x15 cells * 0.12m)
+            const worldX = (x / rect.width) * 2.52; // 21 cells * 0.12m
+            const worldY = (y / rect.height) * 1.8;  // 15 cells * 0.12m
+
+            console.log(`Map clicked at pixel (${x.toFixed(0)}, ${y.toFixed(0)}) = world (${worldX.toFixed(2)}, ${worldY.toFixed(2)})`);
+
+            if (navigationState.settingStart) {
+                navigationState.startPosition = { x: worldX, y: worldY };
+                navigationState.settingStart = false;
+                updateNavStatus(`START set at (${worldX.toFixed(2)}, ${worldY.toFixed(2)}). Now click SET GOAL.`);
+                updateNavigationUI();
+            } else if (navigationState.settingGoal) {
+                navigationState.goalPosition = { x: worldX, y: worldY };
+                navigationState.settingGoal = false;
+                updateNavStatus(`GOAL set at (${worldX.toFixed(2)}, ${worldY.toFixed(2)}). Ready to start navigation!`);
+                updateNavigationUI();
+            } else {
+                updateNavStatus('Click SET START or SET GOAL first, then click on the map');
+            }
+        }
+
+        function updateNavigationUI() {
+            const setStartBtn = document.getElementById('set-start-btn');
+            const setGoalBtn = document.getElementById('set-goal-btn');
+            const startNavBtn = document.getElementById('start-nav-btn');
+
+            if (!setStartBtn || !setGoalBtn || !startNavBtn) return;
+
+            // Update button states
+            setStartBtn.style.background = navigationState.settingStart ? '#66ff66' : (navigationState.startPosition ? '#00aa00' : '#00ff00');
+            setGoalBtn.style.background = navigationState.settingGoal ? '#ff6666' : (navigationState.goalPosition ? '#aa0000' : '#ff0000');
+
+            // Enable start navigation if both positions are set
+            const canStart = navigationState.startPosition && navigationState.goalPosition;
+            startNavBtn.disabled = !canStart;
+            startNavBtn.style.background = canStart ? '#0066ff' : '#666666';
+            startNavBtn.style.cursor = canStart ? 'pointer' : 'not-allowed';
+        }
+
+        function updateNavStatus(message) {
+            const statusDiv = document.getElementById('nav-status');
+            if (statusDiv) {
+                statusDiv.textContent = message;
+                statusDiv.style.background = 'rgba(0, 255, 255, 0.2)';
+                setTimeout(() => {
+                    statusDiv.style.background = 'rgba(0, 255, 255, 0.1)';
+                }, 1000);
+            }
+        }
+
+        function startDStarNavigation() {
+            if (!navigationState.startPosition || !navigationState.goalPosition) {
+                updateNavStatus('ERROR: Both START and GOAL positions must be set!');
+                return;
+            }
+
+            const requestData = {
+                start_x: navigationState.startPosition.x,
+                start_y: navigationState.startPosition.y,
+                goal_x: navigationState.goalPosition.x,
+                goal_y: navigationState.goalPosition.y
+            };
+
+            updateNavStatus('Starting D* Lite navigation...');
+
+            fetch('/api/navigation/set_goal', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(requestData)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    updateNavStatus(`D* Navigation started! Path: ${data.path_length} waypoints`);
+                    
+                    // Enable navigation
+                    return fetch('/api/navigation/enable', { method: 'POST' });
+                } else {
+                    throw new Error(data.message || 'Failed to set navigation goal');
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    updateNavStatus('D* Navigation ACTIVE - Robot following optimal path');
+                } else {
+                    throw new Error(data.message || 'Failed to enable navigation');
+                }
+            })
+            .catch(error => {
+                console.error('Navigation error:', error);
+                updateNavStatus(`ERROR: ${error.message}`);
+            });
+        }
+
+        function stopDStarNavigation() {
+            fetch('/api/navigation/disable', { method: 'POST' })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    updateNavStatus('D* Navigation STOPPED - Robot using line following');
+                } else {
+                    updateNavStatus(`Stop failed: ${data.message}`);
+                }
+            })
+            .catch(error => {
+                console.error('Stop navigation error:', error);
+                updateNavStatus(`ERROR: ${error.message}`);
+            });
+        }
+
         // Initialize
         createMatrixEffect();
         updateTimestamp();
         setInterval(updateTimestamp, 1000);
         setInterval(updateData, 500);
         updateData(); // Initial load
+        
+        // Setup map click handlers after a short delay to ensure DOM is ready
+        setTimeout(setupMapClickHandlers, 1000);
     </script>
 </body>
 </html> 

@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>D* NAVIGATION CONTROL</title>
+    <style>
+        body {
+            background: linear-gradient(135deg, #001122, #002244);
+            color: #00ffff;
+            font-family: 'Courier New', monospace;
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            border: 2px solid #00ffff;
+            padding: 20px;
+            border-radius: 10px;
+            background: rgba(0, 255, 255, 0.1);
+        }
+        
+        .control-panel {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .panel {
+            border: 2px solid #00ffff;
+            padding: 20px;
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+        
+        .panel h3 {
+            color: #ff0066;
+            margin-top: 0;
+            text-align: center;
+        }
+        
+        .position-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin: 15px 0;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .position-btn {
+            background: linear-gradient(45deg, #003366, #006699);
+            border: 1px solid #00ffff;
+            color: #00ffff;
+            padding: 8px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+            transition: all 0.3s;
+            text-align: center;
+        }
+        
+        .position-btn:hover {
+            background: linear-gradient(45deg, #006699, #0099cc);
+            box-shadow: 0 0 10px #00ffff;
+        }
+        
+        .position-btn.selected {
+            background: linear-gradient(45deg, #ff0066, #ff3399);
+            border-color: #ff0066;
+        }
+        
+        .action-btn {
+            background: linear-gradient(45deg, #ff0066, #ff3399);
+            border: 2px solid #ff0066;
+            color: white;
+            padding: 15px 30px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-family: 'Courier New', monospace;
+            font-size: 16px;
+            font-weight: bold;
+            margin: 10px 5px;
+            transition: all 0.3s;
+        }
+        
+        .action-btn:hover {
+            box-shadow: 0 0 15px #ff0066;
+            transform: translateY(-2px);
+        }
+        
+        .action-btn:disabled {
+            background: #666;
+            border-color: #666;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .status {
+            border: 2px solid #00ffff;
+            padding: 20px;
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.5);
+            margin-bottom: 20px;
+        }
+        
+        .map-container {
+            border: 2px solid #00ffff;
+            padding: 10px;
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.5);
+            text-align: center;
+        }
+        
+        .map-container img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 5px;
+        }
+        
+        .coordinates {
+            font-size: 12px;
+            color: #ffff00;
+            margin-top: 5px;
+        }
+        
+        .message {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        
+        .message.success {
+            background: rgba(0, 255, 0, 0.2);
+            border: 1px solid #00ff00;
+            color: #00ff00;
+        }
+        
+        .message.error {
+            background: rgba(255, 0, 0, 0.2);
+            border: 1px solid #ff0000;
+            color: #ff0000;
+        }
+        
+        .message.info {
+            background: rgba(0, 255, 255, 0.2);
+            border: 1px solid #00ffff;
+            color: #00ffff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 D* LITE NAVIGATION CONTROL 🎯</h1>
+            <p>Advanced pathfinding for autonomous robot navigation</p>
+        </div>
+        
+        <div class="control-panel">
+            <div class="panel">
+                <h3>📍 START POSITION</h3>
+                <div class="position-grid" id="start-positions">
+                    <!-- Positions will be loaded here -->
+                </div>
+                <div class="coordinates" id="start-coords">No position selected</div>
+            </div>
+            
+            <div class="panel">
+                <h3>🎯 GOAL POSITION</h3>
+                <div class="position-grid" id="goal-positions">
+                    <!-- Positions will be loaded here -->
+                </div>
+                <div class="coordinates" id="goal-coords">No position selected</div>
+            </div>
+        </div>
+        
+        <div class="panel" style="text-align: center;">
+            <h3>🚀 NAVIGATION CONTROL</h3>
+            <button class="action-btn" id="set-path-btn" onclick="setNavigationPath()" disabled>
+                SET D* PATH
+            </button>
+            <button class="action-btn" id="enable-nav-btn" onclick="enableNavigation()" disabled>
+                ENABLE NAVIGATION
+            </button>
+            <button class="action-btn" id="disable-nav-btn" onclick="disableNavigation()">
+                DISABLE NAVIGATION
+            </button>
+        </div>
+        
+        <div class="status" id="status-panel">
+            <h3>📊 NAVIGATION STATUS</h3>
+            <div id="nav-status">Loading...</div>
+        </div>
+        
+        <div class="map-container">
+            <h3>🗺️ LIVE NAVIGATION MAP</h3>
+            <div id="map-display">
+                <p>Loading map...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedStart = null;
+        let selectedGoal = null;
+        let availablePositions = [];
+        
+        // Load available positions
+        async function loadPositions() {
+            try {
+                const response = await fetch('/api/navigation/positions');
+                const data = await response.json();
+                availablePositions = data.positions;
+                
+                renderPositions();
+            } catch (error) {
+                console.error('Failed to load positions:', error);
+            }
+        }
+        
+        function renderPositions() {
+            const startContainer = document.getElementById('start-positions');
+            const goalContainer = document.getElementById('goal-positions');
+            
+            startContainer.innerHTML = '';
+            goalContainer.innerHTML = '';
+            
+            availablePositions.forEach((pos, index) => {
+                // Start position button
+                const startBtn = document.createElement('button');
+                startBtn.className = 'position-btn';
+                startBtn.textContent = pos.name;
+                startBtn.onclick = () => selectStart(index);
+                startContainer.appendChild(startBtn);
+                
+                // Goal position button
+                const goalBtn = document.createElement('button');
+                goalBtn.className = 'position-btn';
+                goalBtn.textContent = pos.name;
+                goalBtn.onclick = () => selectGoal(index);
+                goalContainer.appendChild(goalBtn);
+            });
+        }
+        
+        function selectStart(index) {
+            selectedStart = availablePositions[index];
+            
+            // Update UI
+            document.querySelectorAll('#start-positions .position-btn').forEach((btn, i) => {
+                btn.classList.toggle('selected', i === index);
+            });
+            
+            document.getElementById('start-coords').textContent = 
+                `(${selectedStart.x.toFixed(2)}, ${selectedStart.y.toFixed(2)})`;
+            
+            updateButtons();
+        }
+        
+        function selectGoal(index) {
+            selectedGoal = availablePositions[index];
+            
+            // Update UI
+            document.querySelectorAll('#goal-positions .position-btn').forEach((btn, i) => {
+                btn.classList.toggle('selected', i === index);
+            });
+            
+            document.getElementById('goal-coords').textContent = 
+                `(${selectedGoal.x.toFixed(2)}, ${selectedGoal.y.toFixed(2)})`;
+            
+            updateButtons();
+        }
+        
+        function updateButtons() {
+            const setPathBtn = document.getElementById('set-path-btn');
+            const enableNavBtn = document.getElementById('enable-nav-btn');
+            
+            setPathBtn.disabled = !(selectedStart && selectedGoal);
+            enableNavBtn.disabled = !(selectedStart && selectedGoal);
+        }
+        
+        async function setNavigationPath() {
+            if (!selectedStart || !selectedGoal) {
+                showMessage('Please select both start and goal positions', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/navigation/set_goal', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        start_x: selectedStart.x,
+                        start_y: selectedStart.y,
+                        goal_x: selectedGoal.x,
+                        goal_y: selectedGoal.y
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showMessage(`✅ ${data.message}`, 'success');
+                } else {
+                    showMessage(`❌ ${data.message}`, 'error');
+                }
+            } catch (error) {
+                showMessage(`❌ Error: ${error.message}`, 'error');
+            }
+        }
+        
+        async function enableNavigation() {
+            try {
+                const response = await fetch('/api/navigation/enable', {
+                    method: 'POST'
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showMessage(`✅ ${data.message}`, 'success');
+                } else {
+                    showMessage(`❌ ${data.message}`, 'error');
+                }
+            } catch (error) {
+                showMessage(`❌ Error: ${error.message}`, 'error');
+            }
+        }
+        
+        async function disableNavigation() {
+            try {
+                const response = await fetch('/api/navigation/disable', {
+                    method: 'POST'
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showMessage(`✅ ${data.message}`, 'success');
+                } else {
+                    showMessage(`❌ ${data.message}`, 'error');
+                }
+            } catch (error) {
+                showMessage(`❌ Error: ${error.message}`, 'error');
+            }
+        }
+        
+        function showMessage(text, type) {
+            const statusPanel = document.getElementById('status-panel');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+            messageDiv.textContent = text;
+            
+            statusPanel.appendChild(messageDiv);
+            
+            // Remove message after 5 seconds
+            setTimeout(() => {
+                messageDiv.remove();
+            }, 5000);
+        }
+        
+        async function updateStatus() {
+            try {
+                const response = await fetch('/api/robot_data');
+                const data = await response.json();
+                
+                const statusDiv = document.getElementById('nav-status');
+                const dstar = data.dstar_navigation;
+                
+                statusDiv.innerHTML = `
+                    <p><strong>D* Navigation:</strong> ${dstar.enabled ? '🟢 ENABLED' : '🔴 DISABLED'}</p>
+                    <p><strong>Robot Position:</strong> (${data.position.x.toFixed(2)}, ${data.position.y.toFixed(2)})</p>
+                    <p><strong>Robot State:</strong> ${data.state}</p>
+                    <p><strong>Path Length:</strong> ${dstar.path_length} waypoints</p>
+                `;
+                
+                // Update map
+                if (data.grid_image) {
+                    document.getElementById('map-display').innerHTML = 
+                        `<img src="data:image/png;base64,${data.grid_image}" alt="Navigation Map">`;
+                }
+                
+            } catch (error) {
+                console.error('Failed to update status:', error);
+            }
+        }
+        
+        // Initialize
+        loadPositions();
+        updateStatus();
+        
+        // Update status every 2 seconds
+        setInterval(updateStatus, 2000);
+    </script>
+</body>
+</html> 
