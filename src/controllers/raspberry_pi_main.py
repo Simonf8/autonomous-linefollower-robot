@@ -42,6 +42,12 @@ WHEEL_RADIUS_M = 0.0325         # Wheel radius in meters (3.25 cm)
 AXLE_LENGTH_M = 0.15            # Distance between wheels in meters (15 cm)
 TICKS_PER_REVOLUTION = 40       # Encoder ticks for one full wheel revolution
 
+# -- PID Controller Configuration --
+# These gains MUST be tuned for your specific robot for smooth line following.
+KP = 0.015               # Proportional gain: How strongly to react to current error.
+KI = 0.008               # Integral gain: Corrects for steady-state error over time.
+KD = 0.05                # Derivative gain: Dampens oscillations by anticipating future error.
+
 # -- World Coordinate Configuration (calculated from grid) --
 # World coordinates are calculated from the grid cells, using the center of the cell.
 # The world origin (0,0) is the top-left corner of the maze.
@@ -437,11 +443,15 @@ class RobotController:
         self.state = "PLANNING" # PLANNING, NAVIGATING, AT_INTERSECTION, AVOIDING, GOAL_REACHED
 
         # -- Speed & Control Settings --
-        self.forward_speed = 32 # Slower speed for more reliable line following
+        self.base_speed = 32 # Base motor speed for line following
         self.turn_speed_factor = 0.8
-        self.gentle_turn_factor = 0.68
         self.sharp_turn_speed = 45
         self.waypoint_threshold = 0.12 # 12cm tolerance for reaching a waypoint
+        
+        # -- PID Controller State --
+        self.integral = 0.0
+        self.last_error = 0.0
+        self.pid_last_time = time.time()
         
         # -- Object Detection --
         self.camera = None
@@ -615,7 +625,7 @@ class RobotController:
     def execute_intersection_turn(self, direction: str):
         """Executes a timed turn at an intersection."""
         # Move forward slightly to enter the intersection center
-        self.esp32.send_motor_speeds(self.forward_speed, self.forward_speed)
+        self.esp32.send_motor_speeds(self.base_speed, self.base_speed)
         time.sleep(0.3) # Adjust time as needed
 
         if direction == "LEFT":
@@ -631,49 +641,62 @@ class RobotController:
         self.stop_motors()
         time.sleep(0.2)
 
+        # Reset PID controller after a turn to prevent integral windup from the turn
+        self.integral = 0.0
+        self.last_error = 0.0
+
     def line_follower_control_loop(self):
-        """Single control loop for following a line based on sensor patterns."""
+        """Controls the robot's motors using a PID controller to follow the line."""
         sensors = self.esp32.sensors
-        L2, L1, C, R1, R2 = sensors
         
-        left_speed, right_speed = 0, 0
-
-        # Pattern analysis for line following
-        if not L2 and L1 and C and R1 and not R2: # 01110
-            # Centered or nearly centered
-            left_speed = self.forward_speed
-            right_speed = self.forward_speed
-        elif not L2 and not L1 and C and not R1 and not R2: # 00100
-            # Perfectly centered
-            left_speed = self.forward_speed
-            right_speed = self.forward_speed
-        elif not L2 and not L1 and C and R1 and not R2: # 00110 - Drifting right
-            left_speed = int(self.forward_speed * self.gentle_turn_factor)
-            right_speed = self.forward_speed
-        elif not L2 and L1 and C and not R1 and not R2: # 01100 - Drifting left
-            left_speed = self.forward_speed
-            right_speed = int(self.forward_speed * self.gentle_turn_factor)
-        elif not L2 and not L1 and not C and R1 and R2: # 00011 - Overshot left
-            left_speed = self.forward_speed
-            right_speed = int(self.forward_speed * self.gentle_turn_factor * 0.8) # Stronger correction
-        elif L2 and L1 and not C and not R1 and not R2: # 11000 - Overshot right
-            left_speed = int(self.forward_speed * self.gentle_turn_factor * 0.8) # Stronger correction
-            right_speed = self.forward_speed
-        elif not L2 and not L1 and not C and not R1 and R2: # 00001 - Far right
-            left_speed = self.sharp_turn_speed
-            right_speed = -self.sharp_turn_speed // 2
-        elif L2 and not L1 and not C and not R1 and not R2: # 10000 - Far left
-            left_speed = -self.sharp_turn_speed // 2
-            right_speed = self.sharp_turn_speed
-        elif sum(sensors) == 0:
-            # Lost line, stop for now. A more advanced search could be added here.
-            self.stop_motors()
+        # 1. Calculate the error from the sensor readings
+        # A weighted average is used to get a numeric position value from -2 to 2.
+        # Negative means the line is to the left, positive means to the right.
+        error = 0.0
+        num_active_sensors = sum(sensors)
+        if num_active_sensors > 0:
+            # Weighted average of sensor positions
+            # Sensor indices: 0, 1, 2, 3, 4
+            # Corresponding weights: -2, -1, 0, 1, 2
+            error = ( (sensors[0] * -2) + (sensors[1] * -1) + (sensors[2] * 0) + (sensors[3] * 1) + (sensors[4] * 2) ) / num_active_sensors
+            self.last_error = error
         else:
-            # Default to gentle forward if pattern is unusual but line is present
-            left_speed = self.forward_speed
-            right_speed = self.forward_speed
+            # If the line is lost, use the last known error to decide which way to turn.
+            # A large error value will cause a sharp turn in that direction.
+            if self.last_error > 0:
+                error = 2.5 
+            elif self.last_error < 0:
+                error = -2.5
+            # If last_error is 0, it will just continue straight briefly.
+        
+        # 2. PID Calculation
+        current_time = time.time()
+        dt = current_time - self.pid_last_time
+        if dt == 0: dt = 1e-6 # Avoid division by zero
 
-        self.esp32.send_motor_speeds(left_speed, right_speed)
+        # Integral term (with anti-windup)
+        self.integral += error * dt
+        self.integral = max(min(self.integral, 50), -50) # Clamp integral to prevent windup
+
+        # Derivative term
+        derivative = (error - self.last_error) / dt
+        
+        self.last_error = error
+        self.pid_last_time = current_time
+        
+        # 3. Calculate motor speed correction
+        correction = (KP * error) + (KI * self.integral) + (KD * derivative)
+        
+        # 4. Apply correction to motor speeds
+        left_speed = self.base_speed - correction
+        right_speed = self.base_speed + correction
+        
+        # Clamp motor speeds to a safe range (e.g., -60 to 60)
+        max_speed = 60
+        left_speed = max(min(left_speed, max_speed), -max_speed)
+        right_speed = max(min(right_speed, max_speed), -max_speed)
+
+        self.esp32.send_motor_speeds(int(left_speed), int(right_speed))
 
     def navigate_to_point(self, target_x, target_y):
         """Steers the robot towards a specific world coordinate."""
@@ -693,9 +716,9 @@ class RobotController:
         
         # Slow down if turning sharply
         if abs(heading_error) > math.pi / 4: # 45 degrees
-            forward_speed = self.forward_speed * 0.5
+            forward_speed = self.base_speed * 0.5
         else:
-            forward_speed = self.forward_speed
+            forward_speed = self.base_speed
         
         # Set motor speeds
         left_speed = int(forward_speed - (forward_speed * turn_adjustment))
@@ -1030,7 +1053,7 @@ if __name__ == "__main__":
     print("║            CYBERPUNK ROBOT NAVIGATION MATRIX              ║")
     print("╠════════════════════════════════════════════════════════════╣")
     print("║ > D* Lite pathfinding with dynamic replanning             ║")
-    print("║ > Hybrid Navigation (Line Following + Waypoints)          ║")
+    print("║ > Hybrid Navigation (PID Line Following + Waypoints)      ║")
     print("║ > Odometry-based position tracking                        ║")
     print("║ > YOLOv8n obstacle detection with evasive maneuvers      ║")
     print("║ > Live camera feed with cyberpunk overlay effects        ║")
