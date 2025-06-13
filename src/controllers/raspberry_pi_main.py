@@ -80,9 +80,9 @@ class SimpleLineFollower:
         self.state = "SEARCHING"
         self.last_turn_direction = "right"  # Remember last turn for search
         
-        # Speed settings - balanced immediate corrections
-        self.forward_speed = 42
-        self.gentle_turn_factor = 0.78  # Reduce inner wheel to 78% (immediate but controlled)
+        # Speed settings - immediate but controlled corrections
+        self.forward_speed = 32  # Slower forward speed for better control
+        self.gentle_turn_factor = 0.68  # Immediate but gentle corrections (68% balanced)
         self.sharp_turn_speed = 50
         self.search_speed = 35
         
@@ -121,17 +121,19 @@ class SimpleLineFollower:
             # Pattern: 01110 - Perfect center (3 middle sensors on 5cm tape)
             self.state = "FORWARD"
             
-        elif not L2 and not L1 and C and R1 and not R2:
-            # Pattern: 00110 - Slightly right of center
+        elif not L2 and not L1 and C and not R1 and not R2:
+            # Pattern: 00100 - Only center sensor - PERFECT, go forward
             self.state = "FORWARD"
+            
+        elif not L2 and not L1 and C and R1 and not R2:
+            # Pattern: 00110 - Drifting right, correct LEFT immediately
+            self.state = "TURN_LEFT_GENTLE"
+            self.last_turn_direction = "left"
             
         elif not L2 and L1 and C and not R1 and not R2:
-            # Pattern: 01100 - Slightly left of center
-            self.state = "FORWARD"
-            
-        elif not L2 and not L1 and C and not R1 and not R2:
-            # Pattern: 00100 - Only center sensor (too narrow, but acceptable)
-            self.state = "FORWARD"
+            # Pattern: 01100 - Drifting left, correct RIGHT immediately
+            self.state = "TURN_RIGHT_GENTLE"
+            self.last_turn_direction = "right"
             
         elif not L2 and L1 and C and R1 and R2:
             # Pattern: 01111 - Drifting right (right edge sensor active)
@@ -144,14 +146,14 @@ class SimpleLineFollower:
             self.last_turn_direction = "right"
             
         elif not L2 and not L1 and not C and R1 and R2:
-            # Pattern: 00011 - Off center right, gentle left correction
-            self.state = "TURN_LEFT_GENTLE"
-            self.last_turn_direction = "left"
-            
-        elif L2 and L1 and not C and not R1 and not R2:
-            # Pattern: 11000 - Off center left, gentle right correction
+            # Pattern: 00011 - Robot overshot left, line on right side, turn RIGHT to center
             self.state = "TURN_RIGHT_GENTLE"
             self.last_turn_direction = "right"
+            
+        elif L2 and L1 and not C and not R1 and not R2:
+            # Pattern: 11000 - Robot overshot right, line on left side, turn LEFT to center
+            self.state = "TURN_LEFT_GENTLE"
+            self.last_turn_direction = "left"
             
         elif not L2 and L1 and not C and not R1 and not R2:
             # Pattern: 01000 - Left sensor only, gentle right turn
