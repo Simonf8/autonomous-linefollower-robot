@@ -16,12 +16,16 @@ import heapq
 from typing import List, Tuple, Set, Dict, Optional
 
 # ============================================================================
-# Re-introducing position tracking via wheel odometry.
-# The robot will now track its position based on encoder data from the ESP32.
-# A Mapper class is added for visualizing the robot's position on a grid.
+# Robot Configuration
 # ============================================================================
+# Define the robot's start and end points in world coordinates (meters)
+# and the distance threshold for reaching the goal.
+# NOTE: World coordinates assume the top-left of the maze is at (0, 0).
+START_POSITION = (1.26, 1.74)  # (x, y) starting near grid cell (10, 14)
+START_HEADING = -math.pi / 2   # Start facing UP (negative y-direction)
+GOAL_POSITION = (1.26, 0.3)    # (x, y) goal near grid cell (10, 2)
+GOAL_THRESHOLD = 0.15          # Stop within 15cm of the goal
 
-# Web visualization is now integrated in this file
 WebVisualization = None  # Will be defined below
 
 class ESP32Interface:
@@ -97,16 +101,14 @@ class ESP32Interface:
 class WheelOdometry:
     """Calculates robot position and heading using wheel encoder data."""
 
-    def __init__(self):
+    def __init__(self, initial_pose: Tuple[float, float, float] = (0.0, 0.0, 0.0)):
         # Robot parameters (MUST be calibrated for your specific robot)
         self.WHEEL_RADIUS = 0.0325  # Meters (e.g., 3.25 cm)
         self.AXLE_LENGTH = 0.15    # Meters (distance between wheels)
         self.TICKS_PER_REVOLUTION = 40  # Pulses from encoder for one full wheel turn
 
-        # State variables
-        self.x = 0.0
-        self.y = 0.0
-        self.heading = math.pi / 2  # Start facing "up"
+        # State variables, initialized to the provided start pose
+        self.x, self.y, self.heading = initial_pose
 
         # Previous tick counts
         self.prev_left_ticks = 0
@@ -153,6 +155,7 @@ class Mapper:
         self.robot_heading = 0.0
         self.path_history = []
         self.maze_grid = self.create_maze_grid()
+        self.cell_width_m = 0.12  # Assuming 12cm cells, for coordinate conversion
 
     def create_maze_grid(self):
         """Creates the grid representation of the maze from the simulation."""
@@ -200,32 +203,33 @@ class Mapper:
                 if self.maze_grid[r][c] == 0: # Path
                     cv2.rectangle(vis_img, (c*cell_size, r*cell_size), ((c+1)*cell_size, (r+1)*cell_size), path_color, -1)
         
+        # --- Coordinate Conversion Helper ---
+        def world_to_pixel(world_x, world_y):
+            """Converts world coordinates (meters) to image pixel coordinates."""
+            # Assumes world origin (0,0) is the top-left corner of the maze.
+            world_width_m = maze_w * self.cell_width_m
+            world_height_m = maze_h * self.cell_width_m
+            
+            px = int((world_x / world_width_m) * img_w)
+            py = int((world_y / world_height_m) * img_h)
+            return px, py
+
+        # Draw Start and Goal markers
+        start_px, start_py = world_to_pixel(START_POSITION[0], START_POSITION[1])
+        cv2.circle(vis_img, (start_px, start_py), int(cell_size * 0.5), (0, 255, 0), -1)
+        cv2.putText(vis_img, "S", (start_px - 7, start_py + 7), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
+        
+        goal_px, goal_py = world_to_pixel(GOAL_POSITION[0], GOAL_POSITION[1])
+        cv2.circle(vis_img, (goal_px, goal_py), int(cell_size * 0.5), (0, 0, 255), -1)
+        cv2.putText(vis_img, "G", (goal_px - 7, goal_py + 7), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
+
         # Draw the path history
         if len(self.path_history) > 1:
-            for i in range(1, len(self.path_history)):
-                # Convert world coordinates to pixel coordinates
-                # NOTE: This assumes robot starts at (0,0) world, which might need adjustment
-                # Also, the grid origin is top-left, while odometry might be different.
-                # This is a simple visualization and may need calibration.
-                x1, y1 = self.path_history[i-1]
-                x2, y2 = self.path_history[i]
-
-                # Heuristic to map odometry to grid viz. This WILL need tuning.
-                # Assumes odometry starts at center of a start cell. Let's say (20, 2)
-                start_cell_x, start_cell_y = 20, 2
-                world_origin_x = (start_cell_x + 0.5) * 0.12 # World coordinate of start cell
-                world_origin_y = (start_cell_y + 0.5) * 0.12
-
-                px1 = int(((x1 + world_origin_x) / (maze_w * 0.12)) * img_w)
-                py1 = int(((y1 + world_origin_y) / (maze_h * 0.12)) * img_h)
-                px2 = int(((x2 + world_origin_x) / (maze_w * 0.12)) * img_w)
-                py2 = int(((y2 + world_origin_y) / (maze_h * 0.12)) * img_h)
-
-                cv2.line(vis_img, (px1, py1), (px2, py2), (255, 255, 0), 2) # Yellow trail
+            path_points = np.array([world_to_pixel(x, y) for x, y in self.path_history], dtype=np.int32)
+            cv2.polylines(vis_img, [path_points], isClosed=False, color=(255, 255, 0), thickness=2)
 
         # Draw the robot
-        robot_px = int(((self.robot_x + world_origin_x) / (maze_w * 0.12)) * img_w)
-        robot_py = int(((self.robot_y + world_origin_y) / (maze_h * 0.12)) * img_h)
+        robot_px, robot_py = world_to_pixel(self.robot_x, self.robot_y)
         cv2.circle(vis_img, (robot_px, robot_py), int(cell_size/2), (255, 0, 255), -1) # Magenta robot
 
         # Draw robot heading
@@ -267,9 +271,11 @@ class SimpleLineFollower:
         self.turn_180_start_time = 0
 
         # Position tracking with wheel odometry
-        self.odometry = WheelOdometry()
+        initial_pose = (START_POSITION[0], START_POSITION[1], START_HEADING)
+        self.odometry = WheelOdometry(initial_pose=initial_pose)
         self.mapper = Mapper()
-        self.current_position = (0.0, 0.0, 0.0) # x, y, heading
+        self.current_position = self.odometry.x, self.odometry.y, self.odometry.heading # x, y, heading
+        self.goal_reached = False
 
     def setup_camera_and_yolo(self):
         """Initialize camera and YOLO model"""
@@ -360,7 +366,7 @@ class SimpleLineFollower:
         esp32_thread.start()
         
         try:
-            while True:
+            while not self.goal_reached:
                 # Get camera frame for object detection
                 frame = None
                 if self.camera:
@@ -378,6 +384,15 @@ class SimpleLineFollower:
                 self.control_loop()
                 self.update_position_tracking()
                 
+                # Check if goal is reached
+                dist_to_goal = math.sqrt(
+                    (self.current_position[0] - GOAL_POSITION[0])**2 +
+                    (self.current_position[1] - GOAL_POSITION[1])**2
+                )
+                if dist_to_goal < GOAL_THRESHOLD:
+                    print(f"Goal reached! Distance: {dist_to_goal:.3f}m")
+                    self.goal_reached = True
+
                 time.sleep(0.05)  # 20Hz - stable control
                 
         except KeyboardInterrupt:
