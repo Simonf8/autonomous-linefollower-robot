@@ -48,6 +48,14 @@ KP = 0.015               # Proportional gain: How strongly to react to current e
 KI = 0.008               # Integral gain: Corrects for steady-state error over time.
 KD = 0.05                # Derivative gain: Dampens oscillations by anticipating future error.
 
+# -- Computer Vision Path Detection --
+# Source points for perspective warp (trapezoid in the original image).
+# These points need to be tuned to your camera's mounting angle and position.
+# Format: [top-left, top-right, bottom-right, bottom-left]
+IMG_PATH_SRC_PTS = np.float32([[200, 300], [440, 300], [580, 480], [60, 480]])
+# Destination points for the top-down view.
+IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
+
 # -- World Coordinate Configuration (calculated from grid) --
 # World coordinates are calculated from the grid cells, using the center of the cell.
 # The world origin (0,0) is the top-left corner of the maze.
@@ -458,6 +466,8 @@ class RobotController:
         self.yolo_model = None
         self.setup_camera_and_yolo()
         self.obstacle_detected = False
+        self.visual_turn_cue = "STRAIGHT" # STRAIGHT, CORNER_LEFT, CORNER_RIGHT
+        self.perspective_transform_matrix = None
         
         # -- Position & Mapping --
         initial_pose = (START_POSITION[0], START_POSITION[1], START_HEADING)
@@ -481,7 +491,10 @@ class RobotController:
             # Load YOLO model
             self.yolo_model = YOLO('yolo11n.pt')
             
-            logging.info("Camera and YOLO model initialized successfully")
+            # Create perspective transform for path detection
+            self.perspective_transform_matrix = cv2.getPerspectiveTransform(IMG_PATH_SRC_PTS, IMG_PATH_DST_PTS)
+            
+            logging.info("Camera, YOLO model, and perspective transform initialized successfully")
         except Exception as e:
             logging.error(f"Failed to initialize camera/YOLO: {e}")
             self.camera = None
@@ -524,6 +537,21 @@ class RobotController:
                 # 4. Check if goal is reached
                 self.check_if_goal_reached()
                 
+                # 5. Vision processing (run less frequently)
+                if not hasattr(self, '_vision_counter'): self._vision_counter = 0
+                self._vision_counter += 1
+                if self._vision_counter >= 5: # Check every 5 cycles
+                    self._vision_counter = 0
+                    if self.camera:
+                        ret, frame = self.camera.read()
+                        if ret:
+                            # Run obstacle detection
+                            if self.detect_objects_from_frame(frame) and self.state != "AVOIDING":
+                                self.state = "AVOIDING"
+                            
+                            # Run path shape detection
+                            self.visual_turn_cue = self.detect_path_shape_from_frame(frame)
+
                 time.sleep(0.05) # 20Hz control loop
                 
         except KeyboardInterrupt:
@@ -540,7 +568,7 @@ class RobotController:
             self.current_waypoint_idx = 0
             self.state = "NAVIGATING"
             print(f"Path found! Length: {len(self.path)} waypoints.")
-        else:
+                            else:
             self.state = "NO_PATH"
             print("No path to goal could be found.")
 
@@ -619,7 +647,7 @@ class RobotController:
             return "STRAIGHT"
         elif heading_error > math.pi / 4:
             return "LEFT"
-        else:
+            else:
             return "RIGHT"
     
     def execute_intersection_turn(self, direction: str):
@@ -728,12 +756,12 @@ class RobotController:
 
     def check_for_obstacles(self):
         """Periodically checks for obstacles using YOLO."""
-        if not hasattr(self, '_detection_counter'):
-            self._detection_counter = 0
-        
-        self._detection_counter += 1
+                if not hasattr(self, '_detection_counter'):
+                    self._detection_counter = 0
+                
+                self._detection_counter += 1
         if self._detection_counter >= 5: # Check every 5 cycles
-            self._detection_counter = 0
+                    self._detection_counter = 0
             if self.camera:
                 ret, frame = self.camera.read()
                 if ret:
@@ -777,16 +805,16 @@ class RobotController:
 
     def check_if_goal_reached(self):
         """Checks if the robot is within the goal threshold."""
-        dist_to_goal = math.sqrt(
-            (self.current_position[0] - GOAL_POSITION[0])**2 +
-            (self.current_position[1] - GOAL_POSITION[1])**2
-        )
-        if dist_to_goal < GOAL_THRESHOLD:
-            print(f"Goal reached! Distance: {dist_to_goal:.3f}m")
-            self.goal_reached = True
+                dist_to_goal = math.sqrt(
+                    (self.current_position[0] - GOAL_POSITION[0])**2 +
+                    (self.current_position[1] - GOAL_POSITION[1])**2
+                )
+                if dist_to_goal < GOAL_THRESHOLD:
+                    print(f"Goal reached! Distance: {dist_to_goal:.3f}m")
+                    self.goal_reached = True
             self.state = "GOAL_REACHED"
             self.stop_motors()
-
+    
     def detect_objects_from_frame(self, frame):
         """Detect objects from provided frame (for efficiency)"""
         if not self.yolo_model:
@@ -854,7 +882,7 @@ class RobotController:
     def stop_motors(self):
         """Convenience function to stop motors."""
         self.esp32.send_motor_speeds(0, 0)
-
+    
     def stop(self):
         """Stop the robot and cleanup resources"""
         self.stop_motors()
@@ -865,6 +893,55 @@ class RobotController:
             self.camera.release()
         cv2.destroyAllWindows()
         logging.info("Camera resources cleaned up")
+
+    def detect_path_shape_from_frame(self, frame):
+        """Analyzes the camera frame to detect upcoming corners or path shape."""
+        if self.perspective_transform_matrix is None:
+            return "UNKNOWN"
+
+        try:
+            # 1. Warp the image to a top-down bird's-eye view
+            warped_img = cv2.warpPerspective(frame, self.perspective_transform_matrix, (frame.shape[1], frame.shape[0]))
+            
+            # 2. Convert to grayscale and find edges
+            gray = cv2.cvtColor(warped_img, cv2.COLOR_BGR2GRAY)
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            edges = cv2.Canny(blurred, 50, 150)
+
+            # 3. Use Hough Line Transform to find lines in the path
+            lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=40, minLineLength=50, maxLineGap=20)
+            
+            if lines is None:
+                return "STRAIGHT" # Assume straight if no lines detected
+
+            # 4. Analyze the angles of detected lines to infer path shape
+            left_lines, right_lines = [], []
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                if x2 - x1 == 0: continue # Skip vertical lines to avoid division by zero
+                
+                angle = np.rad2deg(np.arctan2(y2 - y1, x2 - x1))
+                
+                # Filter lines based on their angle to classify them as left or right boundaries
+                if angle > -80 and angle < -10:
+                    left_lines.append(line)
+                elif angle > 10 and angle < 80:
+                    right_lines.append(line)
+
+            # 5. Simple heuristic to decide if a corner is ahead.
+            # If there's a strong imbalance in detected left vs. right lines, it implies a turn.
+            if len(right_lines) > len(left_lines) + 5: # More vertical lines on right -> left turn
+                logging.info("Visual Cue: Possible LEFT turn ahead.")
+                return "CORNER_LEFT"
+            elif len(left_lines) > len(right_lines) + 5: # More vertical lines on left -> right turn
+                logging.info("Visual Cue: Possible RIGHT turn ahead.")
+                return "CORNER_RIGHT"
+                
+            return "STRAIGHT"
+
+        except Exception as e:
+            logging.debug(f"Path shape detection error: {e}")
+            return "UNKNOWN"
 
 class WebVisualization:
     """Flask web app for visualizing robot state with cyberpunk theme"""
