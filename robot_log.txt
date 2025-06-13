@@ -1,0 +1,1616 @@
+INFO:root:Camera and YOLO model initialized successfully
+INFO:root:Starting cyberpunk web dashboard at http://0.0.0.0:5000
+INFO:root:Starting pattern-based line follower with visual navigation
+Extracted 14 line segments from your actual maze:
+  1. horizontal_row_2: (0.00,0.24) -> (2.40,0.24) [2.40m]
+  2. horizontal_row_5: (1.20,0.60) -> (2.40,0.60) [1.20m]
+  3. horizontal_row_7: (0.00,0.84) -> (2.40,0.84) [2.40m]
+  4. horizontal_row_9: (0.00,1.08) -> (1.20,1.08) [1.20m]
+  5. horizontal_row_12: (0.00,1.44) -> (2.40,1.44) [2.40m]
+  6. vertical_col_0: (0.00,0.00) -> (0.00,1.44) [1.44m]
+  7. vertical_col_2: (0.24,0.00) -> (0.24,0.24) [0.24m]
+  8. vertical_col_4: (0.48,0.00) -> (0.48,0.24) [0.24m]
+  9. vertical_col_6: (0.72,0.00) -> (0.72,0.24) [0.24m]
+  10. vertical_col_10: (1.20,0.24) -> (1.20,1.44) [1.20m]
+  11. vertical_col_14: (1.68,1.44) -> (1.68,1.68) [0.24m]
+  12. vertical_col_16: (1.92,1.44) -> (1.92,1.68) [0.24m]
+  13. vertical_col_18: (2.16,1.44) -> (2.16,1.68) [0.24m]
+  14. vertical_col_20: (2.40,0.24) -> (2.40,1.68) [1.44m]
+Following line: horizontal_row_2 (2.40m, 24 waypoints)
+Cyberpunk web visualization initialized
+Cyberpunk dashboard started at http://0.0.0.0:5000
+╔════════════════════════════════════════════════════════════╗
+║            CYBERPUNK ROBOT NAVIGATION MATRIX              ║
+╠════════════════════════════════════════════════════════════╣
+║ > Neural line-following with visual odometry tracking     ║
+║ > Real-time maze navigation through extracted coordinates ║
+║ > YOLO11n obstacle detection with evasive maneuvers      ║
+║ > Live camera feed with cyberpunk overlay effects        ║
+║ > Interactive dashboard at http://192.168.2.20:5000      ║
+╚════════════════════════════════════════════════════════════╝
+SYSTEM STATUS: READY FOR DEPLOYMENT
+Press Ctrl+C to terminate
+ * Serving Flask app 'raspberry_pi_main'
+ * Debug mode: off
+INFO:werkzeug:[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://192.168.2.20:5000
+INFO:werkzeug:[33mPress CTRL+C to quit[0m
+INFO:root:Connected to ESP32 at 192.168.2.21
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:11] "GET /api/robot_data?t=1749830350955 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:12] "GET /api/robot_data?t=1749830352080 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:13] "GET /api/robot_data?t=1749830353080 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:14] "GET /api/robot_data?t=1749830354080 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:15] "GET / HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:15] "GET /api/robot_data?t=1749830355081 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:15] "[36mGET /static/styles.css HTTP/1.1[0m" 304 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:15] "GET /video_feed HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:15] "GET /api/robot_data?t=1749830355292 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:15] "GET /api/robot_data HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:15] "GET /api/robot_data?t=1749830355793 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:16] "GET /api/robot_data?t=1749830356081 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:16] "GET /api/robot_data?t=1749830356293 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:16] "GET /api/robot_data?t=1749830356793 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:17] "GET /api/robot_data?t=1749830357086 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:17] "GET /api/robot_data?t=1749830357293 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:18] "GET /api/robot_data?t=1749830357814 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:18] "GET /api/robot_data?t=1749830358087 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:18] "GET /api/robot_data?t=1749830358315 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:18] "GET /api/robot_data?t=1749830358815 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:19] "GET /api/robot_data?t=1749830359112 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:19] "GET /api/robot_data?t=1749830359314 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:19] "GET /api/robot_data?t=1749830359815 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:20] "GET /api/robot_data?t=1749830360113 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:20] "GET /api/robot_data?t=1749830360315 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:20] "GET /api/robot_data?t=1749830360815 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:21] "GET /api/robot_data?t=1749830361124 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:21] "GET /api/robot_data?t=1749830361316 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:21] "GET /api/robot_data?t=1749830361816 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:22] "GET /api/robot_data?t=1749830362124 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:22] "GET /api/robot_data?t=1749830362325 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:22] "GET /api/robot_data?t=1749830362825 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:23] "GET /api/robot_data?t=1749830363160 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:23] "GET /api/robot_data?t=1749830363324 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:23] "GET /api/robot_data?t=1749830363828 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:24] "GET /api/robot_data?t=1749830364160 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:24] "GET /api/robot_data?t=1749830364328 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:24] "GET /api/robot_data?t=1749830364829 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:25] "GET /api/robot_data?t=1749830365184 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:25] "GET /api/robot_data?t=1749830365329 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:25] "GET /api/robot_data?t=1749830365829 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:26] "GET /api/robot_data?t=1749830366185 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:26] "GET /api/robot_data?t=1749830366329 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:27] "GET /api/robot_data?t=1749830366830 HTTP/1.1" 200 -
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:27] "GET /api/robot_data?t=1749830367188 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:27] "GET /api/robot_data?t=1749830367330 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:27] "GET /api/robot_data?t=1749830367830 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:28] "GET /api/robot_data?t=1749830368189 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:28] "GET /api/robot_data?t=1749830368331 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:28] "GET /api/robot_data?t=1749830368840 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:29] "GET /api/robot_data?t=1749830369236 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:29] "GET /api/robot_data?t=1749830369341 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:30] "GET /api/robot_data?t=1749830369840 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:30] "GET /api/robot_data?t=1749830370236 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:30] "GET /api/robot_data?t=1749830370341 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:30] "GET /api/robot_data?t=1749830370841 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:31] "GET /api/robot_data?t=1749830371242 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:31] "GET /api/robot_data?t=1749830371341 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:31] "GET /api/robot_data?t=1749830371850 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:32] "GET /api/robot_data?t=1749830372243 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:32] "GET /api/robot_data?t=1749830372350 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:32] "GET /api/robot_data?t=1749830372851 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:33] "GET /api/robot_data?t=1749830373248 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:33] "GET /api/robot_data?t=1749830373353 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:33] "GET /api/robot_data?t=1749830373854 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:34] "GET /api/robot_data?t=1749830374248 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:34] "GET /api/robot_data?t=1749830374356 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:34] "GET /api/robot_data?t=1749830374859 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:35] "GET /api/robot_data?t=1749830375287 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:35] "GET /api/robot_data?t=1749830375359 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:36] "GET /api/robot_data?t=1749830375860 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:36] "GET /api/robot_data?t=1749830376287 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:36] "GET /api/robot_data?t=1749830376366 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:37] "GET /api/robot_data?t=1749830376867 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:37] "GET /api/robot_data?t=1749830377300 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:37] "GET /api/robot_data?t=1749830377374 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:37] "GET /api/robot_data?t=1749830377874 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:38] "GET /api/robot_data?t=1749830378300 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:38] "GET /api/robot_data?t=1749830378374 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:38] "GET /api/robot_data?t=1749830378881 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:39] "GET /api/robot_data?t=1749830379314 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:39] "GET /api/robot_data?t=1749830379381 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:39] "GET /api/robot_data?t=1749830379881 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:40] "GET /api/robot_data?t=1749830380314 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:40] "GET /api/robot_data?t=1749830380381 HTTP/1.1" 200 -
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:41] "GET /api/robot_data?t=1749830380881 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:41] "GET /api/robot_data?t=1749830381321 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:41] "GET /api/robot_data?t=1749830381382 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:41] "GET /api/robot_data?t=1749830381886 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:42] "GET /api/robot_data?t=1749830382322 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:42] "GET /api/robot_data?t=1749830382390 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:43] "GET /api/robot_data?t=1749830382891 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:43] "GET /api/robot_data?t=1749830383391 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:43] "GET /api/robot_data?t=1749830383334 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:43] "GET /api/robot_data?t=1749830383891 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:44] "GET /api/robot_data?t=1749830384335 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:44] "GET /api/robot_data?t=1749830384396 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:45] "GET /api/robot_data?t=1749830384897 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:45] "GET /api/robot_data?t=1749830385352 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:45] "GET /api/robot_data?t=1749830385397 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:45] "GET /api/robot_data?t=1749830385902 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:46] "GET /api/robot_data?t=1749830386351 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:46] "GET /api/robot_data?t=1749830386402 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:47] "GET /api/robot_data?t=1749830386904 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:47] "GET /api/robot_data?t=1749830387357 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:47] "GET /api/robot_data?t=1749830387405 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:48] "GET /api/robot_data?t=1749830387905 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:48] "GET /api/robot_data?t=1749830388357 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:48] "GET /api/robot_data?t=1749830388405 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:48] "GET /api/robot_data?t=1749830388908 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:49] "GET /api/robot_data?t=1749830389357 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:49] "GET /api/robot_data?t=1749830389412 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:49] "GET /api/robot_data?t=1749830389915 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:50] "GET /api/robot_data?t=1749830390358 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:50] "GET /api/robot_data?t=1749830390420 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:51] "GET /api/robot_data?t=1749830390920 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:51] "GET /api/robot_data?t=1749830391358 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:51] "GET /api/robot_data?t=1749830391420 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:51] "GET /api/robot_data?t=1749830391921 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:52] "GET /api/robot_data?t=1749830392359 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:52] "GET /api/robot_data?t=1749830392420 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:53] "GET /api/robot_data?t=1749830392925 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:53] "GET /api/robot_data?t=1749830393362 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:53] "GET /api/robot_data?t=1749830393425 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:54] "GET /api/robot_data?t=1749830393926 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:54] "GET /api/robot_data?t=1749830394362 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:54] "GET /api/robot_data?t=1749830394426 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:55] "GET /api/robot_data?t=1749830394930 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:55] "GET /api/robot_data?t=1749830395363 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:55] "GET /api/robot_data?t=1749830395435 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:55] "GET /api/robot_data?t=1749830395935 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:56] "GET /api/robot_data?t=1749830396363 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:56] "GET /api/robot_data?t=1749830396435 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:57] "GET /api/robot_data?t=1749830397363 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:57] "GET /api/robot_data?t=1749830397671 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:58] "GET /api/robot_data?t=1749830398363 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:58] "GET /api/robot_data?t=1749830398672 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:59] "GET /api/robot_data?t=1749830399486 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 16:59:59] "GET /api/robot_data?t=1749830399672 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:00] "GET /api/robot_data?t=1749830400492 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:00] "GET /api/robot_data?t=1749830400673 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:01] "GET /api/robot_data?t=1749830401509 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:01] "GET /api/robot_data?t=1749830401673 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:02] "GET /api/robot_data?t=1749830402621 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:02] "GET /api/robot_data?t=1749830402674 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:03] "GET /api/robot_data?t=1749830403621 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:03] "GET /api/robot_data?t=1749830403674 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:04] "GET /api/robot_data?t=1749830404621 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:04] "GET /api/robot_data?t=1749830404675 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:05] "GET /api/robot_data?t=1749830405622 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:05] "GET /api/robot_data?t=1749830405674 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:06] "GET /api/robot_data?t=1749830406675 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:06] "GET /api/robot_data?t=1749830406716 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:07] "GET /api/robot_data?t=1749830407675 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:07] "GET /api/robot_data?t=1749830407716 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:08] "GET /api/robot_data?t=1749830408675 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:08] "GET /api/robot_data?t=1749830408717 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:09] "GET /api/robot_data?t=1749830409676 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:09] "GET /api/robot_data?t=1749830409717 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:10] "GET /api/robot_data?t=1749830410676 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:10] "GET /api/robot_data?t=1749830410811 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:11] "GET /api/robot_data?t=1749830411676 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:11] "GET /api/robot_data?t=1749830411811 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:12] "GET /api/robot_data?t=1749830412766 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:13] "GET /api/robot_data?t=1749830412811 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:13] "GET /api/robot_data?t=1749830413767 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:13] "GET /api/robot_data?t=1749830413811 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:14] "GET /api/robot_data?t=1749830414767 HTTP/1.1" 200 -
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:15] "GET /api/robot_data?t=1749830414811 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:15] "GET /api/robot_data?t=1749830415767 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:15] "GET /api/robot_data?t=1749830415871 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:16] "GET /api/robot_data?t=1749830416845 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:17] "GET /api/robot_data?t=1749830416976 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:17] "GET /api/robot_data?t=1749830417845 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:18] "GET /api/robot_data?t=1749830417976 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:18] "GET /api/robot_data?t=1749830418848 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:19] "GET /api/robot_data?t=1749830418976 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:20] "GET /api/robot_data?t=1749830419890 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:20] "GET /api/robot_data?t=1749830420092 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:20] "GET /api/robot_data?t=1749830420890 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:21] "GET /api/robot_data?t=1749830421156 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:22] "GET /api/robot_data?t=1749830421889 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:22] "GET /api/robot_data?t=1749830422157 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:22] "GET /api/robot_data?t=1749830422891 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:23] "GET /api/robot_data?t=1749830423262 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:23] "GET /api/robot_data?t=1749830423891 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:24] "GET /api/robot_data?t=1749830424262 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:24] "GET /api/robot_data?t=1749830424917 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:25] "GET /api/robot_data?t=1749830425262 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:25] "GET /api/robot_data?t=1749830425917 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:26] "GET /api/robot_data?t=1749830426387 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:26] "GET /api/robot_data?t=1749830426924 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:27] "GET /api/robot_data?t=1749830427492 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:28] "GET /api/robot_data?t=1749830427925 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:28] "GET /api/robot_data?t=1749830428493 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:29] "GET /api/robot_data?t=1749830428925 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:29] "GET /api/robot_data?t=1749830429493 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:29] "GET /api/robot_data?t=1749830429925 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:30] "GET /api/robot_data?t=1749830430570 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:31] "GET /api/robot_data?t=1749830430926 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:31] "GET /api/robot_data?t=1749830431595 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:31] "GET /api/robot_data?t=1749830431925 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:32] "GET /api/robot_data?t=1749830432637 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:33] "GET /api/robot_data?t=1749830432926 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:33] "GET /api/robot_data?t=1749830433636 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:33] "GET /api/robot_data?t=1749830433929 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:34] "GET /api/robot_data?t=1749830434714 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:34] "GET /api/robot_data?t=1749830434929 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:35] "GET /api/robot_data?t=1749830435714 HTTP/1.1" 200 -
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:36] "GET /api/robot_data?t=1749830435929 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:36] "GET /api/robot_data?t=1749830436825 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:36] "GET /api/robot_data?t=1749830436930 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:37] "GET /api/robot_data?t=1749830437826 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:38] "GET /api/robot_data?t=1749830437931 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:38] "GET /api/robot_data?t=1749830438431 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:38] "GET /api/robot_data?t=1749830438844 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:39] "GET /api/robot_data?t=1749830438932 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:39] "GET /api/robot_data?t=1749830439434 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:39] "GET /api/robot_data?t=1749830439843 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:40] "GET /api/robot_data?t=1749830439933 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:40] "GET /api/robot_data?t=1749830440434 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:40] "GET /api/robot_data?t=1749830440933 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:41] "GET /api/robot_data?t=1749830440943 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:41] "GET /api/robot_data?t=1749830441434 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:42] "GET /api/robot_data?t=1749830441934 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:42] "GET /api/robot_data?t=1749830441943 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:42] "GET /api/robot_data?t=1749830442434 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:43] "GET /api/robot_data?t=1749830442934 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:43] "GET /api/robot_data?t=1749830442943 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:43] "GET /api/robot_data?t=1749830443435 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:43] "GET /api/robot_data?t=1749830443936 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:44] "GET /api/robot_data?t=1749830443945 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:45] "GET /api/robot_data?t=1749830444945 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:45] "GET /api/robot_data?t=1749830445251 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:46] "GET /api/robot_data?t=1749830446024 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:46] "GET /api/robot_data?t=1749830446368 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:47] "GET /api/robot_data?t=1749830447025 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:47] "GET /api/robot_data?t=1749830447464 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:48] "GET /api/robot_data?t=1749830448025 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:48] "GET /api/robot_data?t=1749830448465 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:49] "GET /api/robot_data?t=1749830449146 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:49] "GET /api/robot_data?t=1749830449476 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:50] "GET /api/robot_data?t=1749830450253 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:50] "GET /api/robot_data?t=1749830450477 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:51] "GET /api/robot_data?t=1749830451254 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:51] "GET /api/robot_data?t=1749830451492 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:52] "GET /api/robot_data?t=1749830452254 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:52] "GET /api/robot_data?t=1749830452493 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:53] "GET /api/robot_data?t=1749830453255 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:53] "GET /api/robot_data?t=1749830453536 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+DEBUG: Starting map visualization creation...
+DEBUG: Grid shape: (500, 700, 3)
+DEBUG: Grid type: <class 'numpy.ndarray'>
+DEBUG: Resized grid shape: (400, 500, 3)
+DEBUG: Base64 length: 67104
+Position: (0.00, 0.00), Heading: 0.00 rad
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:54] "GET /api/robot_data?t=1749830454354 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:54] "GET /api/robot_data?t=1749830454536 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:55] "GET /api/robot_data?t=1749830455354 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:55] "GET /api/robot_data?t=1749830455627 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:56] "GET /api/robot_data?t=1749830456354 HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [13/Jun/2025 17:00:56] "GET /api/robot_data?t=1749830456627 HTTP/1.1" 200 -
+INFO:root:Navigating to waypoint 0: (0.00, 0.24), distance: 0.24m, direction: 1.5707963267948966

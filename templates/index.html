@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>ROBOT NAVIGATION</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="matrix-bg"></div>
+    
+    <div class="container">
+        <!-- Header Section -->
+        <header class="header">
+            <h1 class="cyber-title">
+                <span class="glitch" data-text="AUTONOMOUS ROBOT">AUTONOMOUS ROBOT</span>
+                <span class="subtitle">NEURAL NAVIGATION MATRIX</span>
+            </h1>
+            <div class="system-status">
+                <div class="status-indicator online"></div>
+                <span>SYSTEM ONLINE</span>
+            </div>
+        </header>
+
+        <!-- Main Grid Layout -->
+        <div class="dashboard-grid">
+            
+            <!-- Live Camera Feed -->
+            <div class="panel camera-panel">
+                <div class="panel-header">
+                    <h2>VISUAL CORTEX</h2>
+                    <div class="panel-indicator"></div>
+                </div>
+                <div class="camera-container">
+                    <img id="camera-feed" src="/video_feed" alt="Live Camera Feed" class="camera-feed">
+                    <div class="camera-overlay">
+                        <div class="crosshair"></div>
+                        <div class="scan-line"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Robot Status -->
+            <div class="panel status-panel">
+                <div class="panel-header">
+                    <h2>ROBOT STATUS</h2>
+                    <div class="panel-indicator"></div>
+                </div>
+                <div class="status-grid">
+                    <div class="status-item">
+                        <div class="status-label">COORDINATES</div>
+                        <div class="status-value cyber-text" id="robot-position">(0.00, 0.00)</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">HEADING</div>
+                        <div class="status-value cyber-text" id="robot-heading">0.0°</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">MODE</div>
+                        <div class="status-value cyber-text" id="robot-state">SEARCHING</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">WAYPOINT</div>
+                        <div class="status-value cyber-text" id="waypoint-info">0 / 0</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sensor Array -->
+            <div class="panel sensor-panel">
+                <div class="panel-header">
+                    <h2>SENSOR ARRAY</h2>
+                    <div class="panel-indicator"></div>
+                </div>
+                <div class="sensor-grid">
+                    <div class="sensor-label">L2</div>
+                    <div class="sensor-label">L1</div>
+                    <div class="sensor-label">C</div>
+                    <div class="sensor-label">R1</div>
+                    <div class="sensor-label">R2</div>
+                </div>
+                <div class="sensor-display" id="sensor-array">
+                    <div class="sensor-item sensor-inactive">
+                        <span class="sensor-label">L2</span>
+                        <span class="sensor-value">INACTIVE</span>
+                    </div>
+                    <div class="sensor-item sensor-inactive">
+                        <span class="sensor-label">L1</span>
+                        <span class="sensor-value">INACTIVE</span>
+                    </div>
+                    <div class="sensor-item sensor-inactive">
+                        <span class="sensor-label">C</span>
+                        <span class="sensor-value">INACTIVE</span>
+                    </div>
+                    <div class="sensor-item sensor-inactive">
+                        <span class="sensor-label">R1</span>
+                        <span class="sensor-value">INACTIVE</span>
+                    </div>
+                    <div class="sensor-item sensor-inactive">
+                        <span class="sensor-label">R2</span>
+                        <span class="sensor-value">INACTIVE</span>
+                    </div>
+                </div>
+                <div class="sensor-pattern">
+                    <span>Pattern: </span><span id="sensor-pattern" class="cyber-text">00000</span>
+                </div>
+            </div>
+
+            <!-- Navigation Map -->
+            <div class="panel map-panel">
+                <div class="panel-header">
+                    <h2>NAVIGATION MATRIX</h2>
+                    <div class="panel-indicator"></div>
+                </div>
+                <div class="map-container">
+                    <img id="map-image" class="map-image" src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTAwIiBoZWlnaHQ9IjQwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iNTAwIiBoZWlnaHQ9IjQwMCIgZmlsbD0iIzMzMzMzMyIvPjx0ZXh0IHg9IjI1MCIgeT0iMjAwIiBmb250LWZhbWlseT0ibW9ub3NwYWNlIiBmb250LXNpemU9IjE2IiBmaWxsPSIjMDBmZmZmIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkeT0iMC4zZW0iPkxPQURJTkcgTUFQLi4uPC90ZXh0Pjwvc3ZnPg==" alt="Navigation Map">
+                    <div class="map-overlay">
+                        <div class="scan-grid"></div>
+                    </div>
+                </div>
+                <div class="map-legend">
+                    <div class="legend-item">
+                        <span class="legend-color line-color"></span>
+                        <span>LINE PATHS</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-color current-color"></span>
+                        <span>CURRENT LINE</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-color robot-color"></span>
+                        <span>ROBOT</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-color waypoint-color"></span>
+                        <span>TARGET</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Information -->
+            <div class="panel info-panel">
+                <div class="panel-header">
+                    <h2>SYSTEM INFO</h2>
+                    <div class="panel-indicator"></div>
+                </div>
+                <div class="info-content">
+                    <div class="info-section">
+                        <h3>NAVIGATION PROTOCOL</h3>
+                        <p>Advanced line-following with real-time visual odometry tracking through maze corridors.</p>
+                    </div>
+                    <div class="info-section">
+                        <h3>OBSTACLE DETECTION</h3>
+                        <p>YOLO11n neural network with 180° evasive maneuvers.</p>
+                    </div>
+                    <div class="info-section">
+                        <h3>MAPPING SYSTEM</h3>
+                        <p>Pure line-based navigation using extracted maze coordinates.</p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="footer-content">
+                <span>NEURAL MATRIX v2.0 | STATUS: ACTIVE | </span>
+                <span id="timestamp"></span>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        // CACHE BUSTER v2.1 - Force browser reload - Updated JavaScript
+        // Update timestamp
+        function updateTimestamp() {
+            const now = new Date();
+            document.getElementById('timestamp').textContent = 
+                now.toTimeString().substring(0, 8);
+        }
+
+        // Update robot data
+        function updateData() {
+            fetch('/api/robot_data?t=' + Date.now())
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Robot data received:', data);
+                    
+                    // Add visual feedback for data updates
+                    const updateIndicator = document.querySelector('.panel-header');
+                    if (updateIndicator) {
+                        updateIndicator.style.boxShadow = '0 0 20px #00ffff';
+                        setTimeout(() => {
+                            updateIndicator.style.boxShadow = '0 0 10px rgba(0, 255, 255, 0.5)';
+                        }, 200);
+                    }
+                    
+                    // Update robot status with enhanced information
+                    document.getElementById('robot-position').textContent = 
+                        `Position: (${data.position.x.toFixed(2)}, ${data.position.y.toFixed(2)})`;
+                    document.getElementById('robot-heading').textContent = 
+                        `Heading: ${(data.position.heading * 180 / Math.PI).toFixed(1)}°`;
+                    document.getElementById('robot-state').textContent = `State: ${data.state}`;
+                    
+                    // Update waypoint information with more details
+                    const waypointInfo = document.getElementById('waypoint-info');
+                    if (data.current_waypoint !== undefined && data.total_waypoints !== undefined) {
+                        const progressPercent = data.total_waypoints > 0 ? 
+                            Math.round((data.current_waypoint / data.total_waypoints) * 100) : 0;
+                        waypointInfo.innerHTML = `
+                            <div>Waypoint: ${data.current_waypoint}/${data.total_waypoints}</div>
+                            <div>Progress: ${progressPercent}%</div>
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: ${progressPercent}%"></div>
+                            </div>
+                        `;
+                    } else {
+                        waypointInfo.textContent = 'Waypoint: Initializing...';
+                    }
+                    
+                    // Update sensor array with visual indicators
+                    const sensorContainer = document.getElementById('sensor-array');
+                    if (data.sensors && Array.isArray(data.sensors)) {
+                        const sensorLabels = ['L2', 'L1', 'C', 'R1', 'R2'];
+                        sensorContainer.innerHTML = data.sensors.map((sensor, index) => {
+                            const status = sensor ? 'ACTIVE' : 'INACTIVE';
+                            const className = sensor ? 'sensor-active' : 'sensor-inactive';
+                            return `<div class="sensor-item ${className}">
+                                        <span class="sensor-label">${sensorLabels[index]}</span>
+                                        <span class="sensor-value">${status}</span>
+                                    </div>`;
+                        }).join('');
+                    }
+                    
+                    // Update navigation matrix (map) with enhanced real-time visualization
+                    const mapContainer = document.querySelector('.map-container');
+                    console.log('Map update - Grid image check:', {
+                        hasGridImage: !!data.grid_image,
+                        gridImageType: typeof data.grid_image,
+                        gridImageLength: data.grid_image ? data.grid_image.length : 0,
+                        mapContainerExists: !!mapContainer,
+                        mapContainerHTML: mapContainer ? mapContainer.innerHTML.substring(0, 100) : 'null'
+                    });
+                    
+                    if (data.grid_image && data.grid_image.length > 100 && mapContainer) {
+                        console.log('UPDATING MAP with grid_image...');
+                        // Force clear and replace the map container content
+                        mapContainer.innerHTML = '';
+                        
+                        // Create enhanced map display with overlay information
+                        const mapHTML = `
+                            <div class="map-wrapper" style="position: relative; width: 100%; height: auto;">
+                                <img src="data:image/png;base64,${data.grid_image}" 
+                                     class="map-image" 
+                                     alt="Robot Navigation Map"
+                                     style="max-width: 100%; height: auto; border-radius: 5px; border: 2px solid #00ffff; display: block;"
+                                     onload="console.log('✅ Map image loaded successfully!')"
+                                     onerror="console.error('❌ Failed to load map image')">
+                                <div class="map-info-overlay" style="position: absolute; top: 10px; left: 10px; 
+                                                                     background: rgba(0, 20, 40, 0.9); padding: 10px; 
+                                                                     border-radius: 5px; border: 1px solid #00ffff; 
+                                                                     font-size: 0.8em; color: #00ffff; z-index: 10;">
+                                    <div class="position-info" style="margin-bottom: 5px;">
+                                        <span class="info-label" style="color: #ff0066;">ROBOT:</span>
+                                        <span class="info-value">(${data.position.x.toFixed(2)}, ${data.position.y.toFixed(2)})</span>
+                                    </div>
+                                    <div class="heading-info" style="margin-bottom: 5px;">
+                                        <span class="info-label" style="color: #ff0066;">HEADING:</span>
+                                        <span class="info-value">${(data.position.heading * 180 / Math.PI).toFixed(1)}°</span>
+                                    </div>
+                                    <div class="waypoint-info" style="margin-bottom: 5px;">
+                                        <span class="info-label" style="color: #ff0066;">WAYPOINT:</span>
+                                        <span class="info-value">${data.current_waypoint}/${data.total_waypoints}</span>
+                                    </div>
+                                    <div class="state-info">
+                                        <span class="info-label" style="color: #ff0066;">STATE:</span>
+                                        <span class="info-value state-${data.state.toLowerCase()}" 
+                                              style="color: ${data.state === 'FOLLOWING' ? '#00ff00' : '#ffff00'};">${data.state}</span>
+                                    </div>
+                                </div>
+                                <div class="map-status-indicators" style="position: absolute; bottom: 10px; right: 10px; 
+                                                                           background: rgba(0, 20, 40, 0.9); padding: 8px; 
+                                                                           border-radius: 5px; border: 1px solid #00ffff; 
+                                                                           display: flex; align-items: center; gap: 8px; z-index: 10;">
+                                    <div class="status-dot" style="width: 12px; height: 12px; border-radius: 50%; 
+                                                                   background: ${data.sensors.some(s => s > 0) ? '#00ff00' : '#666'}; 
+                                                                   box-shadow: 0 0 10px ${data.sensors.some(s => s > 0) ? '#00ff00' : '#666'};"></div>
+                                    <span class="status-text" style="color: #00ffff; font-size: 0.8em;">
+                                        ${data.sensors.some(s => s > 0) ? 'LINE DETECTED' : 'SEARCHING'}
+                                    </span>
+                                </div>
+                            </div>`;
+                        
+                        mapContainer.innerHTML = mapHTML;
+                        console.log('✅ Map HTML inserted successfully');
+                        
+                        // Add map update animation with enhanced effects
+                        setTimeout(() => {
+                            const mapImg = mapContainer.querySelector('.map-image');
+                            if (mapImg) {
+                                mapImg.style.opacity = '0.8';
+                                mapImg.style.transition = 'opacity 0.2s ease, transform 0.2s ease';
+                                mapImg.style.transform = 'scale(0.98)';
+                                setTimeout(() => {
+                                    mapImg.style.opacity = '1';
+                                    mapImg.style.transform = 'scale(1)';
+                                }, 50);
+                            }
+                            
+                            // Add pulsing effect to active status indicator
+                            const statusDot = mapContainer.querySelector('.status-dot');
+                            if (statusDot && data.sensors.some(s => s > 0)) {
+                                statusDot.style.animation = 'pulse 1.5s ease-in-out infinite';
+                            }
+                        }, 100);
+                        
+                    } else {
+                        console.log('❌ No valid grid_image or container missing, showing loading placeholder...');
+                        if (mapContainer) {
+                            mapContainer.innerHTML = `<div class="map-placeholder" style="display: flex; flex-direction: column; 
+                                                                                             justify-content: center; align-items: center; 
+                                                                                             height: 300px; color: #00ffff;">
+                                                        <div class="loading-spinner" style="border: 3px solid #333; border-top: 3px solid #00ffff; 
+                                                                                            border-radius: 50%; width: 40px; height: 40px; 
+                                                                                            animation: spin 1s linear infinite; margin-bottom: 20px;"></div>
+                                                        <p style="margin: 5px 0; font-weight: bold;">LOADING MAP...</p>
+                                                        <p class="loading-detail" style="font-size: 0.8em; opacity: 0.7;">
+                                                            ${data.grid_image ? `Grid data: ${data.grid_image.length} chars` : 'Waiting for map data...'}
+                                                        </p>
+                                                      </div>`;
+                        }
+                    }
+                    
+                    // Update sensor pattern display
+                    const sensorPattern = document.getElementById('sensor-pattern');
+                    if (sensorPattern && data.sensors) {
+                        const pattern = data.sensors.map(s => s ? '1' : '0').join('');
+                        sensorPattern.textContent = pattern;
+                        sensorPattern.style.color = data.sensors.some(s => s > 0) ? '#00ff00' : '#ffff00';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching robot data:', error);
+                    
+                    // Show error state in map
+                    const mapContainer = document.querySelector('.map-container');
+                    mapContainer.innerHTML = `<div class="map-error">
+                                                <p style="color: #ff0066;">⚠️ DATA CONNECTION ERROR</p>
+                                                <p style="font-size: 0.8em;">Retrying connection...</p>
+                                              </div>`;
+                    
+                    // Update sensor pattern to show error state
+                    const sensorPattern = document.getElementById('sensor-pattern');
+                    if (sensorPattern) {
+                        sensorPattern.textContent = 'ERROR';
+                        sensorPattern.style.color = '#ff0066';
+                    }
+                });
+        }
+
+        // Matrix effect for background
+        function createMatrixEffect() {
+            const matrix = document.querySelector('.matrix-bg');
+            const chars = "01";
+            
+            for (let i = 0; i < 100; i++) {
+                const span = document.createElement('span');
+                span.textContent = chars[Math.floor(Math.random() * chars.length)];
+                span.style.left = Math.random() * 100 + '%';
+                span.style.animationDelay = Math.random() * 10 + 's';
+                span.style.animationDuration = (Math.random() * 3 + 2) + 's';
+                matrix.appendChild(span);
+            }
+        }
+
+        // Initialize
+        createMatrixEffect();
+        updateTimestamp();
+        setInterval(updateTimestamp, 1000);
+        setInterval(updateData, 500);
+        updateData(); // Initial load
+    </script>
+</body>
+</html> 

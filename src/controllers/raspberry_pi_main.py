@@ -11,8 +11,7 @@ from collections import deque
 import threading
 import json
 import base64
-from flask import Flask, render_template_string, jsonify
-from flask_socketio import SocketIO, emit
+from flask import Flask, render_template, jsonify, Response
 
 # Web visualization is now integrated in this file
 WebVisualization = None  # Will be defined below
@@ -59,7 +58,7 @@ class ESP32Interface:
             logging.error(f"Failed to send motor speeds: {e}")
             self.connected = False
             return False
-    
+        
     def receive_sensor_data(self):
         """Receive and parse sensor data from ESP32"""
         try:
@@ -111,9 +110,9 @@ class VisualOdometry:
         self.y = 0.0  # Y position in meters
         self.heading = 0.0  # Heading in radians
         
-        # Calibration parameters for your track
-        self.pixel_to_meter_scale = 0.005  # 5mm per pixel (calibrated for maze)
-        self.heading_smoothing = 0.05  # Reduced heading noise
+        # Calibration parameters for your track  
+        self.pixel_to_meter_scale = 0.004  # 4mm per pixel (calibrated for line following)
+        self.heading_smoothing = 0.08  # Moderate heading smoothing for line following
         
         # Motion filtering
         self.motion_history = deque(maxlen=3)  # Shorter history for faster response
@@ -375,19 +374,20 @@ class LineBasedMapper:
         print(f"Following line: {name} ({length:.2f}m, {len(waypoints)} waypoints)")
     
     def update_robot_position_from_sensors(self, sensors):
-        """Update position based on line following progress"""
-        # Simple progression along current path
+        """Update waypoint progression based on current robot position"""
+        # Check if we're close to current waypoint
         if self.current_waypoint < len(self.waypoints):
             target_x, target_y = self.waypoints[self.current_waypoint]
             
-            # Calculate distance to target
+            # Calculate distance to target waypoint
             dx = target_x - self.robot_x
             dy = target_y - self.robot_y
             distance = math.sqrt(dx*dx + dy*dy)
             
-            # Move to next waypoint if close
-            if distance < 0.08:  # Within 8cm
+            # Move to next waypoint if close (robot position is updated from visual odometry)
+            if distance < 0.12:  # Within 12cm - larger tolerance for camera-based positioning
                 self.current_waypoint += 1
+                print(f"Reached waypoint {self.current_waypoint-1}, distance was {distance:.3f}m")
                 
                 # If finished current segment, move to next
                 if self.current_waypoint >= len(self.waypoints):
@@ -399,14 +399,8 @@ class LineBasedMapper:
                     if self.current_segment < len(self.line_segments):
                         segment_name = self.line_segments[self.current_segment][4]
                         print(f"Starting new line: {segment_name}")
-            
-            # Move toward target
-            if distance > 0.02:
-                speed = 0.015  # 1.5cm per update
-                self.robot_x += (dx / distance) * speed
-                self.robot_y += (dy / distance) * speed
         
-        # Update path history
+        # Update path history with current robot position
         self.path_history.append((self.robot_x, self.robot_y))
         if len(self.path_history) > 60:
             self.path_history = self.path_history[-30:]
@@ -418,7 +412,7 @@ class LineBasedMapper:
         return None
     
     def get_grid_visualization(self):
-        """Create visualization showing just the actual line paths (no grid rectangles)"""
+        """Create enhanced visualization showing robot tracking and navigation"""
         # Your actual maze layout (horizontally mirrored)
         original_maze = [
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0],
@@ -444,20 +438,27 @@ class LineBasedMapper:
             mirrored_row = list(reversed(row))
             actual_maze.append(mirrored_row)
         
-        # Create canvas
-        cell_size = 25  # Pixels per cell for coordinate mapping
+        # Create larger canvas for better visibility
+        cell_size = 35  # Increased from 25 to 35 for better visibility
         maze_height = len(actual_maze)
         maze_width = len(actual_maze[0])
         canvas_width = maze_width * cell_size
         canvas_height = maze_height * cell_size
         
-        # Create white background
-        vis_grid = np.full((canvas_height, canvas_width, 3), 250, dtype=np.uint8)  # Light background
+        # Create dark background for cyberpunk look
+        vis_grid = np.full((canvas_height, canvas_width, 3), 20, dtype=np.uint8)  # Very dark background
         
-        # Draw ONLY the black line paths (where actual_maze[y][x] == 0)
-        # Draw them as actual lines, not rectangles
+        # Draw grid lines for better structure visibility
+        grid_color = (40, 40, 40)  # Dark gray grid
+        for x in range(0, canvas_width, cell_size):
+            cv2.line(vis_grid, (x, 0), (x, canvas_height), grid_color, 1)
+        for y in range(0, canvas_height, cell_size):
+            cv2.line(vis_grid, (0, y), (canvas_width, y), grid_color, 1)
         
-        # First, find and draw horizontal line segments
+        # Draw line paths with better visibility
+        line_color = (80, 80, 80)  # Gray for inactive paths
+        
+        # First, draw all horizontal line segments
         for y in range(maze_height):
             x = 0
             while x < maze_width:
@@ -468,17 +469,17 @@ class LineBasedMapper:
                         x += 1
                     end_x = x - 1
                     
-                    # Draw this horizontal line segment
-                    if end_x > start_x:  # Only if it's actually a line
-                        pixel_y = int(y * cell_size + cell_size/2)  # Center of cell
+                    # Draw this horizontal line segment with thicker lines
+                    if end_x > start_x:
+                        pixel_y = int(y * cell_size + cell_size/2)
                         pixel_start_x = int(start_x * cell_size + cell_size/2)
                         pixel_end_x = int(end_x * cell_size + cell_size/2)
                         
-                        cv2.line(vis_grid, (pixel_start_x, pixel_y), (pixel_end_x, pixel_y), (0, 0, 0), 4)  # Black line
+                        cv2.line(vis_grid, (pixel_start_x, pixel_y), (pixel_end_x, pixel_y), line_color, 6)
                 else:
                     x += 1
         
-        # Then, find and draw vertical line segments
+        # Then, draw all vertical line segments
         for x in range(maze_width):
             y = 0
             while y < maze_height:
@@ -489,17 +490,17 @@ class LineBasedMapper:
                         y += 1
                     end_y = y - 1
                     
-                    # Draw this vertical line segment
-                    if end_y > start_y:  # Only if it's actually a line
-                        pixel_x = int(x * cell_size + cell_size/2)  # Center of cell
+                    # Draw this vertical line segment with thicker lines
+                    if end_y > start_y:
+                        pixel_x = int(x * cell_size + cell_size/2)
                         pixel_start_y = int(start_y * cell_size + cell_size/2)
                         pixel_end_y = int(end_y * cell_size + cell_size/2)
                         
-                        cv2.line(vis_grid, (pixel_x, pixel_start_y), (pixel_x, pixel_end_y), (0, 0, 0), 4)  # Black line
+                        cv2.line(vis_grid, (pixel_x, pixel_start_y), (pixel_x, pixel_end_y), line_color, 6)
                 else:
                     y += 1
         
-        # Highlight current line segment in bright orange
+        # Highlight current line segment with bright cyberpunk color
         if self.current_segment < len(self.line_segments):
             segment = self.line_segments[self.current_segment]
             start_x, start_y, end_x, end_y, name = segment
@@ -510,26 +511,11 @@ class LineBasedMapper:
             px2 = int(end_x / 0.12 * cell_size + cell_size/2)
             py2 = int(end_y / 0.12 * cell_size + cell_size/2)
             
-            cv2.line(vis_grid, (px1, py1), (px2, py2), (0, 140, 255), 6)  # Bright orange highlight
+            # Draw current path with bright cyan/orange gradient effect
+            cv2.line(vis_grid, (px1, py1), (px2, py2), (0, 255, 255), 8)  # Bright cyan
+            cv2.line(vis_grid, (px1, py1), (px2, py2), (0, 165, 255), 4)  # Orange center
         
-        # Draw robot position
-        robot_px = int(self.robot_x / 0.12 * cell_size + cell_size/2)
-        robot_py = int(self.robot_y / 0.12 * cell_size + cell_size/2)
-        
-        if 0 <= robot_px < canvas_width and 0 <= robot_py < canvas_height:
-            cv2.circle(vis_grid, (robot_px, robot_py), 10, (255, 0, 0), -1)  # Red robot
-            cv2.circle(vis_grid, (robot_px, robot_py), 12, (255, 0, 0), 2)   # Red outline
-        
-        # Draw current waypoint
-        if self.current_waypoint < len(self.waypoints):
-            wx, wy = self.waypoints[self.current_waypoint]
-            waypoint_px = int(wx / 0.12 * cell_size + cell_size/2)
-            waypoint_py = int(wy / 0.12 * cell_size + cell_size/2)
-            
-            if 0 <= waypoint_px < canvas_width and 0 <= waypoint_py < canvas_height:
-                cv2.circle(vis_grid, (waypoint_px, waypoint_py), 8, (0, 255, 0), -1)  # Green waypoint
-        
-        # Draw path history
+        # Draw path history with fading trail effect
         if len(self.path_history) > 1:
             for i in range(1, len(self.path_history)):
                 x1, y1 = self.path_history[i-1]
@@ -542,28 +528,79 @@ class LineBasedMapper:
                 
                 if (0 <= px1 < canvas_width and 0 <= py1 < canvas_height and 
                     0 <= px2 < canvas_width and 0 <= py2 < canvas_height):
-                    cv2.line(vis_grid, (px1, py1), (px2, py2), (0, 255, 255), 3)  # Cyan trail
+                    
+                    # Fade effect - newer trail segments are brighter
+                    fade_factor = i / len(self.path_history)
+                    trail_brightness = int(255 * fade_factor)
+                    trail_color = (trail_brightness, trail_brightness, 0)  # Yellow trail
+                    cv2.line(vis_grid, (px1, py1), (px2, py2), trail_color, 3)
         
-        # Add title and info - positioned to not overlap with lines
-        cv2.putText(vis_grid, "Actual Line Paths", (10, 25), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (60, 60, 60), 2)
-        
-        if self.current_segment < len(self.line_segments):
-            segment_name = self.line_segments[self.current_segment][4]
-            cv2.putText(vis_grid, f"Following: {segment_name}", 
-                       (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 60, 60), 1)
+        # Draw current waypoint with pulsing target effect
+        if self.current_waypoint < len(self.waypoints):
+            wx, wy = self.waypoints[self.current_waypoint]
+            waypoint_px = int(wx / 0.12 * cell_size + cell_size/2)
+            waypoint_py = int(wy / 0.12 * cell_size + cell_size/2)
             
-            # Show progress
-            progress = (self.current_waypoint / max(1, len(self.waypoints) - 1)) * 100
-            cv2.putText(vis_grid, f"Progress: {progress:.0f}%", 
-                       (10, canvas_height - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 60, 60), 1)
+            if 0 <= waypoint_px < canvas_width and 0 <= waypoint_py < canvas_height:
+                # Target crosshair with multiple rings
+                target_color = (0, 255, 0)  # Bright green
+                cv2.circle(vis_grid, (waypoint_px, waypoint_py), 15, target_color, 3)
+                cv2.circle(vis_grid, (waypoint_px, waypoint_py), 10, target_color, 2)
+                cv2.circle(vis_grid, (waypoint_px, waypoint_py), 5, target_color, -1)
+                
+                # Crosshair lines
+                cv2.line(vis_grid, (waypoint_px-20, waypoint_py), (waypoint_px+20, waypoint_py), target_color, 2)
+                cv2.line(vis_grid, (waypoint_px, waypoint_py-20), (waypoint_px, waypoint_py+20), target_color, 2)
         
-        # Add coordinate info
-        cv2.putText(vis_grid, f"Robot: ({self.robot_x:.2f}, {self.robot_y:.2f})", 
-                   (10, canvas_height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (60, 60, 60), 1)
+        # Draw robot position with prominent indicator
+        robot_px = int(self.robot_x / 0.12 * cell_size + cell_size/2)
+        robot_py = int(self.robot_y / 0.12 * cell_size + cell_size/2)
         
-        # Resize for better web display while maintaining aspect ratio
-        target_height = 400
+        if 0 <= robot_px < canvas_width and 0 <= robot_py < canvas_height:
+            # Multi-layer robot indicator for high visibility
+            robot_color = (255, 0, 255)  # Bright magenta/pink
+            
+            # Outer glow ring
+            cv2.circle(vis_grid, (robot_px, robot_py), 20, (50, 0, 50), 3)
+            # Main robot body
+            cv2.circle(vis_grid, (robot_px, robot_py), 12, robot_color, -1)
+            # Inner highlight
+            cv2.circle(vis_grid, (robot_px, robot_py), 8, (255, 100, 255), -1)
+            # Center dot
+            cv2.circle(vis_grid, (robot_px, robot_py), 3, (255, 255, 255), -1)
+            
+            # Direction indicator (heading arrow)
+            arrow_length = 25
+            arrow_end_x = int(robot_px + arrow_length * math.cos(self.robot_heading))
+            arrow_end_y = int(robot_py + arrow_length * math.sin(self.robot_heading))
+            cv2.arrowedLine(vis_grid, (robot_px, robot_py), (arrow_end_x, arrow_end_y), 
+                           (255, 255, 0), 3, tipLength=0.3)  # Yellow arrow
+        
+        # Add legend in bottom right
+        legend_x = canvas_width - 200
+        legend_y = canvas_height - 100
+        cv2.rectangle(vis_grid, (legend_x, legend_y), (canvas_width-10, canvas_height-10), (0, 0, 0), -1)
+        cv2.rectangle(vis_grid, (legend_x, legend_y), (canvas_width-10, canvas_height-10), (0, 255, 255), 1)
+        
+        # Font and color for legend only
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        text_color = (0, 255, 255)  # Cyan text
+        
+        # Legend items
+        cv2.circle(vis_grid, (legend_x + 15, legend_y + 20), 5, (255, 0, 255), -1)
+        cv2.putText(vis_grid, "Robot", (legend_x + 25, legend_y + 25), font, 0.4, text_color, 1)
+        
+        cv2.circle(vis_grid, (legend_x + 15, legend_y + 40), 5, (0, 255, 0), -1)
+        cv2.putText(vis_grid, "Target", (legend_x + 25, legend_y + 45), font, 0.4, text_color, 1)
+        
+        cv2.line(vis_grid, (legend_x + 10, legend_y + 60), (legend_x + 20, legend_y + 60), (255, 255, 0), 2)
+        cv2.putText(vis_grid, "Trail", (legend_x + 25, legend_y + 65), font, 0.4, text_color, 1)
+        
+        cv2.line(vis_grid, (legend_x + 10, legend_y + 80), (legend_x + 20, legend_y + 80), (0, 255, 255), 3)
+        cv2.putText(vis_grid, "Current Path", (legend_x + 25, legend_y + 85), font, 0.4, text_color, 1)
+        
+        # Resize for consistent web display
+        target_height = 500  # Increased for better visibility
         target_width = int(target_height * canvas_width / canvas_height)
         vis_grid = cv2.resize(vis_grid, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
         
@@ -599,7 +636,10 @@ class SimpleLineFollower:
         self.turning_180 = False
         self.turn_180_start_time = 0
         
-        # Visual odometry and mapping
+        # Visual odometry for camera-based position tracking
+        self.visual_odometry = VisualOdometry()
+        
+        # Line-based mapping for navigation
         self.mapper = LineBasedMapper()
         
         # Navigation state - always enabled since we need both line following AND navigation
@@ -764,7 +804,7 @@ class SimpleLineFollower:
                                 return True
             
             return False
-
+            
         except Exception as e:
             logging.debug(f"Object detection error: {e}")
             return False
@@ -999,17 +1039,21 @@ class SimpleLineFollower:
         logging.info("Navigation mode disabled - returning to line following")
     
     def update_position_tracking(self, frame):
-        """Update robot position using sensor data and known maze layout"""
-        # Update mapper with current sensor readings
+        """Update robot position using camera visual odometry"""
+        # Get position from visual odometry (camera-based tracking)
+        vo_x, vo_y, vo_heading = self.visual_odometry.update(frame)
+        
+        # Update mapper with visual odometry position
+        self.mapper.robot_x = vo_x
+        self.mapper.robot_y = vo_y
+        self.mapper.robot_heading = vo_heading
+        
+        # Also update mapper with sensor data for waypoint progression
         self.mapper.update_robot_position_from_sensors(self.esp32.sensors)
         
-        # Get current position from mapper
-        x = self.mapper.robot_x
-        y = self.mapper.robot_y
-        heading = self.mapper.robot_heading
-        
-        self.current_position = (x, y, heading)
-        return x, y, heading
+        # Use visual odometry position as the authoritative position
+        self.current_position = (vo_x, vo_y, vo_heading)
+        return vo_x, vo_y, vo_heading
     
     def get_navigation_command(self):
         """Get navigation command when in navigation mode"""
@@ -1085,13 +1129,12 @@ class SimpleLineFollower:
         return angle_diff
 
 class WebVisualization:
-    """Flask web app for visualizing robot position and map"""
+    """Flask web app for visualizing robot position and map with cyberpunk theme"""
     
     def __init__(self, robot):
         self.robot = robot
-        self.app = Flask(__name__)
+        self.app = Flask(__name__, template_folder='../../templates', static_folder='../../static')
         self.app.config['SECRET_KEY'] = 'robot_visualization_key'
-        self.socketio = SocketIO(self.app, cors_allowed_origins="*")
         
         # Setup routes
         self.setup_routes()
@@ -1105,7 +1148,13 @@ class WebVisualization:
         
         @self.app.route('/')
         def index():
-            return render_template_string(self.get_html_template())
+            return render_template('index.html')
+        
+        @self.app.route('/test')
+        def test_map():
+            """Test page for debugging map display"""
+            with open('test_map.html', 'r') as f:
+                return f.read()
         
         @self.app.route('/api/robot_data')
         def get_robot_data():
@@ -1129,182 +1178,170 @@ class WebVisualization:
             }
             
             return jsonify(data)
+        
+        @self.app.route('/video_feed')
+        def video_feed():
+            """Video streaming route"""
+            return Response(self.generate_frames(),
+                          mimetype='multipart/x-mixed-replace; boundary=frame')
+        
+        @self.app.route('/debug/map')
+        def debug_map():
+            """Debug route to test map generation"""
+            try:
+                grid_image = self.create_grid_visualization()
+                return jsonify({
+                    'status': 'success',
+                    'image_length': len(grid_image),
+                    'has_image': bool(grid_image and len(grid_image) > 100)
+                })
+            except Exception as e:
+                return jsonify({
+                    'status': 'error',
+                    'error': str(e)
+                })
+    
+    def generate_frames(self):
+        """Generate camera frames for video streaming"""
+        while True:
+            try:
+                if self.robot.camera is not None:
+                    success, frame = self.robot.camera.read()
+                    if success:
+                        # Add cyberpunk overlay effects
+                        frame = self.add_cyberpunk_overlay(frame)
+                        
+                        # Encode frame
+                        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                        if ret:
+                            frame_bytes = buffer.tobytes()
+                            yield (b'--frame\r\n'
+                                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                    else:
+                        # Camera error - send black frame
+                        black_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                        cv2.putText(black_frame, 'CAMERA OFFLINE', (200, 240), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                        ret, buffer = cv2.imencode('.jpg', black_frame)
+                        if ret:
+                            frame_bytes = buffer.tobytes()
+                            yield (b'--frame\r\n'
+                                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                else:
+                    # No camera - send placeholder
+                    placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(placeholder, 'NO CAMERA DETECTED', (180, 240), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                    ret, buffer = cv2.imencode('.jpg', placeholder)
+                    if ret:
+                        frame_bytes = buffer.tobytes()
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                
+                time.sleep(0.1)  # 10 FPS for web streaming
+                
+            except Exception as e:
+                logging.error(f"Video streaming error: {e}")
+                time.sleep(1)
+    
+    def add_cyberpunk_overlay(self, frame):
+        """Add cyberpunk-style overlay to camera frame"""
+        try:
+            height, width = frame.shape[:2]
+            
+            # Add subtle cyan tint
+            overlay = frame.copy()
+            overlay[:, :, 1] = np.minimum(overlay[:, :, 1] + 10, 255)  # Slight green boost
+            overlay[:, :, 2] = np.minimum(overlay[:, :, 2] + 5, 255)   # Slight red boost
+            frame = cv2.addWeighted(frame, 0.8, overlay, 0.2, 0)
+            
+            # Add corner brackets
+            bracket_length = 30
+            bracket_thickness = 2
+            bracket_color = (0, 255, 255)  # Cyan
+            
+            # Top-left
+            cv2.line(frame, (10, 10), (10 + bracket_length, 10), bracket_color, bracket_thickness)
+            cv2.line(frame, (10, 10), (10, 10 + bracket_length), bracket_color, bracket_thickness)
+            
+            # Top-right
+            cv2.line(frame, (width-10, 10), (width-10-bracket_length, 10), bracket_color, bracket_thickness)
+            cv2.line(frame, (width-10, 10), (width-10, 10 + bracket_length), bracket_color, bracket_thickness)
+            
+            # Bottom-left
+            cv2.line(frame, (10, height-10), (10 + bracket_length, height-10), bracket_color, bracket_thickness)
+            cv2.line(frame, (10, height-10), (10, height-10-bracket_length), bracket_color, bracket_thickness)
+            
+            # Bottom-right
+            cv2.line(frame, (width-10, height-10), (width-10-bracket_length, height-10), bracket_color, bracket_thickness)
+            cv2.line(frame, (width-10, height-10), (width-10, height-10-bracket_length), bracket_color, bracket_thickness)
+            
+            # Add sensor overlay
+            sensor_text = f"SENSORS: {self.robot.esp32.sensors}"
+            cv2.putText(frame, sensor_text, (10, height-30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+            
+            # Add state overlay
+            state_text = f"STATE: {self.robot.state}"
+            cv2.putText(frame, state_text, (10, height-10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+            
+            # Add crosshair in center
+            center_x, center_y = width // 2, height // 2
+            crosshair_size = 20
+            cv2.line(frame, (center_x - crosshair_size, center_y), 
+                    (center_x + crosshair_size, center_y), (0, 255, 255), 1)
+            cv2.line(frame, (center_x, center_y - crosshair_size), 
+                    (center_x, center_y + crosshair_size), (0, 255, 255), 1)
+            cv2.circle(frame, (center_x, center_y), crosshair_size, (0, 255, 255), 1)
+            
+            return frame
+            
+        except Exception as e:
+            logging.error(f"Overlay error: {e}")
+            return frame
     
     def create_grid_visualization(self):
         """Create visualization of the predefined maze"""
         try:
+            print("DEBUG: Starting map visualization creation...")
+            
             # Get the maze visualization from mapper
             rgb_grid = self.robot.mapper.get_grid_visualization()
+            print(f"DEBUG: Grid shape: {rgb_grid.shape}")
+            print(f"DEBUG: Grid type: {type(rgb_grid)}")
             
             # Resize for better visibility (make it bigger)
-            rgb_grid = cv2.resize(rgb_grid, (400, 400), interpolation=cv2.INTER_NEAREST)
+            rgb_grid = cv2.resize(rgb_grid, (500, 400), interpolation=cv2.INTER_NEAREST)
+            print(f"DEBUG: Resized grid shape: {rgb_grid.shape}")
             
             # Convert to base64
             _, buffer = cv2.imencode('.png', rgb_grid)
             img_base64 = base64.b64encode(buffer).decode('utf-8')
+            print(f"DEBUG: Base64 length: {len(img_base64)}")
             
             return img_base64
             
         except Exception as e:
+            print(f"DEBUG: Error creating grid visualization: {e}")
             logging.error(f"Error creating grid visualization: {e}")
-            return ""
-    
-    def get_html_template(self):
-        """Return HTML template for the improved web interface"""
-        return '''
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Line Following Robot - Actual Maze Navigation</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f0f0f0; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        .header { text-align: center; margin-bottom: 20px; }
-        .dashboard { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-        .panel { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-        .status-item { padding: 10px; background: #f8f9fa; border-radius: 4px; }
-        .status-label { font-weight: bold; color: #666; }
-        .status-value { font-size: 1.2em; color: #333; }
-        .sensor-display { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; margin-top: 10px; }
-        .sensor { padding: 8px; text-align: center; border-radius: 4px; font-weight: bold; }
-        .sensor.active { background: #000; color: #fff; }
-        .sensor.inactive { background: #ddd; color: #666; }
-        .map-container { text-align: center; }
-        .map-image { max-width: 100%; border: 2px solid #ddd; border-radius: 4px; image-rendering: pixelated; }
-        .legend { margin-top: 10px; font-size: 12px; }
-        .legend-item { display: inline-block; margin: 0 10px; }
-        .legend-color { display: inline-block; width: 12px; height: 12px; margin-right: 4px; vertical-align: middle; }
-        .info-text { background: #e7f3ff; padding: 15px; border-radius: 4px; margin-top: 15px; }
-        .maze-info { background: #f0f8e7; padding: 15px; border-radius: 4px; margin-top: 15px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Line Following Robot - Pure Line Navigation</h1>
-            <p>Real-time tracking along actual line paths (no grid at all)</p>
-        </div>
-        
-        <div class="dashboard">
-            <div class="panel">
-                <h2>Robot Status</h2>
-                <div class="status-grid">
-                    <div class="status-item">
-                        <div class="status-label">Robot Position</div>
-                        <div class="status-value" id="robot-pos">(0.00, 0.00)</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-label">Heading</div>
-                        <div class="status-value" id="heading">0.0°</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-label">Current State</div>
-                        <div class="status-value" id="state">SEARCHING</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-label">Waypoint Progress</div>
-                        <div class="status-value" id="waypoint">0 / 0</div>
-                    </div>
-                </div>
-                
-                <h3>Sensor Array (L2, L1, C, R1, R2)</h3>
-                <div class="sensor-display" id="sensors">
-                    <div class="sensor inactive">0</div>
-                    <div class="sensor inactive">0</div>
-                    <div class="sensor inactive">0</div>
-                    <div class="sensor inactive">0</div>
-                    <div class="sensor inactive">0</div>
-                </div>
-                
-                <div class="info-text">
-                    <strong>Robot Operation:</strong> The robot follows pure line paths - no grid conversion at all! 
-                    Each line segment is defined by real start/end coordinates.
-                </div>
-                
-                <div class="maze-info">
-                    <strong>Pure Line Approach:</strong> Your maze is defined as actual line paths in real coordinates.
-                    The robot navigates from line to line, following continuous paths through your physical maze.
-                </div>
-            </div>
             
-            <div class="panel">
-                <h2>Pure Line Path Navigation</h2>
-                <div class="map-container">
-                    <img id="map-image" class="map-image" src="" alt="Pure Line Navigation Map">
-                    <div class="legend">
-                        <div class="legend-item">
-                            <span class="legend-color" style="background: #3c3c3c;"></span>
-                            Line Paths
-                        </div>
-                        <div class="legend-item">
-                            <span class="legend-color" style="background: orange;"></span>
-                            Current Line
-                        </div>
-                        <div class="legend-item">
-                            <span class="legend-color" style="background: red;"></span>
-                            Robot Position
-                        </div>
-                        <div class="legend-item">
-                            <span class="legend-color" style="background: green;"></span>
-                            Target Waypoint
-                        </div>
-                        <div class="legend-item">
-                            <span class="legend-color" style="background: cyan;"></span>
-                            Robot Trail
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        // Update data every 500ms
-        function updateData() {
-            fetch('/api/robot_data')
-                .then(response => response.json())
-                .then(data => {
-                    // Update positions
-                    document.getElementById('robot-pos').textContent = 
-                        `(${data.position.x.toFixed(2)}, ${data.position.y.toFixed(2)})`;
-                    document.getElementById('heading').textContent = 
-                        `${(data.position.heading * 180 / Math.PI).toFixed(0)}°`;
-                    
-                    // Update status
-                    document.getElementById('state').textContent = data.state;
-                    document.getElementById('waypoint').textContent = 
-                        `${data.current_waypoint} / ${data.total_waypoints}`;
-                    
-                    // Update sensors
-                    const sensorElements = document.getElementById('sensors').children;
-                    for (let i = 0; i < 5 && i < data.sensors.length; i++) {
-                        const sensor = sensorElements[i];
-                        sensor.textContent = data.sensors[i];
-                        sensor.className = data.sensors[i] ? 'sensor active' : 'sensor inactive';
-                    }
-                    
-                    // Update map
-                    if (data.grid_image) {
-                        document.getElementById('map-image').src = 'data:image/png;base64,' + data.grid_image;
-                    }
-                })
-                .catch(error => console.error('Error fetching data:', error));
-        }
-        
-        // Start updating
-        setInterval(updateData, 500);
-        updateData(); // Initial load
-    </script>
-</body>
-</html>
-        '''
+            # Return a simple test image as fallback
+            test_img = np.full((400, 500, 3), 64, dtype=np.uint8)  # Dark background
+            cv2.putText(test_img, 'MAP ERROR', (150, 200), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+            cv2.rectangle(test_img, (50, 50), (450, 350), (0, 255, 255), 2)
+            
+            _, buffer = cv2.imencode('.png', test_img)
+            fallback_base64 = base64.b64encode(buffer).decode('utf-8')
+            print(f"DEBUG: Fallback image length: {len(fallback_base64)}")
+            
+            return fallback_base64
     
     def start_web_server(self, host='0.0.0.0', port=5000):
         """Start the Flask web server"""
         try:
-            logging.info(f"Starting web visualization server at http://{host}:{port}")
-            self.socketio.run(self.app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)
+            logging.info(f"Starting cyberpunk web dashboard at http://{host}:{port}")
+            self.app.run(host=host, port=port, debug=False, threaded=True)
         except Exception as e:
             logging.error(f"Failed to start web server: {e}")
     
@@ -1321,30 +1358,33 @@ if __name__ == "__main__":
     # Create and start web visualization automatically
     try:
         web_viz = WebVisualization(robot)
-        print("Web visualization initialized")
+        print("Cyberpunk web visualization initialized")
         
         # Start web server automatically in background
         web_thread = threading.Thread(target=web_viz.start_web_server, daemon=True)
         web_thread.start()
-        print("Web server started automatically at http://0.0.0.0:5000")
+        print("Cyberpunk dashboard started at http://0.0.0.0:5000")
     except Exception as e:
         print(f"Could not initialize web visualization: {e}")
         web_viz = None
     
-    print("Line Following Robot with Physical Maze Navigation!")
-    print("Using your actual 17x13 grid maze layout:")
-    print("  - Follows black line paths (0s) through your physical maze")
-    print("  - Navigates to waypoints extracted from your maze structure")
-    print("  - Avoids obstacles with 180-degree turns")
-    print("  - Displays real-time position on your actual maze map")
-    print("  - Web interface available at http://192.168.2.20:5000")
-    print("Press Ctrl+C to stop")
+    print("╔════════════════════════════════════════════════════════════╗")
+    print("║            CYBERPUNK ROBOT NAVIGATION MATRIX              ║")
+    print("╠════════════════════════════════════════════════════════════╣")
+    print("║ > Neural line-following with visual odometry tracking     ║")
+    print("║ > Real-time maze navigation through extracted coordinates ║")
+    print("║ > YOLO11n obstacle detection with evasive maneuvers      ║")
+    print("║ > Live camera feed with cyberpunk overlay effects        ║")
+    print("║ > Interactive dashboard at http://192.168.2.20:5000      ║")
+    print("╚════════════════════════════════════════════════════════════╝")
+    print("SYSTEM STATUS: READY FOR DEPLOYMENT")
+    print("Press Ctrl+C to terminate")
     
     # Start robot
     try:
         robot.run() 
     except KeyboardInterrupt:
-        print("Stopping robot...")
+        print("\nSYSTEM SHUTDOWN INITIATED...")
         robot.stop()
         if web_viz:
             web_viz.stop() 
