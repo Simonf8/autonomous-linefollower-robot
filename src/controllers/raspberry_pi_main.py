@@ -18,12 +18,35 @@ from typing import List, Tuple, Set, Dict, Optional
 # ============================================================================
 # Robot Configuration
 # ============================================================================
-# Define the robot's start and end points in world coordinates (meters)
-# and the distance threshold for reaching the goal.
-# NOTE: World coordinates assume the top-left of the maze is at (0, 0).
-START_POSITION = (1.26, 1.74)  # (x, y) starting near grid cell (10, 14)
-START_HEADING = -math.pi / 2   # Start facing UP (negative y-direction)
-GOAL_POSITION = (1.26, 0.3)    # (x, y) goal near grid cell (10, 2)
+# -- Grid Configuration --
+# Define start and goal cells for grid-based placement.
+# Coordinates are (column, row) from the top-left of the maze grid.
+CELL_WIDTH_M = 0.12     # Width of a single grid cell in meters (12cm)
+START_CELL = (10, 14)   # (column, row)
+GOAL_CELL = (10, 2)     # (column, row)
+START_DIRECTION = 'UP'  # Initial robot orientation ('UP', 'DOWN', 'LEFT', 'RIGHT')
+
+# -- Odometry Calibration --
+# These values MUST be calibrated for your specific robot for accurate tracking.
+WHEEL_RADIUS_M = 0.0325         # Wheel radius in meters (3.25 cm)
+AXLE_LENGTH_M = 0.15            # Distance between wheels in meters (15 cm)
+TICKS_PER_REVOLUTION = 40       # Encoder ticks for one full wheel revolution
+
+# -- World Coordinate Configuration (calculated from grid) --
+# World coordinates are calculated from the grid cells, using the center of the cell.
+# The world origin (0,0) is the top-left corner of the maze.
+START_POSITION = ((START_CELL[0] + 0.5) * CELL_WIDTH_M, (START_CELL[1] + 0.5) * CELL_WIDTH_M)
+
+# Calculate heading in radians from the direction string
+HEADING_MAP = {
+    'UP': -math.pi / 2,    # Negative Y
+    'DOWN': math.pi / 2,   # Positive Y
+    'LEFT': math.pi,       # Negative X
+    'RIGHT': 0             # Positive X
+}
+START_HEADING = HEADING_MAP.get(START_DIRECTION.upper(), -math.pi / 2) # Default to UP
+
+GOAL_POSITION = ((GOAL_CELL[0] + 0.5) * CELL_WIDTH_M, (GOAL_CELL[1] + 0.5) * CELL_WIDTH_M)
 GOAL_THRESHOLD = 0.15          # Stop within 15cm of the goal
 
 WebVisualization = None  # Will be defined below
@@ -102,10 +125,10 @@ class WheelOdometry:
     """Calculates robot position and heading using wheel encoder data."""
 
     def __init__(self, initial_pose: Tuple[float, float, float] = (0.0, 0.0, 0.0)):
-        # Robot parameters (MUST be calibrated for your specific robot)
-        self.WHEEL_RADIUS = 0.0325  # Meters (e.g., 3.25 cm)
-        self.AXLE_LENGTH = 0.15    # Meters (distance between wheels)
-        self.TICKS_PER_REVOLUTION = 40  # Pulses from encoder for one full wheel turn
+        # Robot parameters are now defined globally for easier calibration
+        self.WHEEL_RADIUS = WHEEL_RADIUS_M
+        self.AXLE_LENGTH = AXLE_LENGTH_M
+        self.TICKS_PER_REVOLUTION = TICKS_PER_REVOLUTION
 
         # State variables, initialized to the provided start pose
         self.x, self.y, self.heading = initial_pose
@@ -155,7 +178,7 @@ class Mapper:
         self.robot_heading = 0.0
         self.path_history = []
         self.maze_grid = self.create_maze_grid()
-        self.cell_width_m = 0.12  # Assuming 12cm cells, for coordinate conversion
+        self.cell_width_m = CELL_WIDTH_M  # Use global cell width
 
     def create_maze_grid(self):
         """Creates the grid representation of the maze from the simulation."""
@@ -357,9 +380,9 @@ class SimpleLineFollower:
         def connect_esp32():
             esp32_connected = self.esp32.connect()
             if esp32_connected:
-                print("✅ ESP32 connected successfully!")
+                print("ESP32 connected successfully!")
             else:
-                print("❌ ESP32 connection failed - continuing without motor control")
+                print("ESP32 connection failed - continuing without motor control")
         
         # Start ESP32 connection in background
         esp32_thread = threading.Thread(target=connect_esp32, daemon=True)
