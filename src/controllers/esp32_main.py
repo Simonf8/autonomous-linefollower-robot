@@ -14,8 +14,67 @@ LEFT_MOTOR_2 = 19
 RIGHT_MOTOR_1 = 12
 RIGHT_MOTOR_2 = 13
 
+# Encoder Pins (QUADRATURE - 2 pins per encoder)
+# Please verify these pins with your hardware setup
+LEFT_ENCODER_A = 22
+LEFT_ENCODER_B = 26
+RIGHT_ENCODER_A = 23
+RIGHT_ENCODER_B = 32
+
 # Sensor Pins
 SENSOR_PINS = [14, 27, 16, 17, 25]  # L2, L1, C, R1, R2
+
+# Global tick counters for encoders
+left_ticks = 0
+right_ticks = 0
+
+# Global Pin objects for reading in ISRs, required for speed.
+left_b_pin = None
+right_b_pin = None
+
+# Interrupt handlers for encoders
+def left_encoder_handler(pin):
+    """Handle left encoder interrupt for quadrature decoding."""
+    global left_ticks
+    # Read pin B to determine direction.
+    # The logic might need to be inverted (+= 1 vs -= 1) depending on wiring.
+    if left_b_pin.value() == 0:
+        left_ticks -= 1 # Backward
+    else:
+        left_ticks += 1 # Forward
+
+def right_encoder_handler(pin):
+    """Handle right encoder interrupt for quadrature decoding."""
+    global right_ticks
+    # Read pin B to determine direction.
+    if right_b_pin.value() == 0:
+        right_ticks -= 1 # Backward
+    else:
+        right_ticks += 1 # Forward
+
+class Encoders:
+    """Manages reading from quadrature wheel encoders using interrupts."""
+    
+    def __init__(self, left_pin_a_num, left_pin_b_num, right_pin_a_num, right_pin_b_num):
+        """Initialize encoder pins and set up interrupt handlers."""
+        global left_b_pin, right_b_pin
+
+        # Initialize pins
+        left_a_pin = Pin(left_pin_a_num, Pin.IN, Pin.PULL_UP)
+        left_b_pin = Pin(left_pin_b_num, Pin.IN, Pin.PULL_UP)
+        right_a_pin = Pin(right_pin_a_num, Pin.IN, Pin.PULL_UP)
+        right_b_pin = Pin(right_pin_b_num, Pin.IN, Pin.PULL_UP)
+        
+        # Attach interrupts to detect rising edges on A pins
+        left_a_pin.irq(trigger=Pin.IRQ_RISING, handler=left_encoder_handler)
+        right_a_pin.irq(trigger=Pin.IRQ_RISING, handler=right_encoder_handler)
+        
+        print("Quadrature Encoders ready")
+        
+    def get_ticks(self):
+        """Get the current tick counts for both encoders."""
+        global left_ticks, right_ticks
+        return left_ticks, right_ticks
 
 class Motors:
     """Simple motor control"""
@@ -110,7 +169,7 @@ def connect_wifi():
         print("WiFi failed")
         return None
 
-def run_server(motors, sensors):
+def run_server(motors, sensors, encoders):
     """Simple server - send sensor data, receive motor commands"""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -137,10 +196,14 @@ def run_server(motors, sensors):
                     pass
             
             if client:
-                # Send sensor data every 50ms
+                # Send sensor and encoder data every 50ms
                 if time.ticks_diff(current_time, last_sensor_time) >= 50:
-                    sensor_data = sensors.read()
-                    data_str = f"{sensor_data[0]},{sensor_data[1]},{sensor_data[2]},{sensor_data[3]},{sensor_data[4]}\n"
+                    sensor_values = sensors.read()
+                    lt, rt = encoders.get_ticks()
+                    
+                    # Data format: "s1,s2,s3,s4,s5,left_ticks,right_ticks\n"
+                    data_str = f"{','.join(map(str, sensor_values))},{lt},{rt}\n"
+                    
                     try:
                         client.send(data_str.encode())
                         last_sensor_time = current_time
@@ -195,9 +258,10 @@ def main():
     # Initialize hardware
     motors = Motors()
     sensors = Sensors(SENSOR_PINS)
+    encoders = Encoders(LEFT_ENCODER_A, LEFT_ENCODER_B, RIGHT_ENCODER_A, RIGHT_ENCODER_B)
     
     try:
-        run_server(motors, sensors)
+        run_server(motors, sensors, encoders)
     except KeyboardInterrupt:
         print("Stopping...")
     finally:

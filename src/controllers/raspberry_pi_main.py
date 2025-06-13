@@ -16,9 +16,9 @@ import heapq
 from typing import List, Tuple, Set, Dict, Optional
 
 # ============================================================================
-# Code cleaned up: VisualOdometry, DStarLite, and LineBasedMapper removed.
-# The robot will now operate as a pure line follower with obstacle detection,
-# without camera-based position tracking and navigation.
+# Re-introducing position tracking via wheel odometry.
+# The robot will now track its position based on encoder data from the ESP32.
+# A Mapper class is added for visualizing the robot's position on a grid.
 # ============================================================================
 
 # Web visualization is now integrated in this file
@@ -33,9 +33,13 @@ class ESP32Interface:
         self.socket = None
         self.connected = False
         
-        # Current sensor state - use raw sensor array
+        # Current sensor state
         self.sensors = [0, 0, 0, 0, 0]  # [L2, L1, C, R1, R2]
         self.line_detected = False
+        
+        # Encoder data
+        self.left_encoder_ticks = 0
+        self.right_encoder_ticks = 0
     
     def connect(self):
         """Connect to ESP32"""
@@ -71,9 +75,11 @@ class ESP32Interface:
             data = self.socket.recv(128).decode('utf-8').strip()
             if ',' in data:
                 parts = data.split(',')
-                if len(parts) >= 5:
+                if len(parts) >= 7: # 5 sensors + 2 encoders
                     self.sensors = [int(float(part)) for part in parts[:5]]
                     self.line_detected = sum(self.sensors) > 0
+                    self.left_encoder_ticks = int(parts[5])
+                    self.right_encoder_ticks = int(parts[6])
         except socket.timeout:
             pass
         except Exception as e:
@@ -87,6 +93,148 @@ class ESP32Interface:
             except:
                 pass
         self.connected = False
+
+class WheelOdometry:
+    """Calculates robot position and heading using wheel encoder data."""
+
+    def __init__(self):
+        # Robot parameters (MUST be calibrated for your specific robot)
+        self.WHEEL_RADIUS = 0.0325  # Meters (e.g., 3.25 cm)
+        self.AXLE_LENGTH = 0.15    # Meters (distance between wheels)
+        self.TICKS_PER_REVOLUTION = 40  # Pulses from encoder for one full wheel turn
+
+        # State variables
+        self.x = 0.0
+        self.y = 0.0
+        self.heading = math.pi / 2  # Start facing "up"
+
+        # Previous tick counts
+        self.prev_left_ticks = 0
+        self.prev_right_ticks = 0
+        
+        # Calculate distance per tick
+        self.DISTANCE_PER_TICK = (2 * math.pi * self.WHEEL_RADIUS) / self.TICKS_PER_REVOLUTION
+
+    def update(self, left_ticks: int, right_ticks: int) -> Tuple[float, float, float]:
+        """Update robot pose based on new encoder tick counts."""
+        # Calculate tick differences
+        delta_left = left_ticks - self.prev_left_ticks
+        delta_right = right_ticks - self.prev_right_ticks
+
+        # Update previous tick counts
+        self.prev_left_ticks = left_ticks
+        self.prev_right_ticks = right_ticks
+
+        # Calculate distance traveled by each wheel
+        left_dist = delta_left * self.DISTANCE_PER_TICK
+        right_dist = delta_right * self.DISTANCE_PER_TICK
+
+        # Calculate change in distance and heading
+        delta_dist = (left_dist + right_dist) / 2.0
+        delta_heading = (right_dist - left_dist) / self.AXLE_LENGTH
+
+        # Update pose
+        self.x += delta_dist * math.cos(self.heading)
+        self.y += delta_dist * math.sin(self.heading)
+        self.heading += delta_heading
+
+        # Normalize heading to be within [-pi, pi]
+        while self.heading > math.pi: self.heading -= 2 * math.pi
+        while self.heading < -math.pi: self.heading += 2 * math.pi
+        
+        return self.x, self.y, self.heading
+
+class Mapper:
+    """Handles the grid map visualization for the web dashboard."""
+    
+    def __init__(self):
+        self.robot_x = 0.0
+        self.robot_y = 0.0
+        self.robot_heading = 0.0
+        self.path_history = []
+        self.maze_grid = self.create_maze_grid()
+
+    def create_maze_grid(self):
+        """Creates the grid representation of the maze from the simulation."""
+        maze = [
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0],
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
+            [0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0],
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
+            [0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0],
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+        ]
+        return maze
+
+    def update_robot_position(self, x, y, heading):
+        """Update the robot's state and path history."""
+        self.robot_x = x
+        self.robot_y = y
+        self.robot_heading = heading
+        self.path_history.append((self.robot_x, self.robot_y))
+        if len(self.path_history) > 100: # Keep path history to a reasonable length
+            self.path_history.pop(0)
+    
+    def get_grid_visualization(self):
+        """Create an image of the maze with the robot's position and trail."""
+        cell_size = 25
+        maze_h, maze_w = len(self.maze_grid), len(self.maze_grid[0])
+        img_h, img_w = maze_h * cell_size, maze_w * cell_size
+        
+        # Create a dark canvas
+        vis_img = np.full((img_h, img_w, 3), (10, 10, 10), dtype=np.uint8)
+
+        # Draw the maze paths
+        path_color = (80, 80, 80)
+        for r in range(maze_h):
+            for c in range(maze_w):
+                if self.maze_grid[r][c] == 0: # Path
+                    cv2.rectangle(vis_img, (c*cell_size, r*cell_size), ((c+1)*cell_size, (r+1)*cell_size), path_color, -1)
+        
+        # Draw the path history
+        if len(self.path_history) > 1:
+            for i in range(1, len(self.path_history)):
+                # Convert world coordinates to pixel coordinates
+                # NOTE: This assumes robot starts at (0,0) world, which might need adjustment
+                # Also, the grid origin is top-left, while odometry might be different.
+                # This is a simple visualization and may need calibration.
+                x1, y1 = self.path_history[i-1]
+                x2, y2 = self.path_history[i]
+
+                # Heuristic to map odometry to grid viz. This WILL need tuning.
+                # Assumes odometry starts at center of a start cell. Let's say (20, 2)
+                start_cell_x, start_cell_y = 20, 2
+                world_origin_x = (start_cell_x + 0.5) * 0.12 # World coordinate of start cell
+                world_origin_y = (start_cell_y + 0.5) * 0.12
+
+                px1 = int(((x1 + world_origin_x) / (maze_w * 0.12)) * img_w)
+                py1 = int(((y1 + world_origin_y) / (maze_h * 0.12)) * img_h)
+                px2 = int(((x2 + world_origin_x) / (maze_w * 0.12)) * img_w)
+                py2 = int(((y2 + world_origin_y) / (maze_h * 0.12)) * img_h)
+
+                cv2.line(vis_img, (px1, py1), (px2, py2), (255, 255, 0), 2) # Yellow trail
+
+        # Draw the robot
+        robot_px = int(((self.robot_x + world_origin_x) / (maze_w * 0.12)) * img_w)
+        robot_py = int(((self.robot_y + world_origin_y) / (maze_h * 0.12)) * img_h)
+        cv2.circle(vis_img, (robot_px, robot_py), int(cell_size/2), (255, 0, 255), -1) # Magenta robot
+
+        # Draw robot heading
+        arrow_len = cell_size * 0.75
+        arrow_end_x = int(robot_px + arrow_len * math.cos(self.robot_heading))
+        arrow_end_y = int(robot_py + arrow_len * math.sin(self.robot_heading))
+        cv2.arrowedLine(vis_img, (robot_px, robot_py), (arrow_end_x, arrow_end_y), (0, 255, 0), 2)
+
+        return vis_img
 
 class SimpleLineFollower:
     """Pattern-based line following with object detection"""
@@ -117,6 +265,11 @@ class SimpleLineFollower:
         self.object_detected = False
         self.turning_180 = False
         self.turn_180_start_time = 0
+
+        # Position tracking with wheel odometry
+        self.odometry = WheelOdometry()
+        self.mapper = Mapper()
+        self.current_position = (0.0, 0.0, 0.0) # x, y, heading
 
     def setup_camera_and_yolo(self):
         """Initialize camera and YOLO model"""
@@ -192,7 +345,7 @@ class SimpleLineFollower:
 
     def run(self):
         """Main control loop for line following and obstacle detection."""
-        logging.info("Starting pattern-based line follower")
+        logging.info("Starting pattern-based line follower with odometry tracking")
         
         # Try to connect to ESP32 in a separate thread to avoid blocking
         def connect_esp32():
@@ -223,6 +376,8 @@ class SimpleLineFollower:
                     self._detection_counter = 0
                 
                 self.control_loop()
+                self.update_position_tracking()
+                
                 time.sleep(0.05)  # 20Hz - stable control
                 
         except KeyboardInterrupt:
@@ -279,6 +434,18 @@ class SimpleLineFollower:
         except Exception as e:
             logging.debug(f"Object detection error: {e}")
             return False
+
+    def update_position_tracking(self):
+        """Update robot's position using data from wheel odometry."""
+        left_ticks = self.esp32.left_encoder_ticks
+        right_ticks = self.esp32.right_encoder_ticks
+        
+        # Update odometry and get new position
+        x, y, heading = self.odometry.update(left_ticks, right_ticks)
+        self.current_position = (x, y, heading)
+        
+        # Update the mapper for visualization
+        self.mapper.update_robot_position(x, y, heading)
 
     def control_loop(self):
         """Single control loop using sensor patterns with object detection."""
@@ -488,9 +655,20 @@ class WebVisualization:
         @self.app.route('/api/robot_data')
         def get_robot_data():
             """Get current robot data as JSON"""
+            # Get grid visualization
+            grid_img = self.robot.mapper.get_grid_visualization()
+            _, buffer = cv2.imencode('.png', grid_img)
+            grid_base64 = base64.b64encode(buffer).decode('utf-8')
+
             data = {
                 'state': self.robot.state,
-                'sensors': self.robot.esp32.sensors
+                'sensors': self.robot.esp32.sensors,
+                'position': {
+                    'x': self.robot.current_position[0],
+                    'y': self.robot.current_position[1],
+                    'heading': self.robot.current_position[2]
+                },
+                'grid_image': grid_base64
             }
             return jsonify(data)
         
@@ -632,13 +810,14 @@ if __name__ == "__main__":
         web_viz = None
     
     print("\n" + "="*60)
-    print("Robot now running in simple line-following mode.")
+    print("Robot running with odometry tracking.")
     print("="*60)
     
     print("╔════════════════════════════════════════════════════════════╗")
     print("║            CYBERPUNK ROBOT NAVIGATION MATRIX              ║")
     print("╠════════════════════════════════════════════════════════════╣")
     print("║ > Simple line-following with IR sensors                   ║")
+    print("║ > Odometry-based position tracking                        ║")
     print("║ > YOLO11n obstacle detection with evasive maneuvers      ║")
     print("║ > Live camera feed with cyberpunk overlay effects        ║")
     print("║ > Interactive dashboard at http://192.168.2.20:5000      ║")
