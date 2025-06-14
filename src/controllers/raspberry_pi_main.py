@@ -60,6 +60,17 @@ IMG_PATH_SRC_PTS = np.float32([[200, 300], [440, 300], [580, 480], [60, 480]])
 # Destination points for the top-down view.
 IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
 
+# -- Black Box Detection Configuration --
+# HSV color range for black. May need tuning for your lighting conditions.
+BLACK_BOX_LOWER_HSV = np.array([0, 0, 0])
+BLACK_BOX_UPPER_HSV = np.array([180, 255, 50])
+# Expected pixel area of the box. Tune this based on camera height and distance.
+MIN_BOX_AREA = 4000
+MAX_BOX_AREA = 25000
+# Expected aspect ratio (width/height) of the box. Should be close to 1.0.
+MIN_ASPECT_RATIO = 0.75
+MAX_ASPECT_RATIO = 1.25
+
 # -- World Coordinate Configuration (calculated from grid) --
 # World coordinates are calculated from the grid cells, using the center of the cell.
 # The world origin (0,0) is the top-left corner of the maze.
@@ -562,7 +573,10 @@ class RobotController:
         self.camera = None
         self.yolo_model = None
         self.setup_camera_and_yolo()
+        self.latest_frame = None
         self.obstacle_detected = False
+        self.black_box_detected = False
+        self.detected_box_contours = []
         self.visual_turn_cue = "STRAIGHT" # STRAIGHT, CORNER_LEFT, CORNER_RIGHT
         self.perspective_transform_matrix = None
         
@@ -621,39 +635,23 @@ class RobotController:
                 # 1. Update robot's current position from odometry
                 self.update_position_tracking()
 
-                # 2. Check for obstacles
-                self.check_for_obstacles()
+                # 2. Check for obstacles and other visual cues
+                self.process_vision()
                 
                 # 3. Main navigation logic
-                if self.state == "NAVIGATING":
+                if self.state == "AVOIDING":
+                    self.handle_obstacle_and_replan()
+                elif self.state == "NAVIGATING":
                     self.navigate_path()
                 elif self.state == "AT_INTERSECTION":
                     # This state is handled within navigate_path, but motors are stopped briefly
                     pass
-                elif self.state == "AVOIDING":
-                    # Stop, replan, and then resume navigation
-                    self.handle_obstacle_and_replan()
                 elif self.state == "PLANNING":
                     # Waiting for a path
                     self.stop_motors()
                 
                 # 4. Check if goal is reached
                 self.check_if_goal_reached()
-                
-                # 5. Vision processing (run less frequently)
-                if not hasattr(self, '_vision_counter'): self._vision_counter = 0
-                self._vision_counter += 1
-                if self._vision_counter >= 5: # Check every 5 cycles
-                    self._vision_counter = 0
-                    if self.camera:
-                        ret, frame = self.camera.read()
-                        if ret:
-                            # Run obstacle detection
-                            if self.detect_objects_from_frame(frame) and self.state != "AVOIDING":
-                                self.state = "AVOIDING"
-                            
-                            # Run path shape detection
-                            self.visual_turn_cue = self.detect_path_shape_from_frame(frame)
 
                 time.sleep(0.05) # 20Hz control loop
                 
@@ -663,6 +661,31 @@ class RobotController:
             self.tts_manager.speak('SHUTDOWN')
             self.stop()
     
+    def process_vision(self):
+        """Acquires a camera frame and runs all vision-based detection tasks."""
+        if not hasattr(self, '_vision_counter'): self._vision_counter = 0
+        self._vision_counter += 1
+        
+        # Run vision tasks less frequently to save CPU
+        if self._vision_counter < 5:
+            return
+            
+        self._vision_counter = 0
+        if self.camera:
+            ret, frame = self.camera.read()
+            if ret:
+                self.latest_frame = frame.copy()
+                
+                # Run YOLO obstacle detection
+                # This function will now internally set the state if an obstacle is found
+                self.detect_objects_from_frame(self.latest_frame)
+                
+                # Run black box detection
+                self.black_box_detected, self.detected_box_contours = self.detect_black_boxes_from_frame(self.latest_frame)
+
+                # Run path shape detection for corner anticipation
+                self.visual_turn_cue = self.detect_path_shape_from_frame(self.latest_frame)
+
     def plan_initial_path(self):
         """Computes the first path to the goal."""
         print("Planning initial path...")
@@ -863,21 +886,8 @@ class RobotController:
         self.esp32.send_motor_speeds(left_speed, right_speed)
 
     def check_for_obstacles(self):
-        """Periodically checks for obstacles using YOLO."""
-        if not hasattr(self, '_detection_counter'):
-            self._detection_counter = 0
-        
-        self._detection_counter += 1
-        if self._detection_counter >= 5: # Check every 5 cycles
-            self._detection_counter = 0
-            if self.camera:
-                ret, frame = self.camera.read()
-                if ret:
-                    if self.detect_objects_from_frame(frame):
-                        self.obstacle_detected = True
-                        self.state = "AVOIDING"
-                    else:
-                        self.obstacle_detected = False
+        """This method is now deprecated in favor of process_vision()"""
+        pass
 
     def handle_obstacle_and_replan(self):
         """Stops the robot, updates the map, and triggers a replan."""
@@ -960,17 +970,22 @@ class RobotController:
                             class_id = int(box.cls[0])
                             class_name = self.yolo_model.names[class_id]
                             
-                            # Only trigger on actual obstacles, ignore ties and other non-obstacles
+                            # Only trigger on actual obstacles
                             if class_name.lower() in obstacle_objects:
                                 logging.info(f"Obstacle detected: {class_name} (confidence: {confidence:.2f})")
-                                self.state = "AVOIDING" # Set state to avoiding
+                                if self.state != "AVOIDING":
+                                    self.state = "AVOIDING"
                                 return True
+
+                            # Ignore non-obstacles
                             elif class_name.lower() in ignore_objects:
                                 logging.debug(f"Ignoring non-obstacle: {class_name} (confidence: {confidence:.2f})")
+                            
+                            # Treat unknown objects as obstacles
                             else:
-                                # Unknown object - be cautious and treat as obstacle
                                 logging.info(f"Unknown object detected: {class_name} (confidence: {confidence:.2f})")
-                                self.state = "AVOIDING" # Set state to avoiding
+                                if self.state != "AVOIDING":
+                                    self.state = "AVOIDING"
                                 return True
             
             return False
@@ -1055,6 +1070,35 @@ class RobotController:
             logging.debug(f"Path shape detection error: {e}")
             return "UNKNOWN"
 
+    def detect_black_boxes_from_frame(self, frame):
+        """Detects 9x9cm black boxes using color and shape analysis."""
+        hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv_frame, BLACK_BOX_LOWER_HSV, BLACK_BOX_UPPER_HSV)
+        
+        # Clean up the mask with morphological operations
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        found_boxes = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if MIN_BOX_AREA < area < MAX_BOX_AREA:
+                x, y, w, h = cv2.boundingRect(cnt)
+                aspect_ratio = float(w) / h
+                
+                if MIN_ASPECT_RATIO < aspect_ratio < MAX_ASPECT_RATIO:
+                    # It matches our criteria, so it's likely a box.
+                    found_boxes.append(cnt)
+                    
+        is_detected = len(found_boxes) > 0
+        if is_detected:
+            logging.info(f"Detected {len(found_boxes)} potential black box(es).")
+            
+        return is_detected, found_boxes
+
 class WebVisualization:
     """Flask web app for visualizing robot state with cyberpunk theme"""
     
@@ -1093,7 +1137,8 @@ class WebVisualization:
                     'y': self.robot.current_position[1],
                     'heading': self.robot.current_position[2]
                 },
-                'grid_image': grid_base64
+                'grid_image': grid_base64,
+                'black_box_detected': self.robot.black_box_detected
             }
             return jsonify(data)
         
@@ -1107,34 +1152,24 @@ class WebVisualization:
         """Generate camera frames for video streaming"""
         while True:
             try:
-                if self.robot.camera is not None:
-                    success, frame = self.robot.camera.read()
-                    if success:
-                        # Add cyberpunk overlay effects
-                        frame = self.add_cyberpunk_overlay(frame)
-                        
-                        # Encode frame
-                        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                        if ret:
-                            frame_bytes = buffer.tobytes()
-                            yield (b'--frame\r\n'
-                                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-                    else:
-                        # Camera error - send black frame
-                        black_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                        cv2.putText(black_frame, 'CAMERA OFFLINE', (200, 240), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-                        ret, buffer = cv2.imencode('.jpg', black_frame)
-                        if ret:
-                            frame_bytes = buffer.tobytes()
-                            yield (b'--frame\r\n'
-                                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                if self.robot.latest_frame is not None:
+                    frame = self.robot.latest_frame.copy()
+                    
+                    # Add cyberpunk overlay effects
+                    frame = self.add_cyberpunk_overlay(frame)
+                    
+                    # Encode frame
+                    ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    if ret:
+                        frame_bytes = buffer.tobytes()
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                 else:
-                    # No camera - send placeholder
-                    placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
-                    cv2.putText(placeholder, 'NO CAMERA DETECTED', (180, 240), 
+                    # No frame available yet, send placeholder
+                    black_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(black_frame, 'INITIALIZING VISUAL CORTEX...', (100, 240), 
                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-                    ret, buffer = cv2.imencode('.jpg', placeholder)
+                    ret, buffer = cv2.imencode('.jpg', black_frame)
                     if ret:
                         frame_bytes = buffer.tobytes()
                         yield (b'--frame\r\n'
@@ -1196,6 +1231,12 @@ class WebVisualization:
             cv2.line(frame, (center_x, center_y - crosshair_size), 
                     (center_x, center_y + crosshair_size), (0, 255, 255), 1)
             cv2.circle(frame, (center_x, center_y), crosshair_size, (0, 255, 255), 1)
+            
+            # Draw detected black boxes
+            if self.robot.black_box_detected and self.robot.detected_box_contours:
+                cv2.drawContours(frame, self.robot.detected_box_contours, -1, (0, 255, 255), 2) # Cyan box
+                cv2.putText(frame, "PACKAGE DETECTED", (center_x - 100, 40), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
             return frame
             

@@ -63,6 +63,10 @@
                         <div class="status-label">MODE</div>
                         <div class="status-value cyber-text" id="robot-state">PLANNING</div>
                     </div>
+                    <div class="status-item">
+                        <div class="status-label">PACKAGE</div>
+                        <div class="status-value cyber-text" id="box-status">NONE</div>
+                    </div>
                 </div>
             </div>
 
@@ -128,6 +132,7 @@
                     document.getElementById('robot-position').textContent = `(${data.position.x.toFixed(2)}, ${data.position.y.toFixed(2)})`;
                     document.getElementById('robot-heading').textContent = `${(data.position.heading * 180 / Math.PI).toFixed(1)}°`;
                     document.getElementById('robot-state').textContent = data.state;
+                    document.getElementById('box-status').textContent = data.black_box_detected ? 'DETECTED' : 'NONE';
 
                     const sensorContainer = document.getElementById('sensor-array');
                     const sensorLabels = ['L2', 'L1', 'C', 'R1', 'R2'];
