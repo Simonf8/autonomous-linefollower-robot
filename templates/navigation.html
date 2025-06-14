@@ -68,8 +68,12 @@
                         <div class="status-value cyber-text" id="box-status">NONE</div>
                     </div>
                     <div class="status-item">
-                        <div class="status-label">TASK PROGRESS</div>
-                        <div class="status-value cyber-text" id="task-progress">0/0</div>
+                        <div class="status-label">BOXES COLLECTED</div>
+                        <div class="status-value cyber-text" id="boxes-collected">0/4</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">BOXES DELIVERED</div>
+                        <div class="status-value cyber-text" id="boxes-delivered">0/4</div>
                     </div>
                 </div>
             </div>
@@ -164,8 +168,9 @@
                     const packageStatus = data.has_package ? 'CARRYING' : (data.package_detected ? 'DETECTED' : 'NONE');
                     document.getElementById('box-status').textContent = packageStatus;
                     
-                    // Update task progress
-                    document.getElementById('task-progress').textContent = `${data.current_task || 0}/${data.total_tasks || 0}`;
+                    // Update box progress
+                    document.getElementById('boxes-collected').textContent = `${data.collected_boxes || 0}/${data.total_tasks || 4}`;
+                    document.getElementById('boxes-delivered').textContent = `${data.delivered_boxes || 0}/${data.total_tasks || 4}`;
 
                     // Update sensor display
                     const sensorContainer = document.getElementById('sensor-array');

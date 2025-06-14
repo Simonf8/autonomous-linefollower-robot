@@ -26,9 +26,9 @@ from gtts import gTTS
 # Define start and goal cells for grid-based placement.
 # Coordinates are (column, row) from the top-left of the UNMAPPED maze grid.
 CELL_WIDTH_M = 0.12     # Width of a single grid cell in meters (12cm)
-_START_CELL_RAW = (4, 12)   # (column, row)
+_START_CELL_RAW = (8, 2)   # (column, row)
 _GOAL_CELL_RAW = (20, 0)     # (column, row)
-_START_DIRECTION_RAW = 'UP'  # Initial robot orientation ('UP', 'DOWN', 'LEFT', 'RIGHT')
+_START_DIRECTION_RAW = 'LEFT'  # Initial robot orientation ('UP', 'DOWN', 'LEFT', 'RIGHT')
 
 # -- Task Configuration --
 # Define pickup and drop-off cells for the package delivery task.
@@ -602,9 +602,16 @@ class RobotController:
         self.esp32 = ESP32Interface(esp32_ip)
         
         # -- Task Management --
-        self.tasks = list(zip(PICKUP_CELLS, DROPOFF_CELLS))
-        self.current_task_idx = 0
+        self.pickup_locations = PICKUP_CELLS.copy()  # All pickup locations
+        self.dropoff_locations = DROPOFF_CELLS.copy()  # All dropoff locations
+        self.current_pickup_index = 0  # Current pickup index (P1=0, P2=1, P3=2, P4=3)
+        self.current_dropoff_index = 0  # Current dropoff index (D1=0, D2=1, D3=2, D4=3)
+        self.collected_boxes = []  # Track which boxes have been collected
+        self.delivered_boxes = []  # Track which boxes have been delivered
+        self.current_target_pickup = None  # Current pickup target
+        self.current_target_dropoff = None  # Current dropoff target
         self.has_package = False # True if robot is "carrying" a package
+        self.boxes_to_collect = len(PICKUP_CELLS)  # Total boxes to collect
 
         # -- Navigation State --
         self.path: Optional[List[Tuple[int, int]]] = None
@@ -647,10 +654,10 @@ class RobotController:
         self.goal_reached = False # This will be managed by the new state machine
 
         # -- D* Lite Path Planner --
-        # Start and goal are now dynamic, so we initialize with the first task
+        # Start and goal are dynamic based on mission progress
         initial_start = START_CELL
-        # Since the robot starts at the first pickup location, the first goal is the first dropoff.
-        initial_goal = self.tasks[self.current_task_idx][1]
+        # Initial goal will be set when mission starts
+        initial_goal = self.pickup_locations[0]  # Start by going to first pickup
         self.planner = Pathfinder(self.mapper.create_maze_grid(), initial_start, initial_goal)
 
     def setup_camera_and_yolo(self):
@@ -719,53 +726,111 @@ class RobotController:
             self.stop()
     
     def manage_mission_state(self):
-        """Handles the primary mission states for pickup and drop-off tasks."""
+        """Handles the multi-box collection and delivery mission."""
         # If we are in a navigation state, follow the path
         if self.state in ["NAVIGATING_TO_PICKUP", "NAVIGATING_TO_DROPOFF", "AT_INTERSECTION"]:
             self.navigate_path()
             return
 
-        # Handle transitions and planning states
+        # Handle mission states
         if self.state == "STARTING_MISSION":
-            # The robot starts at the first pickup location
-            print("Mission started. Robot is at the first pickup location.")
-            self.has_package = True # Assume it "picks up" the first package
-            self.state = "PLANNING_TO_DROPOFF"
-            self.tts_manager.speak('PACKAGE_DETECTED')
+            print("=" * 60)
+            print("MULTI-BOX DELIVERY MISSION STARTED")
+            print(f"Robot starting at: {START_CELL}")
+            print(f"Boxes to collect: {self.boxes_to_collect}")
+            print(f"Pickup locations: {[f'P{i+1}' for i in range(len(self.pickup_locations))]}")
+            print(f"Dropoff locations: {[f'D{i+1}' for i in range(len(self.dropoff_locations))]}")
+            print("=" * 60)
+            
+            # Start by going to the nearest pickup location
+            self.state = "PLANNING_TO_PICKUP"
 
-        elif self.state == "PLANNING_TO_DROPOFF":
-            print(f"Task {self.current_task_idx + 1}: Planning route to drop-off.")
-            self.target_cell = self.tasks[self.current_task_idx][1] # Get drop-off cell
+        elif self.state == "PLANNING_TO_PICKUP":
+            if self.has_package:
+                # Already have a package, go to dropoff instead
+                self.state = "PLANNING_TO_DROPOFF"
+                return
+                
+            # Check if all pickups are complete
+            if self.current_pickup_index >= len(self.pickup_locations):
+                print("All boxes collected! Mission complete.")
+                self.state = "MISSION_COMPLETE"
+                self.tts_manager.speak('GOAL_REACHED')
+                return
+                
+            # Go to the next pickup in sequence (P1, P2, P3, P4)
+            self.current_target_pickup = self.pickup_locations[self.current_pickup_index]
+            self.target_cell = self.current_target_pickup
+            print(f"Planning route to pickup P{self.current_pickup_index + 1} at {self.current_target_pickup}")
             self.plan_path_to_target()
         
-        elif self.state == "PLANNING_TO_PICKUP":
-            print(f"Task {self.current_task_idx + 1}: Planning route to pickup.")
-            self.target_cell = self.tasks[self.current_task_idx][0] # Get pickup cell
+        elif self.state == "PLANNING_TO_DROPOFF":
+            if not self.has_package:
+                # No package to deliver, go to pickup instead
+                self.state = "PLANNING_TO_PICKUP"
+                return
+                
+            # Go to the next dropoff in sequence (D1, D2, D3, D4)
+            if self.current_dropoff_index >= len(self.dropoff_locations):
+                print("All dropoffs complete!")
+                self.state = "MISSION_COMPLETE"
+                self.tts_manager.speak('GOAL_REACHED')
+                return
+                
+            self.current_target_dropoff = self.dropoff_locations[self.current_dropoff_index]
+            self.target_cell = self.current_target_dropoff
+            print(f"Planning route to dropoff D{self.current_dropoff_index + 1} at {self.current_target_dropoff}")
             self.plan_path_to_target()
 
-        elif self.state == "AT_DROPOFF":
-            print(f"Task {self.current_task_idx + 1}: Reached drop-off location.")
-            self.stop_motors()
-            time.sleep(1.0) # Simulate "dropping off" package
-            
-            self.has_package = False
-            self.current_task_idx += 1 # Move to the next task
-
-            if self.current_task_idx >= len(self.tasks):
-                print("All tasks completed. Mission successful!")
-                self.state = "MISSION_COMPLETE"
-                self.tts_manager.speak('GOAL_REACHED') # Use goal reached for final task
-            else:
-                self.state = "PLANNING_TO_PICKUP" # Plan to get the next package
-
         elif self.state == "AT_PICKUP":
-            print(f"Task {self.current_task_idx + 1}: Reached pickup location.")
-            self.stop_motors()
-            time.sleep(1.0) # Simulate "picking up" package
-            self.tts_manager.speak('PACKAGE_DETECTED')
+            if self.current_target_pickup:
+                print(f"Reached pickup location P{self.current_pickup_index + 1}. Collecting box...")
+                self.stop_motors()
+                time.sleep(1.0) # Simulate "picking up" package
+                
+                # Mark this pickup as collected
+                self.collected_boxes.append(self.current_target_pickup)
+                self.has_package = True
+                self.current_target_pickup = None
+                
+                print(f"Box P{self.current_pickup_index + 1} collected! Progress: {len(self.collected_boxes)}/{self.boxes_to_collect}")
+                self.tts_manager.speak('PACKAGE_DETECTED')
+                
+                # Move to next pickup for future reference (but go to dropoff first)
+                self.current_pickup_index += 1
+                
+                # Now plan to dropoff
+                self.state = "PLANNING_TO_DROPOFF"
 
-            self.has_package = True
-            self.state = "PLANNING_TO_DROPOFF"
+        elif self.state == "AT_DROPOFF":
+            if self.current_target_dropoff:
+                print(f"Reached dropoff location D{self.current_dropoff_index + 1}. Delivering box...")
+                self.stop_motors()
+                time.sleep(1.0) # Simulate "dropping off" package
+                
+                # Mark this delivery as complete
+                self.delivered_boxes.append(self.current_target_dropoff)
+                self.has_package = False
+                self.current_target_dropoff = None
+                
+                print(f"Box delivered to D{self.current_dropoff_index + 1}! Progress: {len(self.delivered_boxes)}/{self.boxes_to_collect}")
+                
+                # Move to next dropoff for future reference
+                self.current_dropoff_index += 1
+                
+                # Check if all boxes are collected and delivered
+                if len(self.collected_boxes) >= self.boxes_to_collect and len(self.delivered_boxes) >= self.boxes_to_collect:
+                    print("=" * 60)
+                    print("ALL BOXES COLLECTED AND DELIVERED!")
+                    print("MISSION SUCCESSFUL!")
+                    print("=" * 60)
+                    self.state = "MISSION_COMPLETE"
+                    self.tts_manager.speak('GOAL_REACHED')
+                else:
+                    # Continue with next pickup
+                    self.state = "PLANNING_TO_PICKUP"
+    
+
     
     def plan_path_to_target(self):
         """Computes a path from the robot's current cell to the target cell."""
@@ -1069,8 +1134,7 @@ class RobotController:
             # --- Object Categories ---
             # Packages/boxes that we want to pick up and deliver
             package_objects = {
-                'suitcase', 'backpack', 'handbag', 'briefcase', 'box',
-                'cardboard box', 'package', 'parcel', 'luggage'
+                'box',    
             }
             
             # Objects that ARE obstacles (things robot must avoid)
@@ -1083,9 +1147,7 @@ class RobotController:
 
             # Objects to ignore (not real obstacles for this maze)
             ignore_objects = {
-                'tie', 'necktie', 'person', 'laptop', 'mouse', 'remote', 
-                'keyboard', 'cell phone', 'book', 'clock', 'scissors', 
-                'teddy bear', 'hair drier', 'toothbrush', 'tv', 'monitor'
+                'tie', 'necktie'
             }
             
             # Reset detection flags for this frame
@@ -1264,8 +1326,12 @@ class WebVisualization:
                 'grid_image': grid_base64,
                 'package_detected': self.robot.package_detected,
                 'has_package': getattr(self.robot, 'has_package', False),
-                'current_task': getattr(self.robot, 'current_task_idx', 0) + 1,
-                'total_tasks': len(getattr(self.robot, 'tasks', [])),
+                'current_task': len(getattr(self.robot, 'collected_boxes', [])) + 1,
+                'total_tasks': getattr(self.robot, 'boxes_to_collect', 4),
+                'collected_boxes': len(getattr(self.robot, 'collected_boxes', [])),
+                'delivered_boxes': len(getattr(self.robot, 'delivered_boxes', [])),
+                'current_pickup_index': getattr(self.robot, 'current_pickup_index', 0),
+                'current_dropoff_index': getattr(self.robot, 'current_dropoff_index', 0),
                 'pickup_cells': _PICKUP_CELLS_RAW,
                 'dropoff_cells': _DROPOFF_CELLS_RAW
             }
