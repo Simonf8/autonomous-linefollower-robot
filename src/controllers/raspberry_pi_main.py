@@ -14,6 +14,10 @@ import base64
 from flask import Flask, render_template, jsonify, Response, request
 import heapq
 from typing import List, Tuple, Set, Dict, Optional
+import queue
+import random
+import subprocess
+from gtts import gTTS
 
 # ============================================================================
 # Robot Configuration
@@ -74,6 +78,99 @@ GOAL_POSITION = ((GOAL_CELL[0] + 0.5) * CELL_WIDTH_M, (GOAL_CELL[1] + 0.5) * CEL
 GOAL_THRESHOLD = 0.15          # Stop within 15cm of the goal
 
 WebVisualization = None  # Will be defined below
+
+class TTSManager:
+    """Handles Text-to-Speech announcements using Google's gTTS service."""
+
+    def __init__(self):
+        self.tts_queue = queue.Queue()
+        self.phrases = {
+            'STARTUP': [
+                "Systems are online. At your service, sir.",
+                "All systems nominal. Ready for your command.",
+                "I am online and ready."
+            ],
+            'PATH_FOUND': [
+                "I have computed a route. Engaging.",
+                "The optimal path has been calculated. Proceeding.",
+                "Route locked in. On my way."
+            ],
+            'OBSTACLE': [
+                "Pardon me, sir. There appears to be an obstruction.",
+                "Obstacle detected. I am calculating an alternative route.",
+                "It seems our path is momentarily blocked."
+            ],
+            'REPLANNING': [
+                "Recalculating the trajectory.",
+                "Devising a new approach.",
+                "One moment, sir. Plotting a new course."
+            ],
+            'TURN_LEFT': [
+                "Executing a left turn.",
+                "Turning left."
+            ],
+            'TURN_RIGHT': [
+                "Executing a right turn.",
+                "Turning right."
+            ],
+            'GOAL_REACHED': [
+                "We have arrived at the destination.",
+                "Target reached. Standing by for further instructions.",
+                "Destination reached, sir."
+            ],
+            'NO_PATH': [
+                "Sir, it appears there is no viable path to the destination.",
+                "I am unable to compute a route. The destination is unreachable from this position.",
+                "It seems we are stuck. No path is available."
+            ],
+            'SHUTDOWN': [
+                "Powering down. Goodbye, sir.",
+                "Going into standby mode.",
+                "Shutting down systems."
+            ]
+        }
+        
+        # Check if mpg123 is installed and start the processing thread
+        self.player_available = self._check_player()
+        if self.player_available:
+            self.tts_thread = threading.Thread(target=self._process_queue, daemon=True)
+            self.tts_thread.start()
+        else:
+            logging.error("mpg123 not found. Please install it to enable TTS.")
+
+    def _check_player(self):
+        """Check if the 'mpg123' command is available on the system."""
+        try:
+            subprocess.run(['which', 'mpg123'], check=True, capture_output=True)
+            logging.info("mpg123 audio player found.")
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
+
+    def _process_queue(self):
+        """Process the queue of phrases to be spoken by generating an MP3 and playing it."""
+        while True:
+            try:
+                text_to_speak = self.tts_queue.get()
+                if self.player_available and text_to_speak:
+                    # Generate speech using gTTS, using a US English voice which is typically male.
+                    tts = gTTS(text=text_to_speak, lang='en-us', slow=False)
+                    audio_file = "/tmp/robot_speech.mp3"
+                    tts.save(audio_file)
+                    
+                    # Play the generated audio file with mpg123
+                    subprocess.run(['mpg123', '-q', audio_file], check=True)
+                    
+                self.tts_queue.task_done()
+            except Exception as e:
+                logging.error(f"gTTS processing error: {e}")
+
+    def speak(self, event_key: str):
+        """Add a random phrase for a given event to the speech queue."""
+        if self.player_available and event_key in self.phrases:
+            phrase = random.choice(self.phrases[event_key])
+            self.tts_queue.put(phrase)
+
 
 class ESP32Interface:
     """Simple ESP32 communication for sensor data and motor control"""
@@ -469,6 +566,9 @@ class RobotController:
         self.visual_turn_cue = "STRAIGHT" # STRAIGHT, CORNER_LEFT, CORNER_RIGHT
         self.perspective_transform_matrix = None
         
+        # -- TTS Manager --
+        self.tts_manager = TTSManager()
+        
         # -- Position & Mapping --
         initial_pose = (START_POSITION[0], START_POSITION[1], START_HEADING)
         self.odometry = WheelOdometry(initial_pose=initial_pose)
@@ -509,6 +609,9 @@ class RobotController:
             print("ESP32 connected successfully!")
         else:
             print("ESP32 connection failed - continuing without motor control")
+        
+        # Announce startup
+        self.tts_manager.speak('STARTUP')
         
         # Get initial path
         self.plan_initial_path()
@@ -557,6 +660,7 @@ class RobotController:
         except KeyboardInterrupt:
             logging.info("Stopping...")
         finally:
+            self.tts_manager.speak('SHUTDOWN')
             self.stop()
     
     def plan_initial_path(self):
@@ -568,9 +672,11 @@ class RobotController:
             self.current_waypoint_idx = 0
             self.state = "NAVIGATING"
             print(f"Path found! Length: {len(self.path)} waypoints.")
-                            else:
+            self.tts_manager.speak('PATH_FOUND')
+        else:
             self.state = "NO_PATH"
             print("No path to goal could be found.")
+            self.tts_manager.speak('NO_PATH')
 
     def navigate_path(self):
         """Follows the line and uses the D* path to make decisions at intersections."""
@@ -647,7 +753,7 @@ class RobotController:
             return "STRAIGHT"
         elif heading_error > math.pi / 4:
             return "LEFT"
-            else:
+        else:
             return "RIGHT"
     
     def execute_intersection_turn(self, direction: str):
@@ -658,10 +764,12 @@ class RobotController:
 
         if direction == "LEFT":
             # Pivot turn left
+            self.tts_manager.speak('TURN_LEFT')
             self.esp32.send_motor_speeds(-self.sharp_turn_speed, self.sharp_turn_speed)
             time.sleep(0.5) # Adjust turn duration
         elif direction == "RIGHT":
             # Pivot turn right
+            self.tts_manager.speak('TURN_RIGHT')
             self.esp32.send_motor_speeds(self.sharp_turn_speed, -self.sharp_turn_speed)
             time.sleep(0.5) # Adjust turn duration
         
@@ -756,12 +864,12 @@ class RobotController:
 
     def check_for_obstacles(self):
         """Periodically checks for obstacles using YOLO."""
-                if not hasattr(self, '_detection_counter'):
-                    self._detection_counter = 0
-                
-                self._detection_counter += 1
+        if not hasattr(self, '_detection_counter'):
+            self._detection_counter = 0
+        
+        self._detection_counter += 1
         if self._detection_counter >= 5: # Check every 5 cycles
-                    self._detection_counter = 0
+            self._detection_counter = 0
             if self.camera:
                 ret, frame = self.camera.read()
                 if ret:
@@ -773,6 +881,7 @@ class RobotController:
 
     def handle_obstacle_and_replan(self):
         """Stops the robot, updates the map, and triggers a replan."""
+        self.tts_manager.speak('OBSTACLE')
         print("Obstacle detected! Stopping and replanning...")
         self.stop_motors()
         
@@ -790,6 +899,7 @@ class RobotController:
         self.planner.update_obstacle(obstacle_cell_x, obstacle_cell_y, is_obstacle=True)
         
         # Replan path
+        self.tts_manager.speak('REPLANNING')
         self.planner.start_cell = self.planner.last_pos # Start replanning from current pos
         new_path = self.planner.get_path()
         if new_path:
@@ -805,13 +915,15 @@ class RobotController:
 
     def check_if_goal_reached(self):
         """Checks if the robot is within the goal threshold."""
-                dist_to_goal = math.sqrt(
-                    (self.current_position[0] - GOAL_POSITION[0])**2 +
-                    (self.current_position[1] - GOAL_POSITION[1])**2
-                )
-                if dist_to_goal < GOAL_THRESHOLD:
-                    print(f"Goal reached! Distance: {dist_to_goal:.3f}m")
-                    self.goal_reached = True
+        dist_to_goal = math.sqrt(
+            (self.current_position[0] - GOAL_POSITION[0])**2 +
+            (self.current_position[1] - GOAL_POSITION[1])**2
+        )
+        if dist_to_goal < GOAL_THRESHOLD:
+            print(f"Goal reached! Distance: {dist_to_goal:.3f}m")
+            if self.state != "GOAL_REACHED":
+                self.tts_manager.speak('GOAL_REACHED')
+            self.goal_reached = True
             self.state = "GOAL_REACHED"
             self.stop_motors()
     
