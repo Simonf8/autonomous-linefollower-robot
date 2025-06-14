@@ -134,6 +134,11 @@ class TTSManager:
                 "I am unable to compute a route. The destination is unreachable from this position.",
                 "It seems we are stuck. No path is available."
             ],
+            'PACKAGE_DETECTED': [
+                "I have located the package.",
+                "Package acquired visually.",
+                "Target package is in sight."
+            ],
             'SHUTDOWN': [
                 "Powering down. Goodbye, sir.",
                 "Going into standby mode.",
@@ -576,6 +581,7 @@ class RobotController:
         self.latest_frame = None
         self.obstacle_detected = False
         self.black_box_detected = False
+        self.last_box_state = False # To announce package detection only once
         self.detected_box_contours = []
         self.visual_turn_cue = "STRAIGHT" # STRAIGHT, CORNER_LEFT, CORNER_RIGHT
         self.perspective_transform_matrix = None
@@ -681,7 +687,10 @@ class RobotController:
                 self.detect_objects_from_frame(self.latest_frame)
                 
                 # Run black box detection
+                self.last_box_state = self.black_box_detected
                 self.black_box_detected, self.detected_box_contours = self.detect_black_boxes_from_frame(self.latest_frame)
+                if self.black_box_detected and not self.last_box_state:
+                    self.tts_manager.speak('PACKAGE_DETECTED')
 
                 # Run path shape detection for corner anticipation
                 self.visual_turn_cue = self.detect_path_shape_from_frame(self.latest_frame)
