@@ -30,12 +30,20 @@ _START_CELL_RAW = (0, 14)   # (column, row)
 _GOAL_CELL_RAW = (20, 0)     # (column, row)
 _START_DIRECTION_RAW = 'UP'  # Initial robot orientation ('UP', 'DOWN', 'LEFT', 'RIGHT')
 
+# -- Task Configuration --
+# Define pickup and drop-off cells for the package delivery task.
+_PICKUP_CELLS_RAW = [(0, 14), (2, 14), (4, 14), (6, 14)]
+_DROPOFF_CELLS_RAW = [(20, 0), (18, 0), (16, 0), (14, 0)] # Corresponds to top lines
+
 # -- Map Mirroring Correction --
 # The physical maze is a horizontal mirror of the one defined in the code.
 # We correct this by flipping the grid and all related coordinates.
 MAZE_WIDTH_CELLS = 21
 START_CELL = (MAZE_WIDTH_CELLS - 1 - _START_CELL_RAW[0], _START_CELL_RAW[1])
 GOAL_CELL = (MAZE_WIDTH_CELLS - 1 - _GOAL_CELL_RAW[0], _GOAL_CELL_RAW[1])
+
+PICKUP_CELLS = [(MAZE_WIDTH_CELLS - 1 - cell[0], cell[1]) for cell in _PICKUP_CELLS_RAW]
+DROPOFF_CELLS = [(MAZE_WIDTH_CELLS - 1 - cell[0], cell[1]) for cell in _DROPOFF_CELLS_RAW]
 
 _DIRECTION_FLIP_MAP = {'LEFT': 'RIGHT', 'RIGHT': 'LEFT'}
 START_DIRECTION = _DIRECTION_FLIP_MAP.get(_START_DIRECTION_RAW.upper(), _START_DIRECTION_RAW)
@@ -85,7 +93,8 @@ HEADING_MAP = {
 }
 START_HEADING = HEADING_MAP.get(START_DIRECTION.upper(), -math.pi / 2) # Default to UP
 
-GOAL_POSITION = ((GOAL_CELL[0] + 0.5) * CELL_WIDTH_M, (GOAL_CELL[1] + 0.5) * CELL_WIDTH_M)
+# GOAL_POSITION is now dynamic, but we can set an initial one for visualization if needed
+GOAL_POSITION = ((DROPOFF_CELLS[0][0] + 0.5) * CELL_WIDTH_M, (DROPOFF_CELLS[0][1] + 0.5) * CELL_WIDTH_M)
 GOAL_THRESHOLD = 0.15          # Stop within 15cm of the goal
 
 WebVisualization = None  # Will be defined below
@@ -574,12 +583,17 @@ class RobotController:
     def __init__(self, esp32_ip):
         self.esp32 = ESP32Interface(esp32_ip)
         
+        # -- Task Management --
+        self.tasks = list(zip(PICKUP_CELLS, DROPOFF_CELLS))
+        self.current_task_idx = 0
+        self.has_package = False # True if robot is "carrying" a package
+
         # -- Navigation State --
         self.path: Optional[List[Tuple[int, int]]] = None
         self.current_waypoint_idx = 0
-        self.state = "PLANNING" # PLANNING, NAVIGATING, AT_INTERSECTION, AVOIDING, GOAL_REACHED, TURNING_180
-        self.state = "PLANNING" # PLANNING, NAVIGATING, AT_INTERSECTION, AVOIDING, GOAL_REACHED
-
+        self.state = "STARTING_MISSION" # Initial state
+        self.target_cell: Optional[Tuple[int, int]] = None
+        
         # -- Speed & Control Settings --
         self.base_speed = 32 # Base motor speed for line following
         self.turn_speed_factor = 0.8
@@ -612,10 +626,14 @@ class RobotController:
         self.odometry = WheelOdometry(initial_pose=initial_pose)
         self.mapper = Mapper()
         self.current_position = self.odometry.x, self.odometry.y, self.odometry.heading # x, y, heading
-        self.goal_reached = False
+        self.goal_reached = False # This will be managed by the new state machine
 
         # -- D* Lite Path Planner --
-        self.planner = Pathfinder(self.mapper.create_maze_grid(), START_CELL, GOAL_CELL)
+        # Start and goal are now dynamic, so we initialize with the first task
+        initial_start = START_CELL
+        # Since the robot starts at the first pickup location, the first goal is the first dropoff.
+        initial_goal = self.tasks[self.current_task_idx][1]
+        self.planner = Pathfinder(self.mapper.create_maze_grid(), initial_start, initial_goal)
 
     def setup_camera_and_yolo(self):
         """Initialize camera and YOLO model"""
@@ -639,45 +657,36 @@ class RobotController:
             self.yolo_model = None
 
     def run(self):
-        """Main control loop for D* Lite navigation and obstacle avoidance."""
-        logging.info("Starting D* Lite navigation controller.")
+        """Main control loop for the multi-task delivery mission."""
+        logging.info("Starting D* Lite mission controller.")
         
-        # Connect to ESP32
-        if self.esp32.connect():
-            print("ESP32 connected successfully!")
-        else:
+        if not self.esp32.connect():
             print("ESP32 connection failed - continuing without motor control")
+        else:
+            print("ESP32 connected successfully!")
         
-        # Announce startup
         self.tts_manager.speak('STARTUP')
         
-        # Get initial path
-        self.plan_initial_path()
-
+        mission_running = True
         try:
-            while not self.goal_reached:
+            while mission_running:
                 # 1. Update robot's current position from odometry
                 self.update_position_tracking()
 
                 # 2. Check for obstacles and other visual cues
                 self.process_vision()
                 
-                # 3. Main navigation logic
+                # 3. Core State Machine Logic
                 if self.state == "AVOIDING":
                     self.handle_obstacle_and_replan()
                 elif self.state == "TURNING_180":
                     self.execute_180_turn_state()
-                elif self.state == "NAVIGATING":
-                    self.navigate_path()
-                elif self.state == "AT_INTERSECTION":
-                    # This state is handled within navigate_path, but motors are stopped briefly
-                    pass
-                elif self.state == "PLANNING":
-                    # Waiting for a path
-                    self.stop_motors()
+                else:
+                    self.manage_mission_state() # New state manager
                 
-                # 4. Check if goal is reached
-                self.check_if_goal_reached()
+                # 4. Check if the entire mission is complete
+                if self.state == "MISSION_COMPLETE":
+                    mission_running = False
 
                 time.sleep(0.05) # 20Hz control loop
                 
@@ -686,6 +695,86 @@ class RobotController:
         finally:
             self.tts_manager.speak('SHUTDOWN')
             self.stop()
+    
+    def manage_mission_state(self):
+        """Handles the primary mission states for pickup and drop-off tasks."""
+        # If we are in a navigation state, follow the path
+        if self.state in ["NAVIGATING_TO_PICKUP", "NAVIGATING_TO_DROPOFF", "AT_INTERSECTION"]:
+            self.navigate_path()
+            return
+
+        # Handle transitions and planning states
+        if self.state == "STARTING_MISSION":
+            # The robot starts at the first pickup location
+            print("Mission started. Robot is at the first pickup location.")
+            self.has_package = True # Assume it "picks up" the first package
+            self.state = "PLANNING_TO_DROPOFF"
+            self.tts_manager.speak('PACKAGE_DETECTED')
+
+        elif self.state == "PLANNING_TO_DROPOFF":
+            print(f"Task {self.current_task_idx + 1}: Planning route to drop-off.")
+            self.target_cell = self.tasks[self.current_task_idx][1] # Get drop-off cell
+            self.plan_path_to_target()
+        
+        elif self.state == "PLANNING_TO_PICKUP":
+            print(f"Task {self.current_task_idx + 1}: Planning route to pickup.")
+            self.target_cell = self.tasks[self.current_task_idx][0] # Get pickup cell
+            self.plan_path_to_target()
+
+        elif self.state == "AT_DROPOFF":
+            print(f"Task {self.current_task_idx + 1}: Reached drop-off location.")
+            self.stop_motors()
+            time.sleep(1.0) # Simulate "dropping off" package
+            
+            self.has_package = False
+            self.current_task_idx += 1 # Move to the next task
+
+            if self.current_task_idx >= len(self.tasks):
+                print("All tasks completed. Mission successful!")
+                self.state = "MISSION_COMPLETE"
+                self.tts_manager.speak('GOAL_REACHED') # Use goal reached for final task
+            else:
+                self.state = "PLANNING_TO_PICKUP" # Plan to get the next package
+
+        elif self.state == "AT_PICKUP":
+            print(f"Task {self.current_task_idx + 1}: Reached pickup location.")
+            self.stop_motors()
+            time.sleep(1.0) # Simulate "picking up" package
+            self.tts_manager.speak('PACKAGE_DETECTED')
+
+            self.has_package = True
+            self.state = "PLANNING_TO_DROPOFF"
+    
+    def plan_path_to_target(self):
+        """Computes a path from the robot's current cell to the target cell."""
+        if self.target_cell is None:
+            logging.error("Planning called without a target cell.")
+            self.state = "MISSION_COMPLETE" # Failsafe
+            return
+
+        current_cell_x = int(self.current_position[0] / CELL_WIDTH_M)
+        current_cell_y = int(self.current_position[1] / CELL_WIDTH_M)
+        
+        self.planner.start_cell = (current_cell_x, current_cell_y)
+        self.planner.goal_cell = self.target_cell
+        self.planner.last_pos = self.planner.start_cell
+        self.planner._initialize() # Re-initialize D* for the new goal
+
+        print(f"Planning path from {self.planner.start_cell} to {self.planner.goal_cell}...")
+        self.path = self.planner.get_path()
+
+        if self.path:
+            self.current_waypoint_idx = 0
+            if self.has_package:
+                self.state = "NAVIGATING_TO_DROPOFF"
+            else:
+                self.state = "NAVIGATING_TO_PICKUP"
+            print(f"Path found! Length: {len(self.path)} waypoints.")
+            self.tts_manager.speak('PATH_FOUND')
+        else:
+            self.state = "NO_PATH"
+            print(f"No path to target {self.target_cell} could be found.")
+            self.tts_manager.speak('NO_PATH')
     
     def process_vision(self):
         """Acquires a camera frame and runs all vision-based detection tasks."""
@@ -717,25 +806,14 @@ class RobotController:
                 # Run path shape detection for corner anticipation
                 self.visual_turn_cue = self.detect_path_shape_from_frame(self.latest_frame)
 
-    def plan_initial_path(self):
-        """Computes the first path to the goal."""
-        print("Planning initial path...")
-        self.state = "PLANNING"
-        self.path = self.planner.get_path()
-        if self.path:
-            self.current_waypoint_idx = 0
-            self.state = "NAVIGATING"
-            print(f"Path found! Length: {len(self.path)} waypoints.")
-            self.tts_manager.speak('PATH_FOUND')
-        else:
-            self.state = "NO_PATH"
-            print("No path to goal could be found.")
-            self.tts_manager.speak('NO_PATH')
-
     def navigate_path(self):
         """Follows the line and uses the D* path to make decisions at intersections."""
         if not self.path or self.current_waypoint_idx >= len(self.path):
-            self.state = "GOAL_REACHED"
+            # Reached the end of the current path segment (either pickup or dropoff)
+            if self.state == "NAVIGATING_TO_DROPOFF":
+                self.state = "AT_DROPOFF"
+            elif self.state == "NAVIGATING_TO_PICKUP":
+                self.state = "AT_PICKUP"
             self.stop_motors()
             return
             
@@ -756,9 +834,10 @@ class RobotController:
 
         # If we are close to a waypoint AND the sensors see an intersection, it's time to decide the next turn
         if dist_to_waypoint < self.waypoint_threshold and is_intersection:
-            self.state = "AT_INTERSECTION"
-            self.stop_motors()
-            time.sleep(0.25) # Pause briefly at the intersection to stabilize
+            if self.state != "AT_INTERSECTION":
+                self.state = "AT_INTERSECTION"
+                self.stop_motors()
+                time.sleep(0.25) # Pause briefly at the intersection to stabilize
 
             # Get the direction for the next turn
             turn_direction = self.get_turn_direction_for_next_waypoint()
@@ -770,11 +849,14 @@ class RobotController:
             # Move to the next waypoint in the path
             self.current_waypoint_idx += 1
             if self.current_waypoint_idx >= len(self.path):
-                self.state = "GOAL_REACHED"
+                # This block will now trigger the AT_PICKUP/AT_DROPOFF state transition above
                 return
             
             # After turning, go back to navigating/line-following
-            self.state = "NAVIGATING"
+            if self.has_package:
+                self.state = "NAVIGATING_TO_DROPOFF"
+            else:
+                self.state = "NAVIGATING_TO_PICKUP"
             self.line_follower_control_loop() # Start moving immediately
             return
 
@@ -889,38 +971,6 @@ class RobotController:
 
         self.esp32.send_motor_speeds(int(left_speed), int(right_speed))
 
-    def navigate_to_point(self, target_x, target_y):
-        """Steers the robot towards a specific world coordinate."""
-        robot_x, robot_y, robot_heading = self.current_position
-        
-        # Calculate heading to target
-        angle_to_target = math.atan2(target_y - robot_y, target_x - robot_x)
-        
-        # Calculate heading error
-        heading_error = angle_to_target - robot_heading
-        # Normalize error to [-pi, pi]
-        while heading_error > math.pi: heading_error -= 2 * math.pi
-        while heading_error < -math.pi: heading_error += 2 * math.pi
-        
-        # Proportional controller for turning
-        turn_adjustment = heading_error * self.turn_speed_factor
-        
-        # Slow down if turning sharply
-        if abs(heading_error) > math.pi / 4: # 45 degrees
-            forward_speed = self.base_speed * 0.5
-        else:
-            forward_speed = self.base_speed
-        
-        # Set motor speeds
-        left_speed = int(forward_speed - (forward_speed * turn_adjustment))
-        right_speed = int(forward_speed + (forward_speed * turn_adjustment))
-        
-        self.esp32.send_motor_speeds(left_speed, right_speed)
-
-    def check_for_obstacles(self):
-        """This method is now deprecated in favor of process_vision()"""
-        pass
-
     def handle_obstacle_and_replan(self):
         """Stops the robot, updates map, replans, and then initiates a 180-degree turn."""
         self.tts_manager.speak('OBSTACLE')
@@ -984,21 +1034,10 @@ class RobotController:
             # Reset PID and switch to navigation state
             self.integral = 0.0
             self.last_error = 0.0
-            self.state = "NAVIGATING"
-
-    def check_if_goal_reached(self):
-        """Checks if the robot is within the goal threshold."""
-        dist_to_goal = math.sqrt(
-            (self.current_position[0] - GOAL_POSITION[0])**2 +
-            (self.current_position[1] - GOAL_POSITION[1])**2
-        )
-        if dist_to_goal < GOAL_THRESHOLD:
-            print(f"Goal reached! Distance: {dist_to_goal:.3f}m")
-            if self.state != "GOAL_REACHED":
-                self.tts_manager.speak('GOAL_REACHED')
-            self.goal_reached = True
-            self.state = "GOAL_REACHED"
-            self.stop_motors()
+            if self.has_package:
+                self.state = "NAVIGATING_TO_DROPOFF"
+            else:
+                self.state = "NAVIGATING_TO_PICKUP"
     
     def detect_objects_from_frame(self, frame):
         """Detect objects using YOLO and set state flags for packages or obstacles."""
