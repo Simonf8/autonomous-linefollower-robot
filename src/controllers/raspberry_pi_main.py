@@ -186,7 +186,7 @@ class TTSManager:
                 text_to_speak = self.tts_queue.get()
                 if self.player_available and text_to_speak:
                     # Generate speech using gTTS, using a US English voice which is typically male.
-                    tts = gTTS(text=text_to_speak, lang='en-us', slow=False)
+                    tts = gTTS(text=text_to_speak, lang='en', slow=False)
                     audio_file = "/tmp/robot_speech.mp3"
                     tts.save(audio_file)
                     
