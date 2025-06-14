@@ -52,7 +52,7 @@ START_DIRECTION = _DIRECTION_FLIP_MAP.get(_START_DIRECTION_RAW.upper(), _START_D
 # These values MUST be calibrated for your specific robot for accurate tracking.
 WHEEL_RADIUS_M = 0.0325         # Wheel radius in meters (3.25 cm)
 AXLE_LENGTH_M = 0.20            # Distance between wheels in meters (15 cm)
-TICKS_PER_REVOLUTION = 40       # Encoder ticks for one full wheel revolution
+TICKS_PER_REVOLUTION = 7680       # Encoder ticks for one full wheel revolution
 
 # -- PID Controller Configuration --
 # These gains MUST be tuned for your specific robot for smooth line following.
