@@ -16,10 +16,10 @@ RIGHT_MOTOR_2 = 13
 
 # Encoder Pins (QUADRATURE - 2 pins per encoder)
 # Please verify these pins with your hardware setup
-LEFT_ENCODER_A = 22
-LEFT_ENCODER_B = 26
-RIGHT_ENCODER_A = 23
-RIGHT_ENCODER_B = 32
+LEFT_ENCODER_A = 23
+LEFT_ENCODER_B = 5
+RIGHT_ENCODER_A = 26
+RIGHT_ENCODER_B = 39
 
 # Sensor Pins
 SENSOR_PINS = [14, 27, 16, 17, 25]  # L2, L1, C, R1, R2

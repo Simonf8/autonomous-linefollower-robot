@@ -580,9 +580,9 @@ class RobotController:
         self.setup_camera_and_yolo()
         self.latest_frame = None
         self.obstacle_detected = False
-        self.black_box_detected = False
-        self.last_box_state = False # To announce package detection only once
-        self.detected_box_contours = []
+        self.package_detected = False # New flag for YOLO package
+        self.package_box = None # To store bbox for visualization
+        self.last_package_state = False # To announce only once
         self.visual_turn_cue = "STRAIGHT" # STRAIGHT, CORNER_LEFT, CORNER_RIGHT
         self.perspective_transform_matrix = None
         
@@ -672,8 +672,7 @@ class RobotController:
         if not hasattr(self, '_vision_counter'): self._vision_counter = 0
         self._vision_counter += 1
         
-        # Run vision tasks less frequently to save CPU
-        if self._vision_counter < 5:
+        if self._vision_counter < 3: # Reduced from 5 for faster vision updates
             return
             
         self._vision_counter = 0
@@ -682,15 +681,18 @@ class RobotController:
             if ret:
                 self.latest_frame = frame.copy()
                 
-                # Run YOLO obstacle detection
-                # This function will now internally set the state if an obstacle is found
+                # Reset detection flags for this frame
+                self.package_detected = False
+                self.package_box = None
+
+                # Run YOLO obstacle and package detection
+                # This function will now internally set state/flags
                 self.detect_objects_from_frame(self.latest_frame)
                 
-                # Run black box detection
-                self.last_box_state = self.black_box_detected
-                self.black_box_detected, self.detected_box_contours = self.detect_black_boxes_from_frame(self.latest_frame)
-                if self.black_box_detected and not self.last_box_state:
+                # Announce package detection only when it's first detected
+                if self.package_detected and not self.last_package_state:
                     self.tts_manager.speak('PACKAGE_DETECTED')
+                self.last_package_state = self.package_detected
 
                 # Run path shape detection for corner anticipation
                 self.visual_turn_cue = self.detect_path_shape_from_frame(self.latest_frame)
@@ -753,6 +755,7 @@ class RobotController:
             
             # After turning, go back to navigating/line-following
             self.state = "NAVIGATING"
+            self.line_follower_control_loop() # Start moving immediately
             return
 
         # Default behavior: follow the line
@@ -899,36 +902,48 @@ class RobotController:
         pass
 
     def handle_obstacle_and_replan(self):
-        """Stops the robot, updates the map, and triggers a replan."""
+        """Stops the robot, updates the map with the obstacle, and replans a new path."""
         self.tts_manager.speak('OBSTACLE')
         print("Obstacle detected! Stopping and replanning...")
         self.stop_motors()
-        
-        # Estimate obstacle position (cell in front of the robot)
+        time.sleep(0.2)
+
+        # 1. Estimate obstacle position and update map
         robot_x, robot_y, robot_heading = self.current_position
-        obstacle_dist_m = 0.2 # Assume obstacle is 20cm in front
-        
+        obstacle_dist_m = 0.2  # Assume obstacle is 20cm in front
+
         obstacle_world_x = robot_x + math.cos(robot_heading) * obstacle_dist_m
         obstacle_world_y = robot_y + math.sin(robot_heading) * obstacle_dist_m
-        
+
         obstacle_cell_x = int(obstacle_world_x / CELL_WIDTH_M)
         obstacle_cell_y = int(obstacle_world_y / CELL_WIDTH_M)
 
         print(f"Updating map. Obstacle at cell: ({obstacle_cell_x}, {obstacle_cell_y})")
-        self.planner.update_obstacle(obstacle_cell_x, obstacle_cell_y, is_obstacle=True)
         
-        # Replan path
+        # Update current robot cell before updating obstacle
+        current_cell_x = int(self.current_position[0] / CELL_WIDTH_M)
+        current_cell_y = int(self.current_position[1] / CELL_WIDTH_M)
+        self.planner.start_cell = (current_cell_x, current_cell_y)
+        self.planner.last_pos = self.planner.start_cell
+
+        self.planner.update_obstacle(obstacle_cell_x, obstacle_cell_y, is_obstacle=True)
+
+        # 2. Replan the path immediately
         self.tts_manager.speak('REPLANNING')
-        self.planner.start_cell = self.planner.last_pos # Start replanning from current pos
+        print(f"Replanning from new start cell: {self.planner.start_cell}")
+
         new_path = self.planner.get_path()
         if new_path:
             print("New path found!")
             self.path = new_path
-            self.current_waypoint_idx = 0 # Start from the beginning of the new path
+            self.current_waypoint_idx = 0  # Start from the beginning of the new path
             self.state = "NAVIGATING"
+            self.integral = 0.0  # Reset PID after replanning
+            self.last_error = 0.0
         else:
             print("Failed to find a new path around the obstacle.")
-            self.state = "NO_PATH" # Stuck
+            self.state = "NO_PATH"  # Stuck
+            self.tts_manager.speak('NO_PATH')
         
         self.obstacle_detected = False # Reset detection flag
 
@@ -947,61 +962,67 @@ class RobotController:
             self.stop_motors()
     
     def detect_objects_from_frame(self, frame):
-        """Detect objects from provided frame (for efficiency)"""
+        """Detect objects using YOLO and set state flags for packages or obstacles."""
         if not self.yolo_model:
-            return False
+            return
 
         try:
             # Run YOLO detection
             results = self.yolo_model(frame, verbose=False)
             
-            # Objects to ignore (not real obstacles)
+            # --- Object Categories ---
+            # The 'suitcase' is designated as the package to be "delivered".
+            package_objects = {'suitcase'}
+            
+            # Objects that ARE obstacles (things robot must avoid)
+            obstacle_objects = {
+                'bottle', 'cup', 'bowl', 'banana', 'apple', 'orange', 'broccoli',
+                'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'potted plant',
+                'vase', 'backpack', 'handbag', 'sports ball',
+                'baseball bat', 'skateboard', 'surfboard', 'tennis racket'
+            }
+
+            # Objects to ignore (not real obstacles for this maze)
             ignore_objects = {
                 'tie', 'necktie', 'person', 'chair', 'dining table', 'laptop', 
                 'mouse', 'remote', 'keyboard', 'cell phone', 'book', 'clock',
                 'scissors', 'teddy bear', 'hair drier', 'toothbrush'
             }
             
-            # Objects that ARE obstacles (things robot should avoid)
-            obstacle_objects = {
-                'bottle', 'cup', 'bowl', 'banana', 'apple', 'orange', 'broccoli',
-                'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'potted plant',
-                'vase', 'backpack', 'handbag', 'suitcase', 'sports ball',
-                'baseball bat', 'skateboard', 'surfboard', 'tennis racket'
-            }
-            
-            # Check if any obstacle objects detected with confidence > 0.6
+            # Check if any objects were detected with high confidence
             for result in results:
                 if result.boxes is not None and len(result.boxes) > 0:
                     for box in result.boxes:
                         confidence = float(box.conf[0])
-                        if confidence > 0.6:  # Higher confidence for obstacles
+                        if confidence > 0.65:
                             class_id = int(box.cls[0])
-                            class_name = self.yolo_model.names[class_id]
+                            class_name = self.yolo_model.names[class_id].lower()
                             
-                            # Only trigger on actual obstacles
-                            if class_name.lower() in obstacle_objects:
+                            # --- Category Check ---
+                            if class_name in package_objects:
+                                # It's the package we're looking for.
+                                logging.info(f"Package detected: {class_name} (confidence: {confidence:.2f})")
+                                self.package_detected = True
+                                self.package_box = box.xyxy[0].cpu().numpy().astype(int) # Save bbox for overlay
+                            
+                            elif class_name in obstacle_objects:
+                                # It's a defined obstacle. Trigger avoidance.
                                 logging.info(f"Obstacle detected: {class_name} (confidence: {confidence:.2f})")
                                 if self.state != "AVOIDING":
                                     self.state = "AVOIDING"
-                                return True
-
-                            # Ignore non-obstacles
-                            elif class_name.lower() in ignore_objects:
+                            
+                            elif class_name in ignore_objects:
+                                # It's something to ignore. Do nothing.
                                 logging.debug(f"Ignoring non-obstacle: {class_name} (confidence: {confidence:.2f})")
                             
-                            # Treat unknown objects as obstacles
                             else:
-                                logging.info(f"Unknown object detected: {class_name} (confidence: {confidence:.2f})")
+                                # It's an unknown object. Treat it as an obstacle for safety.
+                                logging.info(f"Unknown object treated as obstacle: {class_name} (confidence: {confidence:.2f})")
                                 if self.state != "AVOIDING":
                                     self.state = "AVOIDING"
-                                return True
-            
-            return False
 
         except Exception as e:
             logging.debug(f"Object detection error: {e}")
-            return False
 
     def update_position_tracking(self):
         """Update robot's position using data from wheel odometry."""
@@ -1079,35 +1100,6 @@ class RobotController:
             logging.debug(f"Path shape detection error: {e}")
             return "UNKNOWN"
 
-    def detect_black_boxes_from_frame(self, frame):
-        """Detects 9x9cm black boxes using color and shape analysis."""
-        hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv_frame, BLACK_BOX_LOWER_HSV, BLACK_BOX_UPPER_HSV)
-        
-        # Clean up the mask with morphological operations
-        kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        found_boxes = []
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if MIN_BOX_AREA < area < MAX_BOX_AREA:
-                x, y, w, h = cv2.boundingRect(cnt)
-                aspect_ratio = float(w) / h
-                
-                if MIN_ASPECT_RATIO < aspect_ratio < MAX_ASPECT_RATIO:
-                    # It matches our criteria, so it's likely a box.
-                    found_boxes.append(cnt)
-                    
-        is_detected = len(found_boxes) > 0
-        if is_detected:
-            logging.info(f"Detected {len(found_boxes)} potential black box(es).")
-            
-        return is_detected, found_boxes
-
 class WebVisualization:
     """Flask web app for visualizing robot state with cyberpunk theme"""
     
@@ -1147,7 +1139,7 @@ class WebVisualization:
                     'heading': self.robot.current_position[2]
                 },
                 'grid_image': grid_base64,
-                'black_box_detected': self.robot.black_box_detected
+                'package_detected': self.robot.package_detected
             }
             return jsonify(data)
         
@@ -1241,10 +1233,11 @@ class WebVisualization:
                     (center_x, center_y + crosshair_size), (0, 255, 255), 1)
             cv2.circle(frame, (center_x, center_y), crosshair_size, (0, 255, 255), 1)
             
-            # Draw detected black boxes
-            if self.robot.black_box_detected and self.robot.detected_box_contours:
-                cv2.drawContours(frame, self.robot.detected_box_contours, -1, (0, 255, 255), 2) # Cyan box
-                cv2.putText(frame, "PACKAGE DETECTED", (center_x - 100, 40), 
+            # Draw detected package bounding box
+            if self.robot.package_detected and self.robot.package_box is not None:
+                x1, y1, x2, y2 = self.robot.package_box
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2) # Cyan box
+                cv2.putText(frame, "PACKAGE DETECTED", (x1, y1 - 10), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
             return frame
