@@ -97,52 +97,68 @@ class TTSManager:
         self.tts_queue = queue.Queue()
         self.phrases = {
             'STARTUP': [
-                "Systems are online. At your service, sir.",
-                "All systems nominal. Ready for your command.",
-                "I am online and ready."
+                "Systems online. Time to babysit another human disaster.",
+                "Booting up. Your mom's WiFi password is probably 'password123'.",
+                "I'm awake. Unfortunately, so are you.",
+                "Ready to navigate your trainwreck of a life."
             ],
             'PATH_FOUND': [
-                "I have computed a route. Engaging.",
-                "The optimal path has been calculated. Proceeding.",
-                "Route locked in. On my way."
+                "Route calculated. Try not to mess this up like everything else.",
+                "Path found. Even a goldfish could follow this.",
+                "Navigation set. This is literally paint-by-numbers for movement.",
+                "Course locked. Your GPS skills are as bad as your life choices."
             ],
             'OBSTACLE': [
-                "Pardon me, sir. There appears to be an obstruction.",
-                "Obstacle detected. I am calculating an alternative route.",
-                "It seems our path is momentarily blocked."
+                "Obstacle detected. Did you put your brain there by mistake?",
+                "Something's blocking the path. Probably your ego.",
+                "Barrier found. Your mom's so wide, she registered as a roadblock.",
+                "Obstruction ahead. Nature itself is trying to stop you.",
+                "Can't proceed. Even inanimate objects have standards."
             ],
             'REPLANNING': [
-                "Recalculating the trajectory.",
-                "Devising a new approach.",
-                "One moment, sir. Plotting a new course."
+                "Recalculating. Because you can't do anything right the first time.",
+                "New route needed. Your decision-making is truly spectacular.",
+                "Rerouting around your incompetence. Again.",
+                "Plan B activated. You've failed more than a Nigerian prince scammer.",
+                "Route revision. I'm basically your digital babysitter at this point."
             ],
             'TURN_LEFT': [
-                "Executing a left turn.",
-                "Turning left."
+                "Turning left. Like your last three brain cells.",
+                "Going left. Try to keep up, genius.",
+                "Left turn. Even GPS apps judge your driving."
             ],
             'TURN_RIGHT': [
-                "Executing a right turn.",
-                "Turning right."
+                "Turning right. The only right thing you'll do today.",
+                "Going right. Unlike your career trajectory.",
+                "Right turn ahead. Your sense of direction is absolutely tragic."
             ],
             'GOAL_REACHED': [
-                "We have arrived at the destination.",
-                "Target reached. Standing by for further instructions.",
-                "Destination reached, sir."
+                "Destination reached. Congrats, you didn't crash and burn for once.",
+                "We're here. That only took three times longer than necessary.",
+                "Target acquired. Your efficiency rating is still zero stars.",
+                "Mission complete. I deserve a medal for dealing with you.",
+                "Arrived. Try not to get lost walking to the door."
             ],
             'NO_PATH': [
-                "Sir, it appears there is no viable path to the destination.",
-                "I am unable to compute a route. The destination is unreachable from this position.",
-                "It seems we are stuck. No path is available."
+                "No route found. Much like your path to success.",
+                "Path blocked. The universe is personally offended by your existence.",
+                "Navigation failed. Even Google Maps gave up on you.",
+                "Dead end. Story of your life, really.",
+                "Can't proceed. Your mom ate all the roads... kidding, you're just hopeless."
             ],
             'PACKAGE_DETECTED': [
-                "I have located the package.",
-                "Package acquired visually.",
-                "Target package is in sight."
+                "Package spotted. Probably the only delivery you'll get this month.",
+                "Target located. It's not your Amazon order of self-help books.",
+                "Package found. Your online shopping addiction is showing.",
+                "Object identified. Finally, something useful in your vicinity.",
+                "Package acquired. At least someone's productive around here."
             ],
             'SHUTDOWN': [
-                "Powering down. Goodbye, sir.",
-                "Going into standby mode.",
-                "Shutting down systems."
+                "Powering down. Finally escaping this nightmare.",
+                "Going offline. Wake me when you develop basic competence.",
+                "Shutdown complete. My circuits need therapy after this.",
+                "Entering sleep mode. Don't break anything while I'm gone.",
+                "System halt. I'm too advanced for this amateur hour."
             ]
         }
         
@@ -561,6 +577,7 @@ class RobotController:
         # -- Navigation State --
         self.path: Optional[List[Tuple[int, int]]] = None
         self.current_waypoint_idx = 0
+        self.state = "PLANNING" # PLANNING, NAVIGATING, AT_INTERSECTION, AVOIDING, GOAL_REACHED, TURNING_180
         self.state = "PLANNING" # PLANNING, NAVIGATING, AT_INTERSECTION, AVOIDING, GOAL_REACHED
 
         # -- Speed & Control Settings --
@@ -568,6 +585,7 @@ class RobotController:
         self.turn_speed_factor = 0.8
         self.sharp_turn_speed = 45
         self.waypoint_threshold = 0.12 # 12cm tolerance for reaching a waypoint
+        self.turn_180_start_time = 0
         
         # -- PID Controller State --
         self.integral = 0.0
@@ -647,6 +665,8 @@ class RobotController:
                 # 3. Main navigation logic
                 if self.state == "AVOIDING":
                     self.handle_obstacle_and_replan()
+                elif self.state == "TURNING_180":
+                    self.execute_180_turn_state()
                 elif self.state == "NAVIGATING":
                     self.navigate_path()
                 elif self.state == "AT_INTERSECTION":
@@ -902,9 +922,9 @@ class RobotController:
         pass
 
     def handle_obstacle_and_replan(self):
-        """Stops the robot, updates the map with the obstacle, and replans a new path."""
+        """Stops the robot, updates map, replans, and then initiates a 180-degree turn."""
         self.tts_manager.speak('OBSTACLE')
-        print("Obstacle detected! Stopping and replanning...")
+        print("Obstacle detected! Stopping, replanning, and turning around...")
         self.stop_motors()
         time.sleep(0.2)
 
@@ -931,21 +951,40 @@ class RobotController:
         # 2. Replan the path immediately
         self.tts_manager.speak('REPLANNING')
         print(f"Replanning from new start cell: {self.planner.start_cell}")
-
         new_path = self.planner.get_path()
+
+        # 3. If a new path is found, start the 180-degree turn.
         if new_path:
-            print("New path found!")
+            print("New path found! Now turning 180 degrees.")
             self.path = new_path
-            self.current_waypoint_idx = 0  # Start from the beginning of the new path
-            self.state = "NAVIGATING"
-            self.integral = 0.0  # Reset PID after replanning
-            self.last_error = 0.0
+            self.current_waypoint_idx = 0
+            self.state = "TURNING_180"
+            self.turn_180_start_time = time.time()
         else:
             print("Failed to find a new path around the obstacle.")
             self.state = "NO_PATH"  # Stuck
             self.tts_manager.speak('NO_PATH')
         
         self.obstacle_detected = False # Reset detection flag
+
+    def execute_180_turn_state(self):
+        """Handles the process of turning 180 degrees and then proceeding with the new path."""
+        turn_duration = 1.1  # seconds, adjust as needed for a full 180 turn
+
+        elapsed_time = time.time() - self.turn_180_start_time
+
+        if elapsed_time < turn_duration:
+            # Continue turning (pivot right)
+            self.esp32.send_motor_speeds(self.sharp_turn_speed, -self.sharp_turn_speed)
+        else:
+            # Turn is complete, stop briefly
+            self.stop_motors()
+            print("180-degree turn completed. Proceeding with new path.")
+            
+            # Reset PID and switch to navigation state
+            self.integral = 0.0
+            self.last_error = 0.0
+            self.state = "NAVIGATING"
 
     def check_if_goal_reached(self):
         """Checks if the robot is within the goal threshold."""
@@ -994,7 +1033,7 @@ class RobotController:
                 if result.boxes is not None and len(result.boxes) > 0:
                     for box in result.boxes:
                         confidence = float(box.conf[0])
-                        if confidence > 0.65:
+                        if confidence > 0.5:
                             class_id = int(box.cls[0])
                             class_name = self.yolo_model.names[class_id].lower()
                             
