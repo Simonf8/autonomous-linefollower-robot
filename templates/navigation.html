@@ -67,6 +67,32 @@
                         <div class="status-label">PACKAGE</div>
                         <div class="status-value cyber-text" id="box-status">NONE</div>
                     </div>
+                    <div class="status-item">
+                        <div class="status-label">TASK PROGRESS</div>
+                        <div class="status-value cyber-text" id="task-progress">0/0</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Mission Control -->
+            <div class="panel mission-panel">
+                <div class="panel-header">
+                    <h2>MISSION CONTROL</h2>
+                    <div class="panel-indicator"></div>
+                </div>
+                <div class="mission-info">
+                    <div class="mission-item">
+                        <div class="mission-label">PICKUP LOCATIONS</div>
+                        <div class="location-grid" id="pickup-locations">
+                            <!-- Pickup locations will be populated here -->
+                        </div>
+                    </div>
+                    <div class="mission-item">
+                        <div class="mission-label">DROPOFF LOCATIONS</div>
+                        <div class="location-grid" id="dropoff-locations">
+                            <!-- Dropoff locations will be populated here -->
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -100,8 +126,9 @@
                     <div class="legend-item"><span class="legend-color robot-trail"></span><span>ROBOT TRAIL</span></div>
                     <div class="legend-item"><span class="legend-color planned-path"></span><span>PLANNED PATH</span></div>
                     <div class="legend-item"><span class="legend-color robot-color"></span><span>ROBOT</span></div>
-                    <div class="legend-item"><span class="legend-color start-color"></span><span>START</span></div>
-                    <div class="legend-item"><span class="legend-color goal-color"></span><span>GOAL</span></div>
+                    <div class="legend-item"><span class="legend-color pickup-color"></span><span>PICKUP BOXES</span></div>
+                    <div class="legend-item"><span class="legend-color dropoff-color"></span><span>DROPOFF ZONES</span></div>
+                    <div class="legend-item"><span class="legend-color goal-color"></span><span>CURRENT GOAL</span></div>
                 </div>
             </div>
         </div>
@@ -132,8 +159,15 @@
                     document.getElementById('robot-position').textContent = `(${data.position.x.toFixed(2)}, ${data.position.y.toFixed(2)})`;
                     document.getElementById('robot-heading').textContent = `${(data.position.heading * 180 / Math.PI).toFixed(1)}°`;
                     document.getElementById('robot-state').textContent = data.state;
-                    document.getElementById('box-status').textContent = data.black_box_detected ? 'DETECTED' : 'NONE';
+                    
+                    // Update package status
+                    const packageStatus = data.has_package ? 'CARRYING' : (data.package_detected ? 'DETECTED' : 'NONE');
+                    document.getElementById('box-status').textContent = packageStatus;
+                    
+                    // Update task progress
+                    document.getElementById('task-progress').textContent = `${data.current_task || 0}/${data.total_tasks || 0}`;
 
+                    // Update sensor display
                     const sensorContainer = document.getElementById('sensor-array');
                     const sensorLabels = ['L2', 'L1', 'C', 'R1', 'R2'];
                     let sensorPattern = "";
@@ -147,15 +181,37 @@
                     }).join('');
                     document.getElementById('sensor-pattern').textContent = sensorPattern;
                     
+                    // Update pickup locations
+                    if (data.pickup_cells) {
+                        const pickupContainer = document.getElementById('pickup-locations');
+                        pickupContainer.innerHTML = data.pickup_cells.map((cell, index) => {
+                            return `<div class="location-item">
+                                        <span class="location-id">P${index + 1}</span>
+                                        <span class="location-coords">(${cell[0]}, ${cell[1]})</span>
+                                    </div>`;
+                        }).join('');
+                    }
+                    
+                    // Update dropoff locations
+                    if (data.dropoff_cells) {
+                        const dropoffContainer = document.getElementById('dropoff-locations');
+                        dropoffContainer.innerHTML = data.dropoff_cells.map((cell, index) => {
+                            return `<div class="location-item">
+                                        <span class="location-id">D${index + 1}</span>
+                                        <span class="location-coords">(${cell[0]}, ${cell[1]})</span>
+                                    </div>`;
+                        }).join('');
+                    }
+                    
                     if (data.grid_image) {
                         document.getElementById('map-image').src = 'data:image/png;base64,' + data.grid_image;
                     }
 
                     const statusIndicator = document.getElementById('status-indicator');
                     const statusText = document.getElementById('status-text');
-                    if (data.state === 'GOAL_REACHED') {
+                    if (data.state === 'MISSION_COMPLETE') {
                         statusIndicator.className = 'status-indicator goal';
-                        statusText.textContent = 'GOAL REACHED';
+                        statusText.textContent = 'MISSION COMPLETE';
                     } else if (data.state === 'NO_PATH') {
                         statusIndicator.className = 'status-indicator error';
                         statusText.textContent = 'NO PATH';

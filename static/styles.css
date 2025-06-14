@@ -489,6 +489,58 @@ body {
 .current-color { background: var(--cyber-orange); }
 .robot-color { background: var(--cyber-pink); }
 .waypoint-color { background: var(--cyber-green); }
+.pickup-color { background: #00ffff; }
+.dropoff-color { background: #ffa500; }
+.robot-trail { background: #80ff80; }
+
+/* Mission Panel */
+.mission-info {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.mission-item {
+    background: rgba(0, 255, 255, 0.05);
+    border-radius: 8px;
+    padding: 15px;
+    border: 1px solid rgba(0, 255, 255, 0.2);
+}
+
+.mission-label {
+    color: var(--cyber-blue);
+    font-size: 0.9rem;
+    font-weight: bold;
+    margin-bottom: 10px;
+    letter-spacing: 1px;
+}
+
+.location-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 8px;
+}
+
+.location-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: rgba(0, 255, 255, 0.1);
+    border-radius: 5px;
+    border: 1px solid rgba(0, 255, 255, 0.3);
+    font-size: 0.8rem;
+}
+
+.location-id {
+    font-weight: bold;
+    color: var(--cyber-green);
+}
+
+.location-coords {
+    color: var(--text-secondary);
+    font-family: 'Courier New', monospace;
+}
 
 /* Info Panel */
 .info-content {

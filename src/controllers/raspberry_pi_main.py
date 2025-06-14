@@ -26,7 +26,7 @@ from gtts import gTTS
 # Define start and goal cells for grid-based placement.
 # Coordinates are (column, row) from the top-left of the UNMAPPED maze grid.
 CELL_WIDTH_M = 0.12     # Width of a single grid cell in meters (12cm)
-_START_CELL_RAW = (0, 14)   # (column, row)
+_START_CELL_RAW = (4, 12)   # (column, row)
 _GOAL_CELL_RAW = (20, 0)     # (column, row)
 _START_DIRECTION_RAW = 'UP'  # Initial robot orientation ('UP', 'DOWN', 'LEFT', 'RIGHT')
 
@@ -51,7 +51,7 @@ START_DIRECTION = _DIRECTION_FLIP_MAP.get(_START_DIRECTION_RAW.upper(), _START_D
 # -- Odometry Calibration --
 # These values MUST be calibrated for your specific robot for accurate tracking.
 WHEEL_RADIUS_M = 0.0325         # Wheel radius in meters (3.25 cm)
-AXLE_LENGTH_M = 0.15            # Distance between wheels in meters (15 cm)
+AXLE_LENGTH_M = 0.20            # Distance between wheels in meters (15 cm)
 TICKS_PER_REVOLUTION = 40       # Encoder ticks for one full wheel revolution
 
 # -- PID Controller Configuration --
@@ -68,16 +68,10 @@ IMG_PATH_SRC_PTS = np.float32([[200, 300], [440, 300], [580, 480], [60, 480]])
 # Destination points for the top-down view.
 IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
 
-# -- Black Box Detection Configuration --
-# HSV color range for black. May need tuning for your lighting conditions.
-BLACK_BOX_LOWER_HSV = np.array([0, 0, 0])
-BLACK_BOX_UPPER_HSV = np.array([180, 255, 50])
-# Expected pixel area of the box. Tune this based on camera height and distance.
-MIN_BOX_AREA = 4000
-MAX_BOX_AREA = 25000
-# Expected aspect ratio (width/height) of the box. Should be close to 1.0.
-MIN_ASPECT_RATIO = 0.75
-MAX_ASPECT_RATIO = 1.25
+# -- YOLO Package Detection Configuration --
+# YOLO will detect packages at known pickup locations
+# Package detection confidence threshold
+PACKAGE_DETECTION_CONFIDENCE = 0.5
 
 # -- World Coordinate Configuration (calculated from grid) --
 # World coordinates are calculated from the grid cells, using the center of the cell.
@@ -93,7 +87,7 @@ HEADING_MAP = {
 }
 START_HEADING = HEADING_MAP.get(START_DIRECTION.upper(), -math.pi / 2) # Default to UP
 
-# GOAL_POSITION is now dynamic, but we can set an initial one for visualization if needed
+# GOAL_POSITION is now dynamic based on current task
 GOAL_POSITION = ((DROPOFF_CELLS[0][0] + 0.5) * CELL_WIDTH_M, (DROPOFF_CELLS[0][1] + 0.5) * CELL_WIDTH_M)
 GOAL_THRESHOLD = 0.15          # Stop within 15cm of the goal
 
@@ -374,8 +368,8 @@ class Mapper:
         if len(self.path_history) > 100: # Keep path history to a reasonable length
             self.path_history.pop(0)
     
-    def get_grid_visualization(self, planned_path: Optional[List[Tuple[int, int]]] = None):
-        """Create an image of the maze with the robot's position and trail."""
+    def get_grid_visualization(self, planned_path: Optional[List[Tuple[int, int]]] = None, current_goal: Optional[Tuple[int, int]] = None):
+        """Create an image of the maze with the robot's position, trail, and boxes."""
         cell_size = 25
         maze_h, maze_w = len(self.maze_grid), len(self.maze_grid[0])
         img_h, img_w = maze_h * cell_size, maze_w * cell_size
@@ -401,14 +395,38 @@ class Mapper:
             py = int((world_y / world_height_m) * img_h)
             return px, py
 
-        # Draw Start and Goal markers
-        start_px, start_py = world_to_pixel(START_POSITION[0], START_POSITION[1])
-        cv2.circle(vis_img, (start_px, start_py), int(cell_size * 0.5), (0, 255, 0), -1)
-        cv2.putText(vis_img, "S", (start_px - 7, start_py + 7), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
-        
-        goal_px, goal_py = world_to_pixel(GOAL_POSITION[0], GOAL_POSITION[1])
-        cv2.circle(vis_img, (goal_px, goal_py), int(cell_size * 0.5), (0, 0, 255), -1)
-        cv2.putText(vis_img, "G", (goal_px - 7, goal_py + 7), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
+        def cell_to_pixel(cell_x, cell_y):
+            """Converts grid cell coordinates to pixel coordinates."""
+            px = int((cell_x + 0.5) * cell_size)
+            py = int((cell_y + 0.5) * cell_size)
+            return px, py
+
+        # Draw pickup boxes (packages to collect)
+        for i, pickup_cell in enumerate(PICKUP_CELLS):
+            px, py = cell_to_pixel(pickup_cell[0], pickup_cell[1])
+            # Draw box as a square
+            box_size = int(cell_size * 0.6)
+            cv2.rectangle(vis_img, 
+                         (px - box_size//2, py - box_size//2), 
+                         (px + box_size//2, py + box_size//2), 
+                         (0, 255, 255), -1)  # Cyan boxes for pickup
+            cv2.putText(vis_img, f"P{i+1}", (px - 10, py + 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+
+        # Draw dropoff zones
+        for i, dropoff_cell in enumerate(DROPOFF_CELLS):
+            px, py = cell_to_pixel(dropoff_cell[0], dropoff_cell[1])
+            # Draw dropoff zone as a circle
+            cv2.circle(vis_img, (px, py), int(cell_size * 0.4), (255, 165, 0), -1)  # Orange circles for dropoff
+            cv2.putText(vis_img, f"D{i+1}", (px - 8, py + 4), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
+
+        # Draw current goal if specified
+        if current_goal:
+            goal_px, goal_py = cell_to_pixel(current_goal[0], current_goal[1])
+            cv2.circle(vis_img, (goal_px, goal_py), int(cell_size * 0.7), (0, 0, 255), 3)  # Red circle for current goal
+            cv2.putText(vis_img, "GOAL", (goal_px - 15, goal_py - 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
         # Draw the D* Lite planned path
         if planned_path and len(planned_path) > 1:
@@ -417,12 +435,12 @@ class Mapper:
                 [world_to_pixel((cell[0] + 0.5) * self.cell_width_m, (cell[1] + 0.5) * self.cell_width_m) for cell in planned_path],
                 dtype=np.int32
             )
-            cv2.polylines(vis_img, [planned_path_pixels], isClosed=False, color=(255, 255, 0), thickness=1) # Yellow planned path
+            cv2.polylines(vis_img, [planned_path_pixels], isClosed=False, color=(255, 255, 0), thickness=2) # Yellow planned path
 
         # Draw the path history
         if len(self.path_history) > 1:
             path_points = np.array([world_to_pixel(x, y) for x, y in self.path_history], dtype=np.int32)
-            cv2.polylines(vis_img, [path_points], isClosed=False, color=(255, 255, 0), thickness=2)
+            cv2.polylines(vis_img, [path_points], isClosed=False, color=(128, 255, 128), thickness=2)  # Light green trail
 
         # Draw the robot
         robot_px, robot_py = world_to_pixel(self.robot_x, self.robot_y)
@@ -677,6 +695,10 @@ class RobotController:
                 self.process_vision()
                 
                 # 3. Core State Machine Logic
+                if self.obstacle_detected and self.state not in ["AVOIDING", "TURNING_180"]:
+                    self.state = "AVOIDING"
+                    self.obstacle_detected = False
+                
                 if self.state == "AVOIDING":
                     self.handle_obstacle_and_replan()
                 elif self.state == "TURNING_180":
@@ -789,10 +811,6 @@ class RobotController:
             ret, frame = self.camera.read()
             if ret:
                 self.latest_frame = frame.copy()
-                
-                # Reset detection flags for this frame
-                self.package_detected = False
-                self.package_box = None
 
                 # Run YOLO obstacle and package detection
                 # This function will now internally set state/flags
@@ -1049,45 +1067,56 @@ class RobotController:
             results = self.yolo_model(frame, verbose=False)
             
             # --- Object Categories ---
-            # The 'suitcase' is designated as the package to be "delivered".
-            package_objects = {'suitcase'}
+            # Packages/boxes that we want to pick up and deliver
+            package_objects = {
+                'suitcase', 'backpack', 'handbag', 'briefcase', 'box',
+                'cardboard box', 'package', 'parcel', 'luggage'
+            }
             
             # Objects that ARE obstacles (things robot must avoid)
             obstacle_objects = {
                 'bottle', 'cup', 'bowl', 'banana', 'apple', 'orange', 'broccoli',
                 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'potted plant',
-                'vase', 'backpack', 'handbag', 'sports ball',
-                'baseball bat', 'skateboard', 'surfboard', 'tennis racket'
+                'vase', 'sports ball', 'baseball bat', 'skateboard', 'surfboard', 
+                'tennis racket', 'chair', 'dining table', 'couch', 'bed'
             }
 
             # Objects to ignore (not real obstacles for this maze)
             ignore_objects = {
-                'tie', 'necktie', 'person', 'chair', 'dining table', 'laptop', 
-                'mouse', 'remote', 'keyboard', 'cell phone', 'book', 'clock',
-                'scissors', 'teddy bear', 'hair drier', 'toothbrush'
+                'tie', 'necktie', 'person', 'laptop', 'mouse', 'remote', 
+                'keyboard', 'cell phone', 'book', 'clock', 'scissors', 
+                'teddy bear', 'hair drier', 'toothbrush', 'tv', 'monitor'
             }
             
-            # Check if any objects were detected with high confidence
+            # Reset detection flags for this frame
+            self.package_detected = False
+            self.package_box = None
+            
+            # Check if any objects were detected with sufficient confidence
             for result in results:
                 if result.boxes is not None and len(result.boxes) > 0:
                     for box in result.boxes:
                         confidence = float(box.conf[0])
-                        if confidence > 0.5:
+                        if confidence > PACKAGE_DETECTION_CONFIDENCE:
                             class_id = int(box.cls[0])
                             class_name = self.yolo_model.names[class_id].lower()
                             
                             # --- Category Check ---
                             if class_name in package_objects:
-                                # It's the package we're looking for.
+                                # It's a package we're looking for
                                 logging.info(f"Package detected: {class_name} (confidence: {confidence:.2f})")
                                 self.package_detected = True
                                 self.package_box = box.xyxy[0].cpu().numpy().astype(int) # Save bbox for overlay
+                                
+                                # Check if we're at a pickup location and don't have a package yet
+                                if not self.has_package and self.is_at_pickup_location():
+                                    logging.info("Package detected at pickup location!")
                             
                             elif class_name in obstacle_objects:
                                 # It's a defined obstacle. Trigger avoidance.
                                 logging.info(f"Obstacle detected: {class_name} (confidence: {confidence:.2f})")
-                                if self.state != "AVOIDING":
-                                    self.state = "AVOIDING"
+                                if self.state not in ["AVOIDING", "TURNING_180"]:
+                                    self.obstacle_detected = True
                             
                             elif class_name in ignore_objects:
                                 # It's something to ignore. Do nothing.
@@ -1096,11 +1125,23 @@ class RobotController:
                             else:
                                 # It's an unknown object. Treat it as an obstacle for safety.
                                 logging.info(f"Unknown object treated as obstacle: {class_name} (confidence: {confidence:.2f})")
-                                if self.state != "AVOIDING":
-                                    self.state = "AVOIDING"
+                                if self.state not in ["AVOIDING", "TURNING_180"]:
+                                    self.obstacle_detected = True
 
         except Exception as e:
             logging.debug(f"Object detection error: {e}")
+    
+    def is_at_pickup_location(self):
+        """Check if robot is currently at any pickup location."""
+        current_cell_x = int(self.current_position[0] / CELL_WIDTH_M)
+        current_cell_y = int(self.current_position[1] / CELL_WIDTH_M)
+        current_cell = (current_cell_x, current_cell_y)
+        
+        # Check if current cell is within tolerance of any pickup cell
+        for pickup_cell in PICKUP_CELLS:
+            if abs(current_cell[0] - pickup_cell[0]) <= 1 and abs(current_cell[1] - pickup_cell[1]) <= 1:
+                return True
+        return False
 
     def update_position_tracking(self):
         """Update robot's position using data from wheel odometry."""
@@ -1203,8 +1244,12 @@ class WebVisualization:
         @self.app.route('/api/robot_data')
         def get_robot_data():
             """Get current robot data as JSON"""
-            # Get grid visualization
-            grid_img = self.robot.mapper.get_grid_visualization(planned_path=self.robot.path)
+            # Get grid visualization with current goal
+            current_goal = self.robot.target_cell if hasattr(self.robot, 'target_cell') else None
+            grid_img = self.robot.mapper.get_grid_visualization(
+                planned_path=self.robot.path, 
+                current_goal=current_goal
+            )
             _, buffer = cv2.imencode('.png', grid_img)
             grid_base64 = base64.b64encode(buffer).decode('utf-8')
 
@@ -1217,7 +1262,12 @@ class WebVisualization:
                     'heading': self.robot.current_position[2]
                 },
                 'grid_image': grid_base64,
-                'package_detected': self.robot.package_detected
+                'package_detected': self.robot.package_detected,
+                'has_package': getattr(self.robot, 'has_package', False),
+                'current_task': getattr(self.robot, 'current_task_idx', 0) + 1,
+                'total_tasks': len(getattr(self.robot, 'tasks', [])),
+                'pickup_cells': _PICKUP_CELLS_RAW,
+                'dropoff_cells': _DROPOFF_CELLS_RAW
             }
             return jsonify(data)
         
