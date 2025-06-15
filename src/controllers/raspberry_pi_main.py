@@ -659,6 +659,9 @@ class RobotController:
         self.last_error = 0.0
         self.pid_last_time = time.time()
         self.line_is_lost = False # To track if we're off the line
+        self.line_lost_start_time = None # For active search pattern
+        self.search_phase_start_time = 0 # For S-curve search
+        self.search_stage = 0 # 0=init, 1=right, 2=left, 3=right
         
         # -- Object Detection --
         self.camera = None
@@ -946,6 +949,9 @@ class RobotController:
 
         # If we are close to a waypoint AND the sensors see an intersection, it's time to decide the next turn
         if dist_to_waypoint < self.waypoint_threshold and is_intersection:
+            # This is a critical junction. Correct odometry here before turning.
+            self.correct_odometry_at_waypoint(waypoint_cell)
+
             if self.state != "AT_INTERSECTION":
                 self.state = "AT_INTERSECTION"
                 self.stop_motors()
@@ -1006,22 +1012,42 @@ class RobotController:
             return "RIGHT"
     
     def execute_intersection_turn(self, direction: str):
-        """Executes a timed turn at an intersection."""
+        """Executes a sensor-driven turn at an intersection until the line is re-acquired."""
         # Move forward slightly to enter the intersection center
         self.esp32.send_motor_speeds(self.base_speed, self.base_speed)
-        time.sleep(0.3) # Adjust time as needed
+        time.sleep(0.3) # A short, timed move is best here to avoid overshooting
+        self.stop_motors()
 
-        if direction == "LEFT":
-            # Pivot turn left
-            self.tts_manager.speak('TURN_LEFT')
-            self.esp32.send_motor_speeds(-self.sharp_turn_speed, self.sharp_turn_speed)
-            time.sleep(0.5) # Adjust turn duration
-        elif direction == "RIGHT":
-            # Pivot turn right
-            self.tts_manager.speak('TURN_RIGHT')
-            self.esp32.send_motor_speeds(self.sharp_turn_speed, -self.sharp_turn_speed)
-            time.sleep(0.5) # Adjust turn duration
-        
+        if direction == "STRAIGHT":
+            # Already moved forward, just continue line following
+            pass
+        else:
+            turn_speed = self.sharp_turn_speed
+            if direction == "LEFT":
+                self.tts_manager.speak('TURN_LEFT')
+                left_cmd, right_cmd = -turn_speed, turn_speed
+            else: # RIGHT
+                self.tts_manager.speak('TURN_RIGHT')
+                left_cmd, right_cmd = turn_speed, -turn_speed
+
+            self.esp32.send_motor_speeds(left_cmd, right_cmd)
+
+            start_time = time.time()
+            turn_timeout = 3.0  # seconds
+            line_found = False
+
+            # Keep turning until one of the middle 3 sensors finds the line
+            while time.time() - start_time < turn_timeout:
+                self.esp32.receive_sensor_data()
+                if any(self.esp32.sensors[1:4]):
+                    logging.info(f"Line re-acquired after {direction} turn.")
+                    line_found = True
+                    break
+                time.sleep(0.01)
+
+            if not line_found:
+                logging.warning(f"Turn timeout: Failed to find line after turning {direction}.")
+
         # After turning (or going straight), stop briefly to allow sensors to re-acquire the line
         self.stop_motors()
         time.sleep(0.2)
@@ -1031,54 +1057,74 @@ class RobotController:
         self.last_error = 0.0
 
     def line_follower_control_loop(self):
-        """Controls the robot's motors using a PID controller to follow the line, focusing on the 3 middle sensors."""
+        """Controls the robot's motors using a PID controller and an active search for lost lines."""
         sensors = self.esp32.sensors
         
         # Extract the state of the middle 3 sensors for line following.
-        # sensors are [L2, L1, C, R1, R2]
-        # We use [L1, C, R1] -> sensors[1], sensors[2], sensors[3]
         l1, c, r1 = sensors[1], sensors[2], sensors[3]
         
-        # 1. Calculate error based on the middle 3 sensors.
-        # The goal is to keep the center sensor (c) on the line.
         error = 0.0
         
         # The line is detected by at least one of the middle three sensors.
         if l1 or c or r1:
             if self.line_is_lost:
-                logging.info("Line re-acquired by middle sensors.")
+                logging.info("Line re-acquired.")
                 self.line_is_lost = False
+
+            # Reset line-lost recovery state
+            self.line_lost_start_time = None
+            self.search_stage = 0
             
             # Weighted average for fine-grained error calculation
-            # Weights: L1=-1, C=0, R1=1
-            # This pushes the robot to center `c` over the line.
             error_sum = (l1 * -1) + (c * 0) + (r1 * 1)
             active_sensor_count = l1 + c + r1
             error = error_sum / active_sensor_count
             self.last_error = error
         
-        # Line might be detected by outer sensors (sharp turn) or lost.
+        # Line is lost. Begin recovery maneuvers.
         else:
             if not self.line_is_lost:
-                logging.warning("Line lost from middle sensors! Checking outer sensors and last error.")
                 self.tts_manager.speak('LINE_LOST')
                 self.line_is_lost = True
+
+            if self.line_lost_start_time is None:
+                self.line_lost_start_time = time.time()
+
+            time_since_lost = time.time() - self.line_lost_start_time
             
-            # If the line is completely lost (no sensors active), use the last known error 
-            # to attempt recovery. This helps steer back towards the line.
-            if self.last_error > 0.5: # Was far to the right, turn right
-                error = 2.5 
-            elif self.last_error < -0.5: # Was far to the left, turn left
-                error = -2.5
+            # Phase 1: For the first second, steer based on the last known direction.
+            if time_since_lost < 1.0:
+                if self.last_error > 0.5: error = 2.5   # Was far right, steer hard right
+                elif self.last_error < -0.5: error = -2.5 # Was far left, steer hard left
+                else: error = 2.5 if self.last_error >= 0 else -2.5 # Was near center
+            
+            # Phase 2: After 1 second, begin an active "S-curve" search pattern.
             else:
-                # If it was centered or only slightly off, continue the search pattern.
-                if self.last_error > 0:
-                    error = 2.5
-                elif self.last_error < 0:
+                if self.search_stage == 0: # Initialize search
+                    self.search_stage = 1
+                    self.search_phase_start_time = time.time()
+
+                phase_duration = time.time() - self.search_phase_start_time
+                
+                # S-Maneuver: right, long-left, right
+                if self.search_stage == 1: # Turn Right
+                    error = 2.5 
+                    if phase_duration > 0.75:
+                        self.search_stage = 2
+                        self.search_phase_start_time = time.time()
+                elif self.search_stage == 2: # Turn Left (double duration)
                     error = -2.5
-                # If last_error is 0, it will just continue straight briefly.
+                    if phase_duration > 1.5:
+                        self.search_stage = 3
+                        self.search_phase_start_time = time.time()
+                elif self.search_stage == 3: # Turn Right
+                    error = 2.5
+                    if phase_duration > 0.75:
+                        # Reset search cycle
+                        self.search_stage = 1
+                        self.search_phase_start_time = time.time()
         
-        # 2. PID Calculation
+        # PID Calculation
         current_time = time.time()
         dt = current_time - self.pid_last_time
         if dt == 0: dt = 1e-6 # Avoid division by zero
@@ -1362,6 +1408,27 @@ class RobotController:
         print("Final stop...")
         self.esp32.send_motor_speeds(0, 0)
         print("Motor test complete!")
+
+    def correct_odometry_at_waypoint(self, waypoint_cell: Tuple[int, int]):
+        """Snaps the robot's odometry to the precise coordinates of a waypoint cell."""
+        logging.info(f"Correcting odometry at waypoint {waypoint_cell}.")
+
+        # Calculate the precise, ideal world coordinates for the center of the waypoint cell
+        ideal_world_x = (waypoint_cell[0] + 0.5) * CELL_WIDTH_M
+        ideal_world_y = (waypoint_cell[1] + 0.5) * CELL_WIDTH_M
+
+        # Log the correction amount
+        x_error = self.odometry.x - ideal_world_x
+        y_error = self.odometry.y - ideal_world_y
+        logging.info(f"Odometry drift corrected. X_err: {x_error:.4f}m, Y_err: {y_error:.4f}m")
+
+        # Snap the odometry state to the ideal position
+        self.odometry.x = ideal_world_x
+        self.odometry.y = ideal_world_y
+
+        # Also update the main controller's copy of the position
+        self.current_position = (self.odometry.x, self.odometry.y, self.odometry.heading)
+        self.mapper.update_robot_position(self.odometry.x, self.odometry.y, self.odometry.heading)
 
 class WebVisualization:
     """Flask web app for visualizing robot state with cyberpunk theme"""
