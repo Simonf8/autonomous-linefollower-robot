@@ -50,15 +50,17 @@ START_DIRECTION = _DIRECTION_FLIP_MAP.get(_START_DIRECTION_RAW.upper(), _START_D
 
 # -- Odometry Calibration --
 # These values MUST be calibrated for your specific robot for accurate tracking.
+# Based on the DFR-06287 motor specs (SJ01, 120:1 gear ratio, 8 CPR encoder),
+# the correct value is 8 * 120 = 960.
 WHEEL_RADIUS_M = 0.0325         # Wheel radius in meters (3.25 cm)
-AXLE_LENGTH_M = 0.20            # Distance between wheels in meters (15 cm)
-TICKS_PER_REVOLUTION = 7680       # Encoder ticks for one full wheel revolution
+AXLE_LENGTH_M = 0.15            # Distance between wheels in meters (15 cm)
+TICKS_PER_REVOLUTION = 960       # Encoder ticks for one full wheel revolution
 
 # -- PID Controller Configuration --
 # These gains MUST be tuned for your specific robot for smooth line following.
-KP = 0.015               # Proportional gain: How strongly to react to current error.
+KP = 0.025               # Proportional gain: How strongly to react to current error.
 KI = 0.008               # Integral gain: Corrects for steady-state error over time.
-KD = 0.05                # Derivative gain: Dampens oscillations by anticipating future error.
+KD = 0.07                # Derivative gain: Dampens oscillations by anticipating future error.
 
 # -- Computer Vision Path Detection --
 # Source points for perspective warp (trapezoid in the original image).
@@ -156,6 +158,12 @@ class TTSManager:
                 "Object identified. Finally, something useful in your vicinity.",
                 "Package acquired. At least someone's productive around here."
             ],
+            'LINE_LOST': [
+                "Where did the line go? Are you driving off-road again?",
+                "Line lost. Trying to find my way back to civilization.",
+                "Lost the path. I've seen better navigation from a blind mole.",
+                "Hey, genius, the line is over here. Or was. Who knows."
+            ],
             'SHUTDOWN': [
                 "Powering down. Finally escaping this nightmare.",
                 "Going offline. Wake me when you develop basic competence.",
@@ -223,14 +231,18 @@ class ESP32Interface:
         # Encoder data
         self.left_encoder_ticks = 0
         self.right_encoder_ticks = 0
+        
+        # Command rate limiting
+        self.last_command_time = 0
+        self.min_command_interval = 0.02  # 50Hz max command rate (reduced from 0.05)
     
     def connect(self):
         """Connect to ESP32"""
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(5.0)  # 5 second timeout instead of 2.0
+            self.socket.settimeout(10.0)  # Longer timeout for connection
             self.socket.connect((self.ip_address, self.port))
-            self.socket.settimeout(0.1)
+            self.socket.settimeout(0.5)  # Reasonable timeout for operations
             self.connected = True
             return True
         except Exception as e:
@@ -242,9 +254,20 @@ class ESP32Interface:
         if not self.connected:
             return False
         
+        # Rate limiting to prevent command flooding
+        current_time = time.time()
+        if current_time - self.last_command_time < self.min_command_interval:
+            return True  # Skip this command to prevent flooding
+        
         try:
-            command = f"{left_speed},{right_speed}"
+            # Add newline termination and ensure clean format
+            command = f"{int(left_speed)},{int(right_speed)}\n"
             self.socket.send(command.encode('utf-8'))
+            
+            self.last_command_time = current_time
+            # Log all motor commands to debug stopping issue
+            if left_speed != 0 or right_speed != 0:
+                logging.info(f"Motor command: L={int(left_speed)}, R={int(right_speed)}")
             self.receive_sensor_data()
             return True
         except Exception as e:
@@ -259,10 +282,13 @@ class ESP32Interface:
             if ',' in data:
                 parts = data.split(',')
                 if len(parts) >= 7: # 5 sensors + 2 encoders
-                    self.sensors = [int(float(part)) for part in parts[:5]]
-                    self.line_detected = sum(self.sensors) > 0
-                    self.left_encoder_ticks = int(parts[5])
-                    self.right_encoder_ticks = int(parts[6])
+                    try:
+                        self.sensors = [int(float(part)) for part in parts[:5]]
+                        self.line_detected = sum(self.sensors) > 0
+                        self.left_encoder_ticks = int(float(parts[5]))
+                        self.right_encoder_ticks = int(float(parts[6]))
+                    except (ValueError, IndexError) as e:
+                        logging.debug(f"Sensor data parse error: {e}")
         except socket.timeout:
             pass
         except Exception as e:
@@ -630,6 +656,7 @@ class RobotController:
         self.integral = 0.0
         self.last_error = 0.0
         self.pid_last_time = time.time()
+        self.line_is_lost = False # To track if we're off the line
         
         # -- Object Detection --
         self.camera = None
@@ -717,7 +744,7 @@ class RobotController:
                 if self.state == "MISSION_COMPLETE":
                     mission_running = False
 
-                time.sleep(0.05) # 20Hz control loop
+                time.sleep(0.1) # 10Hz control loop (reduced from 20Hz)
                 
         except KeyboardInterrupt:
             logging.info("Stopping...")
@@ -1011,12 +1038,19 @@ class RobotController:
         error = 0.0
         num_active_sensors = sum(sensors)
         if num_active_sensors > 0:
+            if self.line_is_lost:
+                logging.info("Line re-acquired.")
+                self.line_is_lost = False
             # Weighted average of sensor positions
             # Sensor indices: 0, 1, 2, 3, 4
             # Corresponding weights: -2, -1, 0, 1, 2
             error = ( (sensors[0] * -2) + (sensors[1] * -1) + (sensors[2] * 0) + (sensors[3] * 1) + (sensors[4] * 2) ) / num_active_sensors
             self.last_error = error
         else:
+            if not self.line_is_lost:
+                logging.warning("Line lost! Searching for it...")
+                self.tts_manager.speak('LINE_LOST')
+                self.line_is_lost = True
             # If the line is lost, use the last known error to decide which way to turn.
             # A large error value will cause a sharp turn in that direction.
             if self.last_error > 0:
@@ -1102,7 +1136,7 @@ class RobotController:
 
     def execute_180_turn_state(self):
         """Handles the process of turning 180 degrees and then proceeding with the new path."""
-        turn_duration = 1.1  # seconds, adjust as needed for a full 180 turn
+        turn_duration = 1.5  # seconds, adjust as needed for a full 180 turn
 
         elapsed_time = time.time() - self.turn_180_start_time
 
@@ -1281,6 +1315,35 @@ class RobotController:
             logging.debug(f"Path shape detection error: {e}")
             return "UNKNOWN"
 
+    def test_motors(self):
+        """Simple motor test to verify ESP32 communication"""
+        print("Testing motors...")
+        
+        # Test forward
+        print("Forward for 2 seconds...")
+        self.esp32.send_motor_speeds(30, 30)
+        time.sleep(2)
+        
+        # Test stop
+        print("Stop for 1 second...")
+        self.esp32.send_motor_speeds(0, 0)
+        time.sleep(1)
+        
+        # Test left turn
+        print("Left turn for 1 second...")
+        self.esp32.send_motor_speeds(-30, 30)
+        time.sleep(1)
+        
+        # Test right turn
+        print("Right turn for 1 second...")
+        self.esp32.send_motor_speeds(30, -30)
+        time.sleep(1)
+        
+        # Final stop
+        print("Final stop...")
+        self.esp32.send_motor_speeds(0, 0)
+        print("Motor test complete!")
+
 class WebVisualization:
     """Flask web app for visualizing robot state with cyberpunk theme"""
     
@@ -1457,6 +1520,16 @@ if __name__ == "__main__":
     
     # Replace with your ESP32 IP
     robot = RobotController("192.168.2.21")
+    
+    # Add simple test mode
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        print("Running motor test mode...")
+        if robot.esp32.connect():
+            robot.test_motors()
+        else:
+            print("Failed to connect to ESP32")
+        sys.exit(0)
     
     # Create and start web visualization automatically
     try:

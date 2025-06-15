@@ -19,10 +19,10 @@ RIGHT_MOTOR_2 = 13
 LEFT_ENCODER_A = 23
 LEFT_ENCODER_B = 5
 RIGHT_ENCODER_A = 26
-RIGHT_ENCODER_B = 39
+RIGHT_ENCODER_B = 25
 
 # Sensor Pins
-SENSOR_PINS = [14, 27, 16, 17, 25]  # L2, L1, C, R1, R2
+SENSOR_PINS = [14, 27, 16, 17, 33]  # L2, L1, C, R1, R2
 
 # Global tick counters for encoders
 left_ticks = 0
@@ -215,24 +215,45 @@ def run_server(motors, sensors, encoders):
                 
                 # Receive motor commands
                 try:
-                    data = client.recv(32)
+                    data = client.recv(64)  # Increased buffer size
                     if data:
-                        command = data.decode().strip()
-                        if ',' in command:
-                            # Motor speed command: "left,right"
-                            try:
-                                left, right = command.split(',')
-                                motors.set_speeds(int(left), int(right))
-                            except:
-                                print(f"Bad command: {command}")
-                        elif command == "STOP":
-                            motors.stop()
+                        # Handle multiple commands in buffer
+                        commands = data.decode().strip().split('\n')
+                        
+                        for command in commands:
+                            command = command.strip()
+                            if not command:  # Skip empty commands
+                                continue
+                                
+                            if ',' in command:
+                                # Motor speed command: "left,right"
+                                try:
+                                    parts = command.split(',')
+                                    if len(parts) == 2:
+                                        left = int(float(parts[0]))  # Handle float strings
+                                        right = int(float(parts[1]))
+                                        
+                                        # Validate reasonable speed range
+                                        if -100 <= left <= 100 and -100 <= right <= 100:
+                                            motors.set_speeds(left, right)
+                                        else:
+                                            print(f"Speed out of range: {left},{right}")
+                                    else:
+                                        print(f"Invalid format: {command}")
+                                except ValueError as e:
+                                    print(f"Parse error: {command} - {e}")
+                                except Exception as e:
+                                    print(f"Command error: {command} - {e}")
+                            elif command == "STOP":
+                                motors.stop()
+                            else:
+                                print(f"Unknown command: {command}")
                     else:
                         print("Pi disconnected")
                         client.close()
                         client = None
                         motors.stop()
-                        
+                
                 except OSError:
                     pass  # No data available
                 except:
@@ -243,9 +264,9 @@ def run_server(motors, sensors, encoders):
             
         except Exception as e:
             print(f"Server error: {e}")
-        finally:
-            motors.stop()
-            time.sleep(0.01)
+        
+        # Only stop motors when there's an actual error, not every loop
+        time.sleep(0.01)
 
 def main():
     print("ESP32 Line Sensor Interface")
