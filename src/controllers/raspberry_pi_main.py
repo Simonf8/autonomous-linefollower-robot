@@ -52,15 +52,17 @@ START_DIRECTION = _DIRECTION_FLIP_MAP.get(_START_DIRECTION_RAW.upper(), _START_D
 # These values MUST be calibrated for your specific robot for accurate tracking.
 # Based on the DFR-06287 motor specs (SJ01, 120:1 gear ratio, 8 CPR encoder),
 # the correct value is 8 * 120 = 960.
+# NOTE: Since it's a quadrature encoder, all 4 signal edges can be counted,
+# potentially increasing the resolution to 960 * 4 = 3840.
 WHEEL_RADIUS_M = 0.0325         # Wheel radius in meters (3.25 cm)
-AXLE_LENGTH_M = 0.15            # Distance between wheels in meters (15 cm)
-TICKS_PER_REVOLUTION = 960       # Encoder ticks for one full wheel revolution
+AXLE_LENGTH_M = 0.155           # Distance between wheels in meters (15.5 cm), fine-tuned
+TICKS_PER_REVOLUTION = 3840       # Encoder ticks for one full wheel revolution
 
 # -- PID Controller Configuration --
 # These gains MUST be tuned for your specific robot for smooth line following.
-KP = 0.025               # Proportional gain: How strongly to react to current error.
+KP = 0.03                # Proportional gain: How strongly to react to current error.
 KI = 0.008               # Integral gain: Corrects for steady-state error over time.
-KD = 0.07                # Derivative gain: Dampens oscillations by anticipating future error.
+KD = 0.08                # Derivative gain: Dampens oscillations by anticipating future error.
 
 # -- Computer Vision Path Detection --
 # Source points for perspective warp (trapezoid in the original image).
