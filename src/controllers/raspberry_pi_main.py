@@ -56,7 +56,7 @@ START_DIRECTION = _DIRECTION_FLIP_MAP.get(_START_DIRECTION_RAW.upper(), _START_D
 # potentially increasing the resolution to 960 * 4 = 3840.
 WHEEL_RADIUS_M = 0.0325         # Wheel radius in meters (3.25 cm)
 AXLE_LENGTH_M = 0.155           # Distance between wheels in meters (15.5 cm), fine-tuned
-TICKS_PER_REVOLUTION = 3840       # Encoder ticks for one full wheel revolution
+TICKS_PER_REVOLUTION = 960       # Encoder ticks for one full wheel revolution
 
 # -- PID Controller Configuration --
 # These gains MUST be tuned for your specific robot for smooth line following.
@@ -1031,35 +1031,52 @@ class RobotController:
         self.last_error = 0.0
 
     def line_follower_control_loop(self):
-        """Controls the robot's motors using a PID controller to follow the line."""
+        """Controls the robot's motors using a PID controller to follow the line, focusing on the 3 middle sensors."""
         sensors = self.esp32.sensors
         
-        # 1. Calculate the error from the sensor readings
-        # A weighted average is used to get a numeric position value from -2 to 2.
-        # Negative means the line is to the left, positive means to the right.
+        # Extract the state of the middle 3 sensors for line following.
+        # sensors are [L2, L1, C, R1, R2]
+        # We use [L1, C, R1] -> sensors[1], sensors[2], sensors[3]
+        l1, c, r1 = sensors[1], sensors[2], sensors[3]
+        
+        # 1. Calculate error based on the middle 3 sensors.
+        # The goal is to keep the center sensor (c) on the line.
         error = 0.0
-        num_active_sensors = sum(sensors)
-        if num_active_sensors > 0:
+        
+        # The line is detected by at least one of the middle three sensors.
+        if l1 or c or r1:
             if self.line_is_lost:
-                logging.info("Line re-acquired.")
+                logging.info("Line re-acquired by middle sensors.")
                 self.line_is_lost = False
-            # Weighted average of sensor positions
-            # Sensor indices: 0, 1, 2, 3, 4
-            # Corresponding weights: -2, -1, 0, 1, 2
-            error = ( (sensors[0] * -2) + (sensors[1] * -1) + (sensors[2] * 0) + (sensors[3] * 1) + (sensors[4] * 2) ) / num_active_sensors
+            
+            # Weighted average for fine-grained error calculation
+            # Weights: L1=-1, C=0, R1=1
+            # This pushes the robot to center `c` over the line.
+            error_sum = (l1 * -1) + (c * 0) + (r1 * 1)
+            active_sensor_count = l1 + c + r1
+            error = error_sum / active_sensor_count
             self.last_error = error
+        
+        # Line might be detected by outer sensors (sharp turn) or lost.
         else:
             if not self.line_is_lost:
-                logging.warning("Line lost! Searching for it...")
+                logging.warning("Line lost from middle sensors! Checking outer sensors and last error.")
                 self.tts_manager.speak('LINE_LOST')
                 self.line_is_lost = True
-            # If the line is lost, use the last known error to decide which way to turn.
-            # A large error value will cause a sharp turn in that direction.
-            if self.last_error > 0:
+            
+            # If the line is completely lost (no sensors active), use the last known error 
+            # to attempt recovery. This helps steer back towards the line.
+            if self.last_error > 0.5: # Was far to the right, turn right
                 error = 2.5 
-            elif self.last_error < 0:
+            elif self.last_error < -0.5: # Was far to the left, turn left
                 error = -2.5
-            # If last_error is 0, it will just continue straight briefly.
+            else:
+                # If it was centered or only slightly off, continue the search pattern.
+                if self.last_error > 0:
+                    error = 2.5
+                elif self.last_error < 0:
+                    error = -2.5
+                # If last_error is 0, it will just continue straight briefly.
         
         # 2. PID Calculation
         current_time = time.time()
