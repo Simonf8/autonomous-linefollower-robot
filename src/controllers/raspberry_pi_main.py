@@ -653,6 +653,7 @@ class RobotController:
         self.sharp_turn_speed = 45
         self.waypoint_threshold = 0.12 # 12cm tolerance for reaching a waypoint
         self.turn_180_start_time = 0
+        self.turn_180_initial_heading = 0.0
         
         # -- PID Controller State --
         self.integral = 0.0
@@ -1192,6 +1193,7 @@ class RobotController:
             self.current_waypoint_idx = 0
             self.state = "TURNING_180"
             self.turn_180_start_time = time.time()
+            self.turn_180_initial_heading = self.odometry.heading
         else:
             print("Failed to find a new path around the obstacle.")
             self.state = "NO_PATH"  # Stuck
@@ -1200,20 +1202,41 @@ class RobotController:
         self.obstacle_detected = False # Reset detection flag
 
     def execute_180_turn_state(self):
-        """Handles the process of turning 180 degrees and then proceeding with the new path."""
-        turn_duration = 1.5  # seconds, adjust as needed for a full 180 turn
+        """Handles the odometry-driven 180-degree turn."""
+        # Define the target heading, which is 180 degrees from the initial heading.
+        target_heading = self.turn_180_initial_heading + math.pi
 
+        # Normalize the target heading to be within [-pi, pi]
+        while target_heading > math.pi: target_heading -= 2 * math.pi
+        while target_heading < -math.pi: target_heading += 2 * math.pi
+
+        # Calculate the shortest angle difference to the target
+        heading_error = target_heading - self.odometry.heading
+        while heading_error > math.pi: heading_error -= 2 * math.pi
+        while heading_error < -math.pi: heading_error += 2 * math.pi
+
+        # Check if the turn is complete (within tolerance) or timed out
+        tolerance = math.radians(15)  # 15 degrees
+        turn_timeout = 4.0  # seconds
         elapsed_time = time.time() - self.turn_180_start_time
 
-        if elapsed_time < turn_duration:
-            # Continue turning (pivot right)
-            self.esp32.send_motor_speeds(self.sharp_turn_speed, -self.sharp_turn_speed)
+        if abs(heading_error) > tolerance and elapsed_time < turn_timeout:
+            # Determine turn direction based on the sign of the error
+            # Positive error requires a positive change in heading (left turn)
+            if heading_error > 0:
+                self.esp32.send_motor_speeds(-self.sharp_turn_speed, self.sharp_turn_speed) # Turn Left
+            else:
+                self.esp32.send_motor_speeds(self.sharp_turn_speed, -self.sharp_turn_speed) # Turn Right
         else:
-            # Turn is complete, stop briefly
+            # Turn is complete or timed out, stop motors
             self.stop_motors()
-            print("180-degree turn completed. Proceeding with new path.")
             
-            # Reset PID and switch to navigation state
+            if elapsed_time >= turn_timeout:
+                logging.warning("180-degree turn timed out. Proceeding with caution.")
+            else:
+                print("180-degree turn completed using odometry. Proceeding with new path.")
+
+            # Reset PID and switch back to navigation
             self.integral = 0.0
             self.last_error = 0.0
             if self.has_package:
