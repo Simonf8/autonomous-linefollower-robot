@@ -25,7 +25,7 @@ from gtts import gTTS
 # -- Grid Configuration --
 # Define start and goal cells for grid-based placement.
 # Coordinates are (column, row) from the top-left of the UNMAPPED maze grid.
-CELL_WIDTH_M = 0.12     # Width of a single grid cell in meters (12cm)
+CELL_WIDTH_M = 0.025     # Width of a single grid cell in meters (2.5cm)
 _START_CELL_RAW = (8, 2)   # (column, row)
 _GOAL_CELL_RAW = (20, 0)     # (column, row)
 _START_DIRECTION_RAW = 'LEFT'  # Initial robot orientation ('UP', 'DOWN', 'LEFT', 'RIGHT')
