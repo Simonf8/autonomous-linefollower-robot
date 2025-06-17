@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import socket
 import time
 import logging
 import cv2
@@ -18,10 +17,41 @@ import queue
 import random
 import subprocess
 from gtts import gTTS
+import socket
+
+# Attempt to import RPi.GPIO and create a mock if it fails
+try:
+    import RPi.GPIO as GPIO
+except (RuntimeError, ModuleNotFoundError):
+    logging.warning("RPi.GPIO library not found. Creating mock GPIO for simulation.")
+    # Create a mock GPIO class for testing on non-Pi environments
+    class MockGPIO:
+        BCM = 11; OUT = 1; IN = 0; PUD_UP = 2; PUD_DOWN = 3; RISING = 4; FALLING = 5; BOTH = 6
+        def __init__(self): self.pins = {}
+        def setmode(self, mode): logging.info(f"Mock GPIO: setmode({mode})")
+        def setup(self, pin, mode, pull_up_down=None):
+            logging.info(f"Mock GPIO: setup({pin}, {mode}, pull_up_down={pull_up_down})")
+            self.pins[pin] = {'mode': mode, 'value': 0, 'pull_up_down': pull_up_down}
+        def input(self, pin): return self.pins.get(pin, {'value': 0})['value']
+        def output(self, pin, value): self.pins.get(pin, {'value': 0})['value'] = value
+        def PWM(self, pin, freq):
+            logging.info(f"Mock GPIO: PWM({pin}, {freq})")
+            class MockPWM:
+                def start(self, dc): pass
+                def stop(self): pass
+                def ChangeDutyCycle(self, dc): pass
+            return MockPWM()
+        def add_event_detect(self, pin, edge, callback, bouncetime=1): logging.info(f"Mock GPIO: add_event_detect({pin})")
+        def cleanup(self): logging.info("Mock GPIO: cleanup()")
+    GPIO = MockGPIO()
+
 
 # ============================================================================
 # Robot Configuration
 # ============================================================================
+# -- ESP32 Configuration --
+ESP32_IP = "192.168.2.21" # REPLACE WITH YOUR ESP32's ACTUAL IP ADDRESS
+
 # -- Grid Configuration --
 # Define start and goal cells for grid-based placement.
 # Coordinates are (column, row) from the top-left of the UNMAPPED maze grid.
@@ -48,21 +78,11 @@ DROPOFF_CELLS = [(MAZE_WIDTH_CELLS - 1 - cell[0], cell[1]) for cell in _DROPOFF_
 _DIRECTION_FLIP_MAP = {'LEFT': 'RIGHT', 'RIGHT': 'LEFT'}
 START_DIRECTION = _DIRECTION_FLIP_MAP.get(_START_DIRECTION_RAW.upper(), _START_DIRECTION_RAW)
 
-# -- Odometry Calibration --
-# These values MUST be calibrated for your specific robot for accurate tracking.
-# Based on the DFR-06287 motor specs (SJ01, 120:1 gear ratio, 8 CPR encoder),
-# the correct value is 8 * 120 = 960.
-# NOTE: Since it's a quadrature encoder, all 4 signal edges can be counted,
-# potentially increasing the resolution to 960 * 4 = 3840.
-WHEEL_RADIUS_M = 0.0325         # Wheel radius in meters (3.25 cm)
-AXLE_LENGTH_M = 0.155           # Distance between wheels in meters (15.5 cm), fine-tuned
-TICKS_PER_REVOLUTION = 960       # Encoder ticks for one full wheel revolution
-
 # -- PID Controller Configuration --
 # These gains MUST be tuned for your specific robot for smooth line following.
-KP = 0.03                # Proportional gain: How strongly to react to current error.
-KI = 0.008               # Integral gain: Corrects for steady-state error over time.
-KD = 0.08                # Derivative gain: Dampens oscillations by anticipating future error.
+KP = 0.8                # Proportional gain: How strongly to react to current error.
+KI = 0.01               # Integral gain: Corrects for steady-state error over time.
+KD = 0.2                # Derivative gain: Dampens oscillations by anticipating future error.
 
 # -- Computer Vision Path Detection --
 # Source points for perspective warp (trapezoid in the original image).
@@ -216,137 +236,151 @@ class TTSManager:
             phrase = random.choice(self.phrases[event_key])
             self.tts_queue.put(phrase)
 
+class LineSensor:
+    """Reads 3 line sensors connected directly to Raspberry Pi GPIO."""
+    def __init__(self):
+        self.pins = {'left': 17, 'center': 27, 'right': 22}
+        GPIO.setmode(GPIO.BCM)
+        for pin in self.pins.values():
+            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+        logging.info("Line sensors initialized on Raspberry Pi GPIO.")
 
-class ESP32Interface:
-    """Simple ESP32 communication for sensor data and motor control"""
+    def read(self) -> List[int]:
+        """Reads the line follower sensors. Returns [Left, Center, Right]."""
+        # Assumes HIGH (1) = line detected, LOW (0) = no line.
+        left = GPIO.input(self.pins['left'])
+        center = GPIO.input(self.pins['center'])
+        right = GPIO.input(self.pins['right'])
+        return [left, center, right]
     
-    def __init__(self, ip_address, port=1234):
-        self.ip_address = ip_address
+    def cleanup(self):
+        GPIO.cleanup()
+
+class ESP32Bridge:
+    """Handles WiFi communication with the ESP32 motor/encoder controller."""
+    def __init__(self, ip, port=1234):
+        self.ip = ip
         self.port = port
         self.socket = None
         self.connected = False
-        
-        # Current sensor state
-        self.sensors = [0, 0, 0, 0, 0]  # [L2, L1, C, R1, R2]
-        self.line_detected = False
-        
-        # Encoder data
-        self.left_encoder_ticks = 0
-        self.right_encoder_ticks = 0
-        
-        # Command rate limiting
-        self.last_command_time = 0
-        self.min_command_interval = 0.02  # 50Hz max command rate (reduced from 0.05)
-    
+        self.encoder_ticks = [0, 0, 0, 0] # FL, FR, BL, BR
+        self._lock = threading.Lock()
+        self._running = False
+
     def connect(self):
-        """Connect to ESP32"""
+        """Connects to the ESP32 server."""
+        while not self._running: # This allows the loop to be stopped from another thread
+            return
+        logging.info(f"Attempting to connect to ESP32 at {self.ip}:{self.port}...")
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(10.0)  # Longer timeout for connection
-            self.socket.connect((self.ip_address, self.port))
-            self.socket.settimeout(0.5)  # Reasonable timeout for operations
+            self.socket.settimeout(5.0)
+            self.socket.connect((self.ip, self.port))
+            self.socket.settimeout(0.5)
             self.connected = True
+            logging.info("Successfully connected to ESP32.")
             return True
         except Exception as e:
+            logging.error(f"ESP32 connection failed: {e}. Retrying...")
             self.connected = False
+            time.sleep(3)
             return False
-    
-    def send_motor_speeds(self, left_speed, right_speed):
-        """Send motor speeds directly to ESP32"""
-        if not self.connected:
-            return False
-        
-        # Rate limiting to prevent command flooding
-        current_time = time.time()
-        if current_time - self.last_command_time < self.min_command_interval:
-            return True  # Skip this command to prevent flooding
-        
-        try:
-            # Add newline termination and ensure clean format
-            command = f"{int(left_speed)},{int(right_speed)}\n"
-            self.socket.send(command.encode('utf-8'))
+
+    def _communication_thread(self):
+        """A dedicated thread to handle receiving data from the ESP32."""
+        while self._running:
+            if not self.connected:
+                self.connect()
+                continue
             
-            self.last_command_time = current_time
-            # Log all motor commands to debug stopping issue
-            if left_speed != 0 or right_speed != 0:
-                logging.info(f"Motor command: L={int(left_speed)}, R={int(right_speed)}")
-            self.receive_sensor_data()
-            return True
-        except Exception as e:
-            logging.error(f"Failed to send motor speeds: {e}")
-            self.connected = False
-            return False
-        
-    def receive_sensor_data(self):
-        """Receive and parse sensor data from ESP32"""
-        try:
-            data = self.socket.recv(128).decode('utf-8').strip()
-            if ',' in data:
-                parts = data.split(',')
-                if len(parts) >= 7: # 5 sensors + 2 encoders
-                    try:
-                        self.sensors = [int(float(part)) for part in parts[:5]]
-                        self.line_detected = sum(self.sensors) > 0
-                        self.left_encoder_ticks = int(float(parts[5]))
-                        self.right_encoder_ticks = int(float(parts[6]))
-                    except (ValueError, IndexError) as e:
-                        logging.debug(f"Sensor data parse error: {e}")
-        except socket.timeout:
-            pass
-        except Exception as e:
-            logging.debug(f"Sensor data error: {e}")
-    
-    def close(self):
-        """Close connection"""
-        if self.socket:
             try:
+                data = self.socket.recv(128).decode('utf-8').strip()
+                if data:
+                    parts = data.split(',')
+                    if len(parts) == 4:
+                        with self._lock:
+                            self.encoder_ticks = [int(p) for p in parts]
+                    else:
+                        logging.warning(f"Malformed encoder data from ESP32: {data}")
+            except socket.timeout:
+                continue # Normal, just means no data was sent in a while
+            except (socket.error, ConnectionResetError) as e:
+                logging.error(f"ESP32 connection lost: {e}")
+                self.connected = False
                 self.socket.close()
-            except:
-                pass
-        self.connected = False
+            except Exception as e:
+                logging.error(f"Error in ESP32 comms thread: {e}")
+                self.connected = False
+                self.socket.close()
 
-class WheelOdometry:
-    """Calculates robot position and heading using wheel encoder data."""
+    def start(self):
+        """Starts the communication thread."""
+        if not self._running:
+            self._running = True
+            self.thread = threading.Thread(target=self._communication_thread, daemon=True)
+            self.thread.start()
+            logging.info("ESP32 bridge started.")
 
-    def __init__(self, initial_pose: Tuple[float, float, float] = (0.0, 0.0, 0.0)):
-        # Robot parameters are now defined globally for easier calibration
-        self.WHEEL_RADIUS = WHEEL_RADIUS_M
-        self.AXLE_LENGTH = AXLE_LENGTH_M
-        self.TICKS_PER_REVOLUTION = TICKS_PER_REVOLUTION
+    def send_motor_speeds(self, fl, fr, bl, br):
+        """Sends motor speed commands to the ESP32."""
+        if not self.connected:
+            return
+        try:
+            command = f"{int(fl)},{int(fr)},{int(bl)},{int(br)}\n"
+            self.socket.sendall(command.encode('utf-8'))
+        except socket.error:
+            logging.warning("Failed to send motor command, connection may be down.")
+            self.connected = False
 
-        # State variables, initialized to the provided start pose
-        self.x, self.y, self.heading = initial_pose
+    def get_encoder_ticks(self):
+        """Returns the latest encoder ticks in a thread-safe way."""
+        with self._lock:
+            return self.encoder_ticks
 
-        # Previous tick counts
-        self.prev_left_ticks = 0
-        self.prev_right_ticks = 0
+    def stop(self):
+        """Stops the communication thread and closes the socket."""
+        self._running = False
+        if self.socket:
+            self.socket.close()
+        logging.info("ESP32 bridge stopped.")
         
-        # Calculate distance per tick
-        self.DISTANCE_PER_TICK = (2 * math.pi * self.WHEEL_RADIUS) / self.TICKS_PER_REVOLUTION
+class OmniWheelOdometry:
+    """Calculates robot position and heading using omni-wheel encoder data."""
+    def __init__(self, initial_pose: Tuple[float, float, float], pulses_per_rev: int, wheel_diameter: float, robot_width: float, robot_length: float):
+        # Physical constants
+        self.PULSES_PER_REV = pulses_per_rev
+        self.WHEEL_DIAMETER_M = wheel_diameter
+        self.WHEEL_CIRCUMFERENCE_M = math.pi * self.WHEEL_DIAMETER_M
+        self.DISTANCE_PER_PULSE = self.WHEEL_CIRCUMFERENCE_M / self.PULSES_PER_REV
+        self.ROBOT_WIDTH_M = robot_width
+        self.ROBOT_LENGTH_M = robot_length
 
-    def update(self, left_ticks: int, right_ticks: int) -> Tuple[float, float, float]:
-        """Update robot pose based on new encoder tick counts."""
-        # Calculate tick differences
-        delta_left = left_ticks - self.prev_left_ticks
-        delta_right = right_ticks - self.prev_right_ticks
+        # State variables
+        self.x, self.y, self.heading = initial_pose
+        self.prev_ticks = [0, 0, 0, 0] # FL, FR, BL, BR
 
-        # Update previous tick counts
-        self.prev_left_ticks = left_ticks
-        self.prev_right_ticks = right_ticks
-
+    def update(self, current_ticks: List[int]) -> Tuple[float, float, float]:
+        """Update robot pose based on new total encoder tick counts."""
+        delta_ticks = [(curr - prev) for curr, prev in zip(current_ticks, self.prev_ticks)]
+        self.prev_ticks = current_ticks
+        
         # Calculate distance traveled by each wheel
-        left_dist = delta_left * self.DISTANCE_PER_TICK
-        right_dist = delta_right * self.DISTANCE_PER_TICK
+        fl_dist, fr_dist, bl_dist, br_dist = [d * self.DISTANCE_PER_PULSE for d in delta_ticks]
 
-        # Calculate change in distance and heading
-        delta_dist = (left_dist + right_dist) / 2.0
-        delta_heading = (right_dist - left_dist) / self.AXLE_LENGTH
-
-        # Update pose
-        self.x += delta_dist * math.cos(self.heading)
-        self.y += delta_dist * math.sin(self.heading)
+        # Forward Kinematics for X-shaped omni-drive
+        # Note: This gives displacement over the last interval
+        vy_local = (-fl_dist + fr_dist - bl_dist + br_dist) / 4.0 # Strafe
+        vx_local = (fl_dist + fr_dist + bl_dist + br_dist) / 4.0   # Forward
+        
+        # Change in heading
+        delta_heading = (-fl_dist + fr_dist + bl_dist - br_dist) / (2 * (self.ROBOT_WIDTH_M + self.ROBOT_LENGTH_M))
+        
+        # Update pose, transforming local displacement to global frame
+        avg_heading = self.heading + delta_heading / 2.0
+        self.x += vx_local * math.cos(avg_heading) - vy_local * math.sin(avg_heading)
+        self.y += vx_local * math.sin(avg_heading) + vy_local * math.cos(avg_heading)
         self.heading += delta_heading
-
+        
         # Normalize heading to be within [-pi, pi]
         while self.heading > math.pi: self.heading -= 2 * math.pi
         while self.heading < -math.pi: self.heading += 2 * math.pi
@@ -627,31 +661,44 @@ class RobotController:
     """Controls the robot using D* Lite for pathfinding and YOLO for obstacle detection."""
     
     def __init__(self, esp32_ip):
-        self.esp32 = ESP32Interface(esp32_ip)
+        # -- Hardware Interfaces --
+        self.esp32_bridge = ESP32Bridge(esp32_ip)
+        self.line_sensor = LineSensor()
         
+        # -- Position & Mapping --
+        initial_pose = (START_POSITION[0], START_POSITION[1], START_HEADING)
+        self.odometry = OmniWheelOdometry(
+            initial_pose=initial_pose,
+            pulses_per_rev=PULSES_PER_REV,
+            wheel_diameter=WHEEL_DIAMETER_M,
+            robot_width=ROBOT_WIDTH_M,
+            robot_length=ROBOT_LENGTH_M
+        )
+        self.mapper = Mapper()
+        self.current_position = self.odometry.x, self.odometry.y, self.odometry.heading # x, y, heading
+
         # -- Task Management --
-        self.pickup_locations = PICKUP_CELLS.copy()  # All pickup locations
-        self.dropoff_locations = DROPOFF_CELLS.copy()  # All dropoff locations
-        self.current_pickup_index = 0  # Current pickup index (P1=0, P2=1, P3=2, P4=3)
-        self.current_dropoff_index = 0  # Current dropoff index (D1=0, D2=1, D3=2, D4=3)
-        self.collected_boxes = []  # Track which boxes have been collected
-        self.delivered_boxes = []  # Track which boxes have been delivered
-        self.current_target_pickup = None  # Current pickup target
-        self.current_target_dropoff = None  # Current dropoff target
-        self.has_package = False # True if robot is "carrying" a package
-        self.boxes_to_collect = len(PICKUP_CELLS)  # Total boxes to collect
+        self.pickup_locations = PICKUP_CELLS.copy()
+        self.dropoff_locations = DROPOFF_CELLS.copy()
+        self.current_pickup_index = 0
+        self.current_dropoff_index = 0
+        self.collected_boxes = []
+        self.delivered_boxes = []
+        self.current_target_pickup = None
+        self.current_target_dropoff = None
+        self.has_package = False
+        self.boxes_to_collect = len(PICKUP_CELLS)
 
         # -- Navigation State --
         self.path: Optional[List[Tuple[int, int]]] = None
         self.current_waypoint_idx = 0
-        self.state = "STARTING_MISSION" # Initial state
+        self.state = "STARTING_MISSION"
         self.target_cell: Optional[Tuple[int, int]] = None
         
         # -- Speed & Control Settings --
-        self.base_speed = 32 # Base motor speed for line following
-        self.turn_speed_factor = 0.8
-        self.sharp_turn_speed = 45
-        self.waypoint_threshold = 0.12 # 12cm tolerance for reaching a waypoint
+        self.base_speed = BASE_SPEED
+        self.turn_speed = TURN_SPEED
+        self.waypoint_threshold = WAYPOINT_THRESHOLD_M
         self.turn_180_start_time = 0
         self.turn_180_initial_heading = 0.0
         
@@ -659,10 +706,8 @@ class RobotController:
         self.integral = 0.0
         self.last_error = 0.0
         self.pid_last_time = time.time()
-        self.line_is_lost = False # To track if we're off the line
-        self.line_lost_start_time = None # For active search pattern
-        self.search_phase_start_time = 0 # For S-curve search
-        self.search_stage = 0 # 0=init, 1=right, 2=left, 3=right
+        self.line_is_lost = False
+        self.line_lost_start_time = None
         
         # -- Object Detection --
         self.camera = None
@@ -670,27 +715,17 @@ class RobotController:
         self.setup_camera_and_yolo()
         self.latest_frame = None
         self.obstacle_detected = False
-        self.package_detected = False # New flag for YOLO package
-        self.package_box = None # To store bbox for visualization
-        self.last_package_state = False # To announce only once
-        self.visual_turn_cue = "STRAIGHT" # STRAIGHT, CORNER_LEFT, CORNER_RIGHT
+        self.package_detected = False
+        self.package_box = None
+        self.last_package_state = False
         self.perspective_transform_matrix = None
         
         # -- TTS Manager --
         self.tts_manager = TTSManager()
         
-        # -- Position & Mapping --
-        initial_pose = (START_POSITION[0], START_POSITION[1], START_HEADING)
-        self.odometry = WheelOdometry(initial_pose=initial_pose)
-        self.mapper = Mapper()
-        self.current_position = self.odometry.x, self.odometry.y, self.odometry.heading # x, y, heading
-        self.goal_reached = False # This will be managed by the new state machine
-
         # -- D* Lite Path Planner --
-        # Start and goal are dynamic based on mission progress
         initial_start = START_CELL
-        # Initial goal will be set when mission starts
-        initial_goal = self.pickup_locations[0]  # Start by going to first pickup
+        initial_goal = self.pickup_locations[0]
         self.planner = Pathfinder(self.mapper.create_maze_grid(), initial_start, initial_goal)
 
     def setup_camera_and_yolo(self):
@@ -717,12 +752,7 @@ class RobotController:
     def run(self):
         """Main control loop for the multi-task delivery mission."""
         logging.info("Starting D* Lite mission controller.")
-        
-        if not self.esp32.connect():
-            print("ESP32 connection failed - continuing without motor control")
-        else:
-            print("ESP32 connected successfully!")
-        
+        self.esp32_bridge.start()
         self.tts_manager.speak('STARTUP')
         
         mission_running = True
@@ -744,13 +774,13 @@ class RobotController:
                 elif self.state == "TURNING_180":
                     self.execute_180_turn_state()
                 else:
-                    self.manage_mission_state() # New state manager
+                    self.manage_mission_state()
                 
                 # 4. Check if the entire mission is complete
                 if self.state == "MISSION_COMPLETE":
                     mission_running = False
 
-                time.sleep(0.1) # 10Hz control loop (reduced from 20Hz)
+                time.sleep(0.05) # 20Hz control loop
                 
         except KeyboardInterrupt:
             logging.info("Stopping...")
@@ -945,8 +975,8 @@ class RobotController:
         )
         
         # Detect if we are at an intersection using sensors
-        sensors = self.esp32.sensors
-        is_intersection = sum(sensors) >= 4 or (sensors[0] and sensors[4])
+        sensors = self.line_sensor.read()
+        is_intersection = sum(sensors) >= 2 # 2 or 3 sensors active on line
 
         # If we are close to a waypoint AND the sensors see an intersection, it's time to decide the next turn
         if dist_to_waypoint < self.waypoint_threshold and is_intersection:
@@ -1015,32 +1045,24 @@ class RobotController:
     def execute_intersection_turn(self, direction: str):
         """Executes a sensor-driven turn at an intersection until the line is re-acquired."""
         # Move forward slightly to enter the intersection center
-        self.esp32.send_motor_speeds(self.base_speed, self.base_speed)
-        time.sleep(0.3) # A short, timed move is best here to avoid overshooting
+        self.move_omni(vx=self.base_speed, vy=0, omega=0)
+        time.sleep(0.2)
         self.stop_motors()
 
         if direction == "STRAIGHT":
-            # Already moved forward, just continue line following
             pass
         else:
-            turn_speed = self.sharp_turn_speed
-            if direction == "LEFT":
-                self.tts_manager.speak('TURN_LEFT')
-                left_cmd, right_cmd = -turn_speed, turn_speed
-            else: # RIGHT
-                self.tts_manager.speak('TURN_RIGHT')
-                left_cmd, right_cmd = turn_speed, -turn_speed
+            omega = self.turn_speed if direction == "RIGHT" else -self.turn_speed
+            if omega > 0: self.tts_manager.speak('TURN_RIGHT')
+            else: self.tts_manager.speak('TURN_LEFT')
 
-            self.esp32.send_motor_speeds(left_cmd, right_cmd)
+            self.move_omni(vx=0, vy=0, omega=omega)
 
             start_time = time.time()
-            turn_timeout = 3.0  # seconds
+            turn_timeout = 4.0
             line_found = False
-
-            # Keep turning until one of the middle 3 sensors finds the line
             while time.time() - start_time < turn_timeout:
-                self.esp32.receive_sensor_data()
-                if any(self.esp32.sensors[1:4]):
+                if self.line_sensor.read()[1]: # Center sensor
                     logging.info(f"Line re-acquired after {direction} turn.")
                     line_found = True
                     break
@@ -1049,110 +1071,46 @@ class RobotController:
             if not line_found:
                 logging.warning(f"Turn timeout: Failed to find line after turning {direction}.")
 
-        # After turning (or going straight), stop briefly to allow sensors to re-acquire the line
         self.stop_motors()
         time.sleep(0.2)
-
-        # Reset PID controller after a turn to prevent integral windup from the turn
         self.integral = 0.0
         self.last_error = 0.0
 
     def line_follower_control_loop(self):
-        """Controls the robot's motors using a PID controller and an active search for lost lines."""
-        sensors = self.esp32.sensors
+        """Controls the robot's motors using a PID controller for line following."""
+        sensors = self.line_sensor.read()
+        left, center, right = sensors[0], sensors[1], sensors[2]
         
-        # Extract the state of the middle 3 sensors for line following.
-        l1, c, r1 = sensors[1], sensors[2], sensors[3]
-        
-        error = 0.0
-        
-        # The line is detected by at least one of the middle three sensors.
-        if l1 or c or r1:
-            if self.line_is_lost:
-                logging.info("Line re-acquired.")
-                self.line_is_lost = False
-
-            # Reset line-lost recovery state
-            self.line_lost_start_time = None
-            self.search_stage = 0
-            
-            # Weighted average for fine-grained error calculation
-            error_sum = (l1 * -1) + (c * 0) + (r1 * 1)
-            active_sensor_count = l1 + c + r1
-            error = error_sum / active_sensor_count
-            self.last_error = error
-        
-        # Line is lost. Begin recovery maneuvers.
-        else:
+        if not (left or center or right):
             if not self.line_is_lost:
                 self.tts_manager.speak('LINE_LOST')
                 self.line_is_lost = True
-
-            if self.line_lost_start_time is None:
-                self.line_lost_start_time = time.time()
-
-            time_since_lost = time.time() - self.line_lost_start_time
+            logging.warning("Line lost. Stopping.")
+            self.stop_motors()
+            return
             
-            # Phase 1: For the first second, steer based on the last known direction.
-            if time_since_lost < 1.0:
-                if self.last_error > 0.5: error = 2.5   # Was far right, steer hard right
-                elif self.last_error < -0.5: error = -2.5 # Was far left, steer hard left
-                else: error = 2.5 if self.last_error >= 0 else -2.5 # Was near center
-            
-            # Phase 2: After 1 second, begin an active "S-curve" search pattern.
-            else:
-                if self.search_stage == 0: # Initialize search
-                    self.search_stage = 1
-                    self.search_phase_start_time = time.time()
-
-                phase_duration = time.time() - self.search_phase_start_time
-                
-                # S-Maneuver: right, long-left, right
-                if self.search_stage == 1: # Turn Right
-                    error = 2.5 
-                    if phase_duration > 0.75:
-                        self.search_stage = 2
-                        self.search_phase_start_time = time.time()
-                elif self.search_stage == 2: # Turn Left (double duration)
-                    error = -2.5
-                    if phase_duration > 1.5:
-                        self.search_stage = 3
-                        self.search_phase_start_time = time.time()
-                elif self.search_stage == 3: # Turn Right
-                    error = 2.5
-                    if phase_duration > 0.75:
-                        # Reset search cycle
-                        self.search_stage = 1
-                        self.search_phase_start_time = time.time()
+        if self.line_is_lost:
+            logging.info("Line re-acquired.")
+            self.line_is_lost = False
+        
+        error = (right * 1) + (left * -1)
         
         # PID Calculation
         current_time = time.time()
         dt = current_time - self.pid_last_time
-        if dt == 0: dt = 1e-6 # Avoid division by zero
+        if dt == 0: dt = 1e-6
 
-        # Integral term (with anti-windup)
         self.integral += error * dt
-        self.integral = max(min(self.integral, 50), -50) # Clamp integral to prevent windup
+        self.integral = max(min(self.integral, 50), -50)
 
-        # Derivative term
         derivative = (error - self.last_error) / dt
         
         self.last_error = error
         self.pid_last_time = current_time
         
-        # 3. Calculate motor speed correction
-        correction = (KP * error) + (KI * self.integral) + (KD * derivative)
+        correction_omega = (PID_KP * error) + (PID_KI * self.integral) + (PID_KD * derivative)
         
-        # 4. Apply correction to motor speeds
-        left_speed = self.base_speed - correction
-        right_speed = self.base_speed + correction
-        
-        # Clamp motor speeds to a safe range (e.g., -60 to 60)
-        max_speed = 60
-        left_speed = max(min(left_speed, max_speed), -max_speed)
-        right_speed = max(min(right_speed, max_speed), -max_speed)
-
-        self.esp32.send_motor_speeds(int(left_speed), int(right_speed))
+        self.move_omni(vx=self.base_speed, vy=0, omega=correction_omega)
 
     def handle_obstacle_and_replan(self):
         """Stops the robot, updates map, replans, and then initiates a 180-degree turn."""
@@ -1163,7 +1121,7 @@ class RobotController:
 
         # 1. Estimate obstacle position and update map
         robot_x, robot_y, robot_heading = self.current_position
-        obstacle_dist_m = 0.2  # Assume obstacle is 20cm in front
+        obstacle_dist_m = 0.20  # Assume obstacle is 20cm in front
 
         obstacle_world_x = robot_x + math.cos(robot_heading) * obstacle_dist_m
         obstacle_world_y = robot_y + math.sin(robot_heading) * obstacle_dist_m
@@ -1203,40 +1161,28 @@ class RobotController:
 
     def execute_180_turn_state(self):
         """Handles the odometry-driven 180-degree turn."""
-        # Define the target heading, which is 180 degrees from the initial heading.
         target_heading = self.turn_180_initial_heading + math.pi
-
-        # Normalize the target heading to be within [-pi, pi]
         while target_heading > math.pi: target_heading -= 2 * math.pi
         while target_heading < -math.pi: target_heading += 2 * math.pi
 
-        # Calculate the shortest angle difference to the target
         heading_error = target_heading - self.odometry.heading
         while heading_error > math.pi: heading_error -= 2 * math.pi
         while heading_error < -math.pi: heading_error += 2 * math.pi
 
-        # Check if the turn is complete (within tolerance) or timed out
-        tolerance = math.radians(15)  # 15 degrees
-        turn_timeout = 4.0  # seconds
+        tolerance = math.radians(10)
+        turn_timeout = 8.0
         elapsed_time = time.time() - self.turn_180_start_time
 
         if abs(heading_error) > tolerance and elapsed_time < turn_timeout:
-            # Determine turn direction based on the sign of the error
-            # Positive error requires a positive change in heading (left turn)
-            if heading_error > 0:
-                self.esp32.send_motor_speeds(-self.sharp_turn_speed, self.sharp_turn_speed) # Turn Left
-            else:
-                self.esp32.send_motor_speeds(self.sharp_turn_speed, -self.sharp_turn_speed) # Turn Right
+            omega = -self.turn_speed if heading_error > 0 else self.turn_speed
+            self.move_omni(vx=0, vy=0, omega=omega)
         else:
-            # Turn is complete or timed out, stop motors
             self.stop_motors()
-            
             if elapsed_time >= turn_timeout:
-                logging.warning("180-degree turn timed out. Proceeding with caution.")
+                logging.warning("180-degree turn timed out.")
             else:
-                print("180-degree turn completed using odometry. Proceeding with new path.")
-
-            # Reset PID and switch back to navigation
+                print("180-degree turn completed.")
+            
             self.integral = 0.0
             self.last_error = 0.0
             if self.has_package:
@@ -1288,7 +1234,7 @@ class RobotController:
                             # --- Category Check ---
                             if class_name in package_objects:
                                 # It's a package we're looking for
-                                logging.info(f"Package detected: {class_name} (confidence: {confidence:.2f})")
+                                logging.debug(f"Package detected: {class_name} (confidence: {confidence:.2f})")
                                 self.package_detected = True
                                 self.package_box = box.xyxy[0].cpu().numpy().astype(int) # Save bbox for overlay
                                 
@@ -1308,7 +1254,7 @@ class RobotController:
                             
                             else:
                                 # It's an unknown object. Treat it as an obstacle for safety.
-                                logging.info(f"Unknown object treated as obstacle: {class_name} (confidence: {confidence:.2f})")
+                                logging.warning(f"Unknown object treated as obstacle: {class_name} (confidence: {confidence:.2f})")
                                 if self.state not in ["AVOIDING", "TURNING_180"]:
                                     self.obstacle_detected = True
 
@@ -1329,24 +1275,20 @@ class RobotController:
 
     def update_position_tracking(self):
         """Update robot's position using data from wheel odometry."""
-        left_ticks = self.esp32.left_encoder_ticks
-        right_ticks = self.esp32.right_encoder_ticks
-        
-        # Update odometry and get new position
-        x, y, heading = self.odometry.update(left_ticks, right_ticks)
+        latest_ticks = self.esp32_bridge.get_encoder_ticks()
+        x, y, heading = self.odometry.update(latest_ticks)
         self.current_position = (x, y, heading)
-        
-        # Update the mapper for visualization
         self.mapper.update_robot_position(x, y, heading)
 
     def stop_motors(self):
         """Convenience function to stop motors."""
-        self.esp32.send_motor_speeds(0, 0)
+        self.esp32_bridge.send_motor_speeds(0, 0, 0, 0)
     
     def stop(self):
         """Stop the robot and cleanup resources"""
         self.stop_motors()
-        self.esp32.close()
+        self.esp32_bridge.stop()
+        self.line_sensor.cleanup()
         
         # Cleanup camera
         if self.camera:
@@ -1391,10 +1333,10 @@ class RobotController:
             # 5. Simple heuristic to decide if a corner is ahead.
             # If there's a strong imbalance in detected left vs. right lines, it implies a turn.
             if len(right_lines) > len(left_lines) + 5: # More vertical lines on right -> left turn
-                logging.info("Visual Cue: Possible LEFT turn ahead.")
+                logging.debug("Visual Cue: Possible LEFT turn ahead.")
                 return "CORNER_LEFT"
             elif len(left_lines) > len(right_lines) + 5: # More vertical lines on left -> right turn
-                logging.info("Visual Cue: Possible RIGHT turn ahead.")
+                logging.debug("Visual Cue: Possible RIGHT turn ahead.")
                 return "CORNER_RIGHT"
                 
             return "STRAIGHT"
@@ -1405,32 +1347,44 @@ class RobotController:
 
     def test_motors(self):
         """Simple motor test to verify ESP32 communication"""
-        print("Testing motors...")
+        print("Testing motors via ESP32 bridge...")
+        if not self.esp32_bridge.connected:
+            print("Cannot test motors: ESP32 not connected.")
+            return
+
+        print("Forward for 1s..."); self.move_omni(50, 0, 0); time.sleep(1)
+        print("Backward for 1s..."); self.move_omni(-50, 0, 0); time.sleep(1)
+        print("Strafe Left for 1s..."); self.move_omni(0, -50, 0); time.sleep(1)
+        print("Strafe Right for 1s..."); self.move_omni(0, 50, 0); time.sleep(1)
+        print("Rotate CW for 1s..."); self.move_omni(0, 0, 50); time.sleep(1)
+        print("Rotate CCW for 1s..."); self.move_omni(0, 0, -50); time.sleep(1)
         
-        # Test forward
-        print("Forward for 2 seconds...")
-        self.esp32.send_motor_speeds(30, 30)
-        time.sleep(2)
-        
-        # Test stop
-        print("Stop for 1 second...")
-        self.esp32.send_motor_speeds(0, 0)
-        time.sleep(1)
-        
-        # Test left turn
-        print("Left turn for 1 second...")
-        self.esp32.send_motor_speeds(-30, 30)
-        time.sleep(1)
-        
-        # Test right turn
-        print("Right turn for 1 second...")
-        self.esp32.send_motor_speeds(30, -30)
-        time.sleep(1)
-        
-        # Final stop
         print("Final stop...")
-        self.esp32.send_motor_speeds(0, 0)
+        self.stop_motors()
         print("Motor test complete!")
+
+    def move_omni(self, vx, vy, omega):
+        """
+        Calculates individual wheel speeds from a velocity vector and sends them to the ESP32.
+        :param vx: Forward velocity component (percentage, e.g., -100 to 100)
+        :param vy: Sideways (strafe) velocity component (percentage)
+        :param omega: Rotational velocity component (percentage)
+        """
+        R = self.odometry.ROBOT_WIDTH_M / 2 # Assuming width=length
+        
+        # Inverse kinematics for X-shaped omni-wheel configuration
+        v_fl = (vx - vy - R * omega)
+        v_fr = (vx + vy + R * omega)
+        v_bl = (vx + vy - R * omega)
+        v_br = (vx - vy + R * omega)
+        
+        speeds = [v_fl, v_fr, v_bl, v_br]
+        max_v = max(abs(v) for v in speeds)
+        if max_v > 100:
+            scale = 100 / max_v
+            speeds = [s * scale for s in speeds]
+            
+        self.esp32_bridge.send_motor_speeds(speeds[0], speeds[1], speeds[2], speeds[3])
 
     def correct_odometry_at_waypoint(self, waypoint_cell: Tuple[int, int]):
         """Snaps the robot's odometry to the precise coordinates of a waypoint cell."""
@@ -1452,6 +1406,9 @@ class RobotController:
         # Also update the main controller's copy of the position
         self.current_position = (self.odometry.x, self.odometry.y, self.odometry.heading)
         self.mapper.update_robot_position(self.odometry.x, self.odometry.y, self.odometry.heading)
+        
+        self.state = "NAVIGATING_TO_DROPOFF"
+        
 
 class WebVisualization:
     """Flask web app for visualizing robot state with cyberpunk theme"""
@@ -1489,7 +1446,7 @@ class WebVisualization:
 
             data = {
                 'state': self.robot.state,
-                'sensors': self.robot.esp32.sensors,
+                'sensors': self.robot.line_sensor.read(),
                 'position': {
                     'x': self.robot.current_position[0],
                     'y': self.robot.current_position[1],
@@ -1581,7 +1538,7 @@ class WebVisualization:
             cv2.line(frame, (width-10, height-10), (width-10, height-10-bracket_length), bracket_color, bracket_thickness)
             
             # Add sensor overlay
-            sensor_text = f"SENSORS: {self.robot.esp32.sensors}"
+            sensor_text = f"SENSORS: {self.robot.line_sensor.read()}"
             cv2.putText(frame, sensor_text, (10, height-30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
             
@@ -1625,19 +1582,21 @@ class WebVisualization:
         self.running = False
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
     # Replace with your ESP32 IP
-    robot = RobotController("192.168.2.21")
+    robot = RobotController(ESP32_IP)
     
     # Add simple test mode
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "test":
-        print("Running motor test mode...")
-        if robot.esp32.connect():
-            robot.test_motors()
-        else:
-            print("Failed to connect to ESP32")
+        print("Running hardware test mode...")
+        # Start the bridge to test motors
+        robot.esp32_bridge.start()
+        print("Waiting for ESP32 connection...")
+        time.sleep(5) # Give time for connection
+        robot.test_motors()
+        robot.stop()
         sys.exit(0)
     
     # Create and start web visualization automatically
@@ -1675,6 +1634,8 @@ if __name__ == "__main__":
         robot.run() 
     except KeyboardInterrupt:
         print("\nSYSTEM SHUTDOWN INITIATED...")
+    finally:
         robot.stop()
         if web_viz:
             web_viz.stop()
+        logging.info("Robot shutdown complete.")
