@@ -47,27 +47,52 @@ except (RuntimeError, ModuleNotFoundError):
 
 
 # ============================================================================
-# Robot Configuration
+#
+#                              ROBOT CONFIGURATION
+#
 # ============================================================================
-# -- ESP32 Configuration --
+
+# -- Network Configuration --
 ESP32_IP = "192.168.2.21" # REPLACE WITH YOUR ESP32's ACTUAL IP ADDRESS
 
-# -- Grid Configuration --
-# Define start and goal cells for grid-based placement.
-# Coordinates are (column, row) from the top-left of the UNMAPPED maze grid.
-CELL_WIDTH_M = 0.025     # Width of a single grid cell in meters (2.5cm)
-_START_CELL_RAW = (8, 2)   # (column, row)
-_GOAL_CELL_RAW = (20, 0)     # (column, row)
-_START_DIRECTION_RAW = 'LEFT'  # Initial robot orientation ('UP', 'DOWN', 'LEFT', 'RIGHT')
+# -- Physical Robot Constants --
+PULSES_PER_REV = 960
+WHEEL_DIAMETER_M = 0.025
+ROBOT_WIDTH_M = 0.225
+ROBOT_LENGTH_M = 0.075
 
-# -- Task Configuration --
-# Define pickup and drop-off cells for the package delivery task.
+# -- Navigation & Control --
+BASE_SPEED = 30
+TURN_SPEED = 40
+WAYPOINT_THRESHOLD_M = 0.12
+GOAL_THRESHOLD_M = 0.15
+
+# -- PID Controller Gains (for Line Following) --
+PID_KP = 0.8
+PID_KI = 0.01
+PID_KD = 0.2
+
+# -- Grid & Task Configuration --
+CELL_WIDTH_M = 0.025
+_START_CELL_RAW = (8, 2)
+_GOAL_CELL_RAW = (20, 0)
+_START_DIRECTION_RAW = 'LEFT'
 _PICKUP_CELLS_RAW = [(0, 14), (2, 14), (4, 14), (6, 14)]
-_DROPOFF_CELLS_RAW = [(20, 0), (18, 0), (16, 0), (14, 0)] # Corresponds to top lines
+_DROPOFF_CELLS_RAW = [(20, 0), (18, 0), (16, 0), (14, 0)]
 
-# -- Map Mirroring Correction --
-# The physical maze is a horizontal mirror of the one defined in the code.
-# We correct this by flipping the grid and all related coordinates.
+# -- Vision Configuration --
+PACKAGE_DETECTION_CONFIDENCE = 0.5
+IMG_PATH_SRC_PTS = np.float32([[200, 300], [440, 300], [580, 480], [60, 480]])
+IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
+
+# ============================================================================
+#
+#                         END OF CONFIGURATION
+#
+# ============================================================================
+
+
+# -- Map Mirroring Correction (Derived from Config) --
 MAZE_WIDTH_CELLS = 21
 START_CELL = (MAZE_WIDTH_CELLS - 1 - _START_CELL_RAW[0], _START_CELL_RAW[1])
 GOAL_CELL = (MAZE_WIDTH_CELLS - 1 - _GOAL_CELL_RAW[0], _GOAL_CELL_RAW[1])
@@ -78,44 +103,16 @@ DROPOFF_CELLS = [(MAZE_WIDTH_CELLS - 1 - cell[0], cell[1]) for cell in _DROPOFF_
 _DIRECTION_FLIP_MAP = {'LEFT': 'RIGHT', 'RIGHT': 'LEFT'}
 START_DIRECTION = _DIRECTION_FLIP_MAP.get(_START_DIRECTION_RAW.upper(), _START_DIRECTION_RAW)
 
-# -- PID Controller Configuration --
-# These gains MUST be tuned for your specific robot for smooth line following.
-KP = 0.8                # Proportional gain: How strongly to react to current error.
-KI = 0.01               # Integral gain: Corrects for steady-state error over time.
-KD = 0.2                # Derivative gain: Dampens oscillations by anticipating future error.
-
-# -- Computer Vision Path Detection --
-# Source points for perspective warp (trapezoid in the original image).
-# These points need to be tuned to your camera's mounting angle and position.
-# Format: [top-left, top-right, bottom-right, bottom-left]
-IMG_PATH_SRC_PTS = np.float32([[200, 300], [440, 300], [580, 480], [60, 480]])
-# Destination points for the top-down view.
-IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
-
-# -- YOLO Package Detection Configuration --
-# YOLO will detect packages at known pickup locations
-# Package detection confidence threshold
-PACKAGE_DETECTION_CONFIDENCE = 0.5
-
-# -- World Coordinate Configuration (calculated from grid) --
-# World coordinates are calculated from the grid cells, using the center of the cell.
-# The world origin (0,0) is the top-left corner of the maze.
+# -- World Coordinate Configuration (Derived from Config) --
 START_POSITION = ((START_CELL[0] + 0.5) * CELL_WIDTH_M, (START_CELL[1] + 0.5) * CELL_WIDTH_M)
-
-# Calculate heading in radians from the direction string
-HEADING_MAP = {
-    'UP': -math.pi / 2,    # Negative Y
-    'DOWN': math.pi / 2,   # Positive Y
-    'LEFT': math.pi,       # Negative X
-    'RIGHT': 0             # Positive X
-}
-START_HEADING = HEADING_MAP.get(START_DIRECTION.upper(), -math.pi / 2) # Default to UP
-
-# GOAL_POSITION is now dynamic based on current task
 GOAL_POSITION = ((DROPOFF_CELLS[0][0] + 0.5) * CELL_WIDTH_M, (DROPOFF_CELLS[0][1] + 0.5) * CELL_WIDTH_M)
-GOAL_THRESHOLD = 0.15          # Stop within 15cm of the goal
 
-WebVisualization = None  # Will be defined below
+HEADING_MAP = {
+    'UP': -math.pi / 2, 'DOWN': math.pi / 2, 'LEFT': math.pi, 'RIGHT': 0
+}
+START_HEADING = HEADING_MAP.get(START_DIRECTION.upper(), -math.pi / 2)
+
+WebVisualization = None
 
 class TTSManager:
     """Handles Text-to-Speech announcements using Google's gTTS service."""
@@ -367,7 +364,7 @@ class OmniWheelOdometry:
         # Calculate distance traveled by each wheel
         fl_dist, fr_dist, bl_dist, br_dist = [d * self.DISTANCE_PER_PULSE for d in delta_ticks]
 
-        # Forward Kinematics for X-shaped omni-drive
+        # Forward Kinematics for X-shaped omni-wheel configuration
         # Note: This gives displacement over the last interval
         vy_local = (-fl_dist + fr_dist - bl_dist + br_dist) / 4.0 # Strafe
         vx_local = (fl_dist + fr_dist + bl_dist + br_dist) / 4.0   # Forward
@@ -1584,7 +1581,7 @@ class WebVisualization:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
-    # Replace with your ESP32 IP
+    # The RobotController is now initialized with the ESP32's IP from the config section
     robot = RobotController(ESP32_IP)
     
     # Add simple test mode
