@@ -758,6 +758,7 @@ class RobotController:
         self.package_box = None
         self.last_package_state = False
         self.perspective_transform_matrix = None
+        self.visual_turn_cue = "STRAIGHT"
         
         # -- TTS Manager --
         self.tts_manager = TTSManager()
@@ -989,7 +990,14 @@ class RobotController:
                 self.last_package_state = self.package_detected
 
                 # Run path shape detection for corner anticipation
-                self.visual_turn_cue = self.detect_path_shape_from_frame(self.latest_frame)
+                detected_cue = self.detect_path_shape_from_frame(self.latest_frame)
+
+                # Announce a corner only when it is first detected
+                if detected_cue != "STRAIGHT" and self.visual_turn_cue == "STRAIGHT":
+                    turn_direction = detected_cue.split('_')[1]
+                    print(f"\n--- VISUAL CUE: {turn_direction} corner detected ahead. Switching to rotational turning. ---\n")
+                
+                self.visual_turn_cue = detected_cue
 
     def navigate_path(self):
         """Follows the line and uses the D* path to make decisions at intersections."""
@@ -1170,19 +1178,22 @@ class RobotController:
         self.pid_last_time = current_time
 
         # --- HYBRID CONTROL LOGIC ---
-        if center == 1:
-            # --- STRAFE CORRECTION (BALANCING) ---
-            # When the center sensor is on the line, we are "balancing".
-            # Use sideways strafing (vy) for small, precise adjustments.
-            correction_vy = (PID_KP_STRAFE * error) + (PID_KI_STRAFE * self.integral) + (PID_KD_STRAFE * derivative)
-            self.move_omni(vx=self.base_speed, vy=correction_vy, omega=0)
-        else:
+        # Decide whether to turn (rotate) or balance (strafe).
+        # We turn if a corner is visually detected ahead OR if the center sensor has left the line.
+        # Otherwise, we are on a straight path and can use sideways strafing for fine adjustments.
+        is_on_corner = self.visual_turn_cue != "STRAIGHT" or center == 0
+
+        if is_on_corner:
             # --- ROTATIONAL CORRECTION (TURNING ON A CORNER) ---
-            # When the center sensor is off the line, we're on a curve or have drifted.
-            # Use rotation (omega) to turn the robot's body to re-align with the line.
+            # Use rotation (omega) to turn the robot's body to re-align with the line, like a normal car.
             correction_omega = (PID_KP_ROT * error) + (PID_KI_ROT * self.integral) + (PID_KD_ROT * derivative)
             # A positive error (line to the right) requires a right turn (negative omega).
-            self.move_omni(vx=self.base_speed, vy=0, omega=-correction_omega)
+            self.move_omni(vx=self.base_speed * 0.8, vy=0, omega=-correction_omega) # Slow down slightly in turns
+        else:
+            # --- STRAFE CORRECTION (BALANCING ON STRAIGHTS) ---
+            # When on a straight, use sideways strafing (vy) for small, precise adjustments.
+            correction_vy = (PID_KP_STRAFE * error) + (PID_KI_STRAFE * self.integral) + (PID_KD_STRAFE * derivative)
+            self.move_omni(vx=self.base_speed, vy=correction_vy, omega=0)
 
     def handle_obstacle_and_replan(self):
         """Stops the robot, updates map, replans, and then initiates a 180-degree turn."""
