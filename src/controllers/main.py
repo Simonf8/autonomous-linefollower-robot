@@ -183,18 +183,36 @@ class RobotController:
         return self.pathfinder.create_maze_grid()
     
     def _setup_vision(self):
-        """Initialize camera and vision systems."""
+        """Initialize camera and vision systems based on feature flags."""
+        if not FEATURES['VISION_SYSTEM_ENABLED']:
+            self.camera = None
+            self.object_detector = None
+            self.path_detector = None
+            return
+            
         try:
             self.camera = cv2.VideoCapture(0)
             self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             
-            self.object_detector = ObjectDetector('yolo11n.pt', confidence_threshold=0.5)
-            self.path_detector = PathShapeDetector(IMG_PATH_SRC_PTS, IMG_PATH_DST_PTS)
+            # Initialize object detector if enabled
+            if FEATURES['OBJECT_DETECTION_ENABLED']:
+                self.object_detector = ObjectDetector('yolo11n.pt', confidence_threshold=0.5)
+            else:
+                self.object_detector = None
             
-            # Vision system initialized
-        except Exception:
+            # Initialize path shape detector if enabled
+            if FEATURES['PATH_SHAPE_DETECTION_ENABLED']:
+                self.path_detector = PathShapeDetector(IMG_PATH_SRC_PTS, IMG_PATH_DST_PTS)
+            else:
+                self.path_detector = None
+            
+        except Exception as e:
+            if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
+                print(f"Vision system initialization failed: {e}")
             self.camera = None
+            self.object_detector = None
+            self.path_detector = None
     
     def run(self):
         """Main control loop."""
@@ -226,7 +244,7 @@ class RobotController:
     
     def _process_vision(self):
         """Process camera frame for object detection and path analysis."""
-        if self.camera is None:
+        if not FEATURES['VISION_SYSTEM_ENABLED'] or self.camera is None:
             return
             
         ret, frame = self.camera.read()
@@ -234,20 +252,27 @@ class RobotController:
             self.latest_frame = frame.copy()
             
             # Object detection
-            if self.object_detector:
+            if FEATURES['OBJECT_DETECTION_ENABLED'] and self.object_detector:
                 detections = self.object_detector.detect_objects(frame)
                 self._handle_detections(detections)
             
             # Path shape detection
-            if self.path_detector:
+            if FEATURES['PATH_SHAPE_DETECTION_ENABLED'] and self.path_detector:
                 path_shape = self.path_detector.detect_path_shape(frame)
                 self._handle_path_shape(path_shape)
+            
+            # Debug visualization
+            if FEATURES['DEBUG_VISUALIZATION_ENABLED']:
+                cv2.imshow('Robot Vision', frame)
+                cv2.waitKey(1)
     
     def _handle_detections(self, detections: dict):
         """Handle object detection results."""
-        if detections['obstacle_detected']:
+        if FEATURES['OBSTACLE_AVOIDANCE_ENABLED'] and detections['obstacle_detected']:
             if self.state not in ["AVOIDING_OBSTACLE"]:
                 self.state = "AVOIDING_OBSTACLE"
+                if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
+                    print("Obstacle detected - switching to avoidance mode")
     
     def _handle_path_shape(self, path_shape: str):
         """Handle path shape detection results."""
@@ -311,8 +336,11 @@ class RobotController:
         # Check if we're at current waypoint
         current_waypoint = self.current_path[self.current_waypoint_idx]
         if self.position_tracker.is_at_cell(current_waypoint[0], current_waypoint[1]):
-            # Correct odometry at waypoint
-            self.position_tracker.correct_at_waypoint(current_waypoint)
+            # Correct odometry at waypoint if enabled
+            if FEATURES['POSITION_CORRECTION_ENABLED']:
+                self.position_tracker.correct_at_waypoint(current_waypoint)
+                if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
+                    print(f"Position corrected at waypoint {current_waypoint}")
             
             # Move to next waypoint
             self.current_waypoint_idx += 1
@@ -322,40 +350,138 @@ class RobotController:
                 self._handle_intersection()
                 return
         
-        # Follow line using PID control
+        # Follow line using enhanced PID control with smooth cornering
         if self.esp32_bridge.is_line_detected():
             line_position, line_error, sensor_values = self.esp32_bridge.get_line_sensor_data()
             # Convert ESP32 line position (0-4000) to our expected range (-1.0 to 1.0)
             normalized_position = (line_position - 2000) / 2000.0
-            is_corner = self._detect_corner(sensor_values)
             
-            vx, vy, omega = self.line_follower.calculate_control(normalized_position, is_corner, LINE_FOLLOW_SPEED)
+            # Enhanced corner detection
+            corner_type = self._detect_corner_type(sensor_values, normalized_position)
+            
+            # Determine control strategy based on corner type and features
+            if FEATURES['SMOOTH_CORNERING_ENABLED'] and corner_type in ['SHARP_CORNER', 'GENTLE_CORNER']:
+                # Use smooth cornering like normal wheels
+                vx, vy, omega = self._calculate_smooth_corner_control(normalized_position, corner_type)
+            else:
+                # Use standard omni-wheel control (strafe + rotation)
+                base_speed = LINE_FOLLOW_SPEED
+                if FEATURES['ADAPTIVE_SPEED_ENABLED']:
+                    base_speed = self._get_adaptive_speed(corner_type, normalized_position)
+                
+                is_corner = corner_type != 'STRAIGHT'
+                vx, vy, omega = self.line_follower.calculate_control(normalized_position, is_corner, base_speed)
+            
             self._move_omni(vx, vy, omega)
+            
+            # Performance logging
+            if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
+                stats = self.position_tracker.get_tracking_statistics()
+                if stats['status']['is_strafing']:
+                    print(f"Strafing: pos={normalized_position:.2f}, strafe_eff={stats['performance']['strafe_efficiency']:.2f}")
         else:
             # Line lost - stop and search
             self._stop_motors()
+            if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
+                print("Line lost - searching...")
     
-    def _detect_corner(self, sensor_values: List[int]) -> bool:
+    def _detect_corner_type(self, sensor_values: List[int], line_position: float) -> str:
         """
-        Detect if robot is approaching/on a corner using ESP32 sensor data.
+        Enhanced corner detection that classifies the type of turn.
         
         Args:
             sensor_values: List of 5 calibrated sensor readings (0-1000 each)
+            line_position: Normalized line position (-1.0 to 1.0)
+        
+        Returns:
+            Corner type: 'STRAIGHT', 'GENTLE_CORNER', 'SHARP_CORNER', 'INTERSECTION'
         """
-        # Corner detection based on sensor pattern
-        # If center sensors (indices 1,2,3) have low values, might be a corner
-        center_sensors = sensor_values[1:4]  # Left-center, center, right-center
-        return any(value < 300 for value in center_sensors)  # Low values indicate line
+        # Count sensors detecting line (low values)
+        line_detections = sum(1 for value in sensor_values if value < 300)
+        
+        # Check for intersection (multiple sensors detect line)
+        if line_detections >= 4:
+            return 'INTERSECTION'
+        
+        # Check corner severity based on line position and sensor pattern
+        abs_position = abs(line_position)
+        
+        if abs_position < 0.3:
+            return 'STRAIGHT'
+        elif abs_position < 0.7:
+            # Check if it's a gentle curve or sharp corner
+            outer_sensors = [sensor_values[0], sensor_values[4]]  # Leftmost and rightmost
+            outer_detections = sum(1 for value in outer_sensors if value < 300)
+            
+            if outer_detections > 0:
+                return 'SHARP_CORNER'
+            else:
+                return 'GENTLE_CORNER'
+        else:
+            return 'SHARP_CORNER'
+    
+    def _calculate_smooth_corner_control(self, line_position: float, corner_type: str) -> Tuple[float, float, float]:
+        """
+        Calculate smooth cornering control like normal wheels (forward + rotation).
+        
+        Args:
+            line_position: Normalized line position (-1.0 to 1.0)
+            corner_type: Type of corner detected
+            
+        Returns:
+            Tuple of (vx, vy, omega) control values
+        """
+        # Use forward motion with rotation only (no strafing for smooth corners)
+        if corner_type == 'SHARP_CORNER':
+            base_speed = CORNER_SPEED * 0.7  # Slower for sharp corners
+            rotation_gain = 50.0
+        else:  # GENTLE_CORNER
+            base_speed = CORNER_SPEED
+            rotation_gain = 35.0
+        
+        # Calculate rotation based on line position
+        omega = -rotation_gain * line_position  # Negative for correct direction
+        
+        # Reduce forward speed proportionally to rotation
+        speed_reduction = min(0.4, abs(omega) / 100.0)
+        vx = base_speed * (1.0 - speed_reduction)
+        
+        return (vx, 0.0, omega)  # No strafe (vy=0) for smooth cornering
+    
+    def _get_adaptive_speed(self, corner_type: str, line_position: float) -> float:
+        """
+        Get adaptive speed based on current conditions.
+        
+        Args:
+            corner_type: Type of corner/path detected
+            line_position: Current line position
+            
+        Returns:
+            Adaptive speed value
+        """
+        base_speed = LINE_FOLLOW_SPEED
+        
+        if corner_type == 'SHARP_CORNER':
+            return base_speed * 0.6  # 60% speed for sharp corners
+        elif corner_type == 'GENTLE_CORNER':
+            return base_speed * 0.8  # 80% speed for gentle corners
+        elif corner_type == 'INTERSECTION':
+            return base_speed * 0.5  # 50% speed for intersections
+        else:
+            # Straight line - can use full speed or even boost
+            position_factor = 1.0 - abs(line_position) * 0.2  # Slight reduction if off-center
+            return base_speed * position_factor
     
     def _is_intersection(self) -> bool:
-        """Check if robot is at an intersection using ESP32 sensor data."""
+        """Check if robot is at an intersection using enhanced detection."""
         if not self.esp32_bridge.is_line_detected():
             return False
         
-        _, _, sensor_values = self.esp32_bridge.get_line_sensor_data()
-        # Intersection: multiple sensors detect line (low values)
-        line_detections = sum(1 for value in sensor_values if value < 300)
-        return line_detections >= 3  # 3 or more sensors detect line = intersection
+        line_position, _, sensor_values = self.esp32_bridge.get_line_sensor_data()
+        normalized_position = (line_position - 2000) / 2000.0
+        
+        corner_type = self._detect_corner_type(sensor_values, normalized_position)
+        return corner_type == 'INTERSECTION'
     
     def _handle_intersection(self):
         """Handle intersection navigation."""
@@ -490,8 +616,22 @@ class RobotController:
         
         cv2.destroyAllWindows()
 
+def print_feature_status():
+    """Print current feature configuration for debugging."""
+    print("=" * 50)
+    print("ROBOT FEATURE CONFIGURATION")
+    print("=" * 50)
+    for feature, enabled in FEATURES.items():
+        status = "ENABLED" if enabled else "DISABLED"
+        print(f"{feature:<30} : {status}")
+    print("=" * 50)
+    print()
+
 def main():
     """Main entry point."""
+    # Print feature status
+    print_feature_status()
+    
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s'
@@ -500,11 +640,16 @@ def main():
     controller = RobotController()
     
     try:
+        print("Robot controller initialized successfully")
+        print("Starting main control loop...")
         controller.run()
-    except Exception:
-        pass
+    except KeyboardInterrupt:
+        print("\nShutdown requested by user")
+    except Exception as e:
+        print(f"Error: {e}")
     finally:
         controller.stop()
+        print("Robot controller stopped")
 
 if __name__ == "__main__":
     main() 
