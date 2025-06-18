@@ -1,3 +1,0 @@
-[ WARN:0@2.078] global cap_v4l.cpp:999 open VIDEOIO(V4L2:/dev/video0): can't open camera by index
-[ERROR:0@2.079] global obsensor_uvc_stream_channel.cpp:158 getStreamChannelGroup Camera index out of range
-INFO:root:Camera and YOLO model initialized successfully
