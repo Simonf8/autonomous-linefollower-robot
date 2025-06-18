@@ -55,7 +55,7 @@ except ImportError:
     print("Text-to-speech not available. Install piper or pyttsx3")
 
 
-ESP32_IP = '192.168.128.117'  
+ESP32_IP = '192.168.128.245'  
 ESP32_PORT = 1234
 CAMERA_WIDTH, CAMERA_HEIGHT = 730, 420
 CAMERA_FPS = 5
