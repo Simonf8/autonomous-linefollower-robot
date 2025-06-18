@@ -48,20 +48,24 @@ ROBOT_WIDTH_M = 0.225
 ROBOT_LENGTH_M = 0.075
 
 # -- Navigation & Control --
-BASE_SPEED = 80
-TURN_SPEED = 70
+BASE_SPEED = 60
+TURN_SPEED = 80
 WAYPOINT_THRESHOLD_M = 0.12
 GOAL_THRESHOLD_M = 0.06
 
 # -- PID Controller Gains (for Line Following) --
-PID_KP = 0.8
-PID_KI = 0.01
-PID_KD = 0.2
+# Gains for the two control modes: strafing for balancing, rotation for turning.
+PID_KP_STRAFE = 30
+PID_KI_STRAFE = 2.2
+PID_KD_STRAFE = 15
+PID_KP_ROT = 40
+PID_KI_ROT = 2.5
+PID_KD_ROT = 18
 
 # -- Grid & Task Configuration --
 CELL_WIDTH_M = 0.025
-_START_CELL_RAW = (8, 2)
-_GOAL_CELL_RAW = (20, 0)
+_START_CELL_RAW = (9, 2)
+_GOAL_CELL_RAW = (9, 4)
 _START_DIRECTION_RAW = 'LEFT'
 _PICKUP_CELLS_RAW = [(0, 14), (2, 14), (4, 14), (6, 14)]
 _DROPOFF_CELLS_RAW = [(20, 0), (18, 0), (16, 0), (14, 0)]
@@ -1087,11 +1091,16 @@ class RobotController:
         if direction == "STRAIGHT":
             pass
         else:
-            omega = self.turn_speed if direction == "RIGHT" else -self.turn_speed
-            if omega > 0: self.tts_manager.speak('TURN_RIGHT')
-            else: self.tts_manager.speak('TURN_LEFT')
+            # Corrected omega direction: positive is LEFT (CCW), negative is RIGHT (CW).
+            omega = -self.turn_speed if direction == "RIGHT" else self.turn_speed
+            if omega < 0:
+                self.tts_manager.speak('TURN_RIGHT')
+            else:
+                self.tts_manager.speak('TURN_LEFT')
 
-            self.move_omni(vx=0, vy=0, omega=omega)
+            # Perform an arc turn by adding a small forward velocity, instead of a pure pivot.
+            # This is more stable and helps the sensors sweep across the new line.
+            self.move_omni(vx=self.base_speed * 0.3, vy=0, omega=omega)
 
             start_time = time.time()
             turn_timeout = 4.0
@@ -1105,6 +1114,23 @@ class RobotController:
 
             if not line_found:
                 logging.warning(f"Turn timeout: Failed to find line after turning {direction}.")
+                self.stop_motors()
+                # --- Wiggle Recovery Maneuver ---
+                logging.info("Attempting wiggle recovery to find lost line...")
+                wiggle_omega = self.turn_speed * 0.7  # Slower wiggle
+                # Wiggle back in the opposite direction of the turn
+                self.move_omni(vx=0, vy=0, omega=-omega * 0.7) 
+                recovery_time = time.time()
+                while time.time() - recovery_time < 1.5: # Wiggle back for up to 1.5s
+                    if self.line_sensor.read()[1]:
+                        line_found = True
+                        logging.info("Line found during recovery wiggle!")
+                        break
+                    time.sleep(0.01)
+                
+                if not line_found:
+                     logging.error("Wiggle recovery failed. Line is lost.")
+
 
         self.stop_motors()
         time.sleep(0.2)
@@ -1142,10 +1168,21 @@ class RobotController:
         
         self.last_error = error
         self.pid_last_time = current_time
-        
-        correction_omega = (PID_KP * error) + (PID_KI * self.integral) + (PID_KD * derivative)
-        
-        self.move_omni(vx=self.base_speed, vy=0, omega=correction_omega)
+
+        # --- HYBRID CONTROL LOGIC ---
+        if center == 1:
+            # --- STRAFE CORRECTION (BALANCING) ---
+            # When the center sensor is on the line, we are "balancing".
+            # Use sideways strafing (vy) for small, precise adjustments.
+            correction_vy = (PID_KP_STRAFE * error) + (PID_KI_STRAFE * self.integral) + (PID_KD_STRAFE * derivative)
+            self.move_omni(vx=self.base_speed, vy=correction_vy, omega=0)
+        else:
+            # --- ROTATIONAL CORRECTION (TURNING ON A CORNER) ---
+            # When the center sensor is off the line, we're on a curve or have drifted.
+            # Use rotation (omega) to turn the robot's body to re-align with the line.
+            correction_omega = (PID_KP_ROT * error) + (PID_KI_ROT * self.integral) + (PID_KD_ROT * derivative)
+            # A positive error (line to the right) requires a right turn (negative omega).
+            self.move_omni(vx=self.base_speed, vy=0, omega=-correction_omega)
 
     def handle_obstacle_and_replan(self):
         """Stops the robot, updates map, replans, and then initiates a 180-degree turn."""
@@ -1227,6 +1264,10 @@ class RobotController:
     
     def detect_objects_from_frame(self, frame):
         """Detect objects using YOLO and set state flags for packages or obstacles."""
+        # --- OBJECT DETECTION DISABLED BY USER ---
+        return # This will skip all object detection logic for now.
+        # -----------------------------------------
+
         if not self.yolo_model:
             return
 
