@@ -14,11 +14,30 @@ from box_handler import BoxHandler
 from position_tracker import OmniWheelOdometry, PositionTracker
 from pid_controller import LineFollowPID
 
-# Robot Configuration
+# ================================
+# FEATURE CONFIGURATION
+# ================================
+# Enable/disable features for easy testing and debugging
+FEATURES = {
+    'OBJECT_DETECTION_ENABLED': True,       # Enable YOLO object detection
+    'PATH_SHAPE_DETECTION_ENABLED': True,   # Enable path shape analysis
+    'OBSTACLE_AVOIDANCE_ENABLED': True,     # Enable obstacle avoidance behavior
+    'VISION_SYSTEM_ENABLED': True,          # Enable camera and vision processing
+    'POSITION_CORRECTION_ENABLED': True,    # Enable waypoint position corrections
+    'PERFORMANCE_LOGGING_ENABLED': False,   # Enable detailed performance logging
+    'DEBUG_VISUALIZATION_ENABLED': False,   # Enable debug visualization windows
+    'SMOOTH_CORNERING_ENABLED': True,       # Enable smooth cornering like normal wheels
+    'ADAPTIVE_SPEED_ENABLED': True,         # Enable speed adaptation based on conditions
+}
+
+# ================================
+# ROBOT CONFIGURATION
+# ================================
 ESP32_IP = "192.168.128.245"
 CELL_WIDTH_M = 0.025
 BASE_SPEED = 60
 TURN_SPEED = 80
+CORNER_SPEED = 45  # Slower speed for smooth cornering
 
 # Robot physical constants
 PULSES_PER_REV = 960
