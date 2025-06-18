@@ -18,32 +18,18 @@ import random
 import subprocess
 from gtts import gTTS
 import socket
+import lgpio
 
-# Attempt to import RPi.GPIO and create a mock if it fails
+# GPIO library setup with lgpio for RC timing sensors
+# This replaces the previous gpiozero setup
 try:
-    import RPi.GPIO as GPIO
-except (RuntimeError, ModuleNotFoundError):
-    logging.warning("RPi.GPIO library not found. Creating mock GPIO for simulation.")
-    # Create a mock GPIO class for testing on non-Pi environments
-    class MockGPIO:
-        BCM = 11; OUT = 1; IN = 0; PUD_UP = 2; PUD_DOWN = 3; RISING = 4; FALLING = 5; BOTH = 6
-        def __init__(self): self.pins = {}
-        def setmode(self, mode): logging.info(f"Mock GPIO: setmode({mode})")
-        def setup(self, pin, mode, pull_up_down=None):
-            logging.info(f"Mock GPIO: setup({pin}, {mode}, pull_up_down={pull_up_down})")
-            self.pins[pin] = {'mode': mode, 'value': 0, 'pull_up_down': pull_up_down}
-        def input(self, pin): return self.pins.get(pin, {'value': 0})['value']
-        def output(self, pin, value): self.pins.get(pin, {'value': 0})['value'] = value
-        def PWM(self, pin, freq):
-            logging.info(f"Mock GPIO: PWM({pin}, {freq})")
-            class MockPWM:
-                def start(self, dc): pass
-                def stop(self): pass
-                def ChangeDutyCycle(self, dc): pass
-            return MockPWM()
-        def add_event_detect(self, pin, edge, callback, bouncetime=1): logging.info(f"Mock GPIO: add_event_detect({pin})")
-        def cleanup(self): logging.info("Mock GPIO: cleanup()")
-    GPIO = MockGPIO()
+    # Test if lgpio can be imported and a chip can be opened.
+    # We will handle the actual chip opening within the LineSensor class.
+    h_test = lgpio.gpiochip_open(4) # Test with chip 4 for Pi 5
+    lgpio.gpiochip_close(h_test)
+    logging.info("lgpio library is available.")
+except Exception as e:
+    logging.warning(f"Could not initialize lgpio. Line sensor will use mock data. Error: {e}")
 
 
 # ============================================================================
@@ -53,7 +39,7 @@ except (RuntimeError, ModuleNotFoundError):
 # ============================================================================
 
 # -- Network Configuration --
-ESP32_IP = "192.168.2.21" # REPLACE WITH YOUR ESP32's ACTUAL IP ADDRESS
+ESP32_IP = "192.168.128.245" # REPLACE WITH YOUR ESP32's ACTUAL IP ADDRESS
 
 # -- Physical Robot Constants --
 PULSES_PER_REV = 960
@@ -62,10 +48,10 @@ ROBOT_WIDTH_M = 0.225
 ROBOT_LENGTH_M = 0.075
 
 # -- Navigation & Control --
-BASE_SPEED = 30
-TURN_SPEED = 40
+BASE_SPEED = 80
+TURN_SPEED = 70
 WAYPOINT_THRESHOLD_M = 0.12
-GOAL_THRESHOLD_M = 0.15
+GOAL_THRESHOLD_M = 0.06
 
 # -- PID Controller Gains (for Line Following) --
 PID_KP = 0.8
@@ -234,24 +220,76 @@ class TTSManager:
             self.tts_queue.put(phrase)
 
 class LineSensor:
-    """Reads 3 line sensors connected directly to Raspberry Pi GPIO."""
+    """Reads 3 line sensors connected to RPi GPIO using lgpio for RC timing."""
     def __init__(self):
-        self.pins = {'left': 17, 'center': 27, 'right': 22}
-        GPIO.setmode(GPIO.BCM)
-        for pin in self.pins.values():
-            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-        logging.info("Line sensors initialized on Raspberry Pi GPIO.")
+        self.SENSOR_PINS = [17, 27, 22]  # Left, Center, Right (BCM numbering)
+        self.LINE_THRESHOLD = 14  # microseconds, threshold to detect a line
+
+        self.h = None
+        try:
+            # Raspberry Pi 5 uses gpiochip4, older models use gpiochip0
+            self.h = lgpio.gpiochip_open(4)
+            logging.info("Line sensors initialized using lgpio on gpiochip4.")
+        except Exception as e:
+            logging.warning(f"Failed to open gpiochip4 with lgpio: {e}. Trying gpiochip0.")
+            try:
+                self.h = lgpio.gpiochip_open(0)
+                logging.info("Line sensors initialized using lgpio on gpiochip0.")
+            except Exception as e2:
+                logging.critical(f"Failed to initialize lgpio on any chip. Line sensor will not work. Error: {e2}")
+                self.h = None
+
+    def _read_sensor_raw(self, pin: int) -> int:
+        """Reads a sensor's value using RC timing and returns charge time in microseconds."""
+        if self.h is None:
+            return 0
+        
+        charge_time = 0
+        try:
+            # Set pin to output and discharge capacitor
+            lgpio.gpio_claim_output(self.h, pin)
+            lgpio.gpio_write(self.h, pin, 0)
+            time.sleep(0.001)  # Discharge for 1ms
+            
+            # Change pin to input to measure charge time
+            lgpio.gpio_claim_input(self.h, pin)
+            
+            start_time = time.time()
+            timeout = 0.003  # 3ms timeout
+            
+            # Wait for pin to go high or timeout
+            while time.time() - start_time < timeout:
+                if lgpio.gpio_read(self.h, pin) == 1:
+                    break
+            
+            charge_time = int((time.time() - start_time) * 1000000)
+        except Exception as e:
+            logging.error(f"Error reading sensor on pin {pin}: {e}")
+        finally:
+            # Free the pin for the next read
+            if self.h is not None:
+                try:
+                    lgpio.gpio_free(self.h, pin)
+                except Exception:
+                    pass # May already be free
+        
+        return min(charge_time, 3000)
 
     def read(self) -> List[int]:
-        """Reads the line follower sensors. Returns [Left, Center, Right]."""
-        # Assumes HIGH (1) = line detected, LOW (0) = no line.
-        left = GPIO.input(self.pins['left'])
-        center = GPIO.input(self.pins['center'])
-        right = GPIO.input(self.pins['right'])
-        return [left, center, right]
+        """Reads all sensors and returns a binary list [Left, Center, Right]."""
+        if self.h is None:
+            return [0, 0, 0] # Return dummy data if GPIO failed
+        
+        raw_values = [self._read_sensor_raw(pin) for pin in self.SENSOR_PINS]
+        line_detected = [1 if val > self.LINE_THRESHOLD else 0 for val in raw_values]
+        return line_detected
     
     def cleanup(self):
-        GPIO.cleanup()
+        """Closes the lgpio chip handle to free up all GPIO resources."""
+        if self.h is not None:
+            lgpio.gpiochip_close(self.h)
+            self.h = None
+            logging.info("Line sensor GPIO resources cleaned up.")
 
 class ESP32Bridge:
     """Handles WiFi communication with the ESP32 motor/encoder controller."""
