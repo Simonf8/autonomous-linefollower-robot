@@ -17,6 +17,7 @@ from pathfinder import Pathfinder
 from box import BoxHandler
 from position_tracker import OmniWheelOdometry, PositionTracker
 from pid import LineFollowPID
+from camera_line_detector import CameraLineDetector
 
 # ================================
 # FEATURE CONFIGURATION
@@ -27,6 +28,7 @@ FEATURES = {
     'PATH_SHAPE_DETECTION_ENABLED': True,   # Enable path shape analysis
     'OBSTACLE_AVOIDANCE_ENABLED': False,     # Enable obstacle avoidance behavior
     'VISION_SYSTEM_ENABLED': False,          # Enable camera and vision processing
+    'USE_ESP32_LINE_SENSOR': False,          # NEW: Use ESP32 hardware sensor for line following
     'POSITION_CORRECTION_ENABLED': True,    # Enable waypoint position corrections
     'PERFORMANCE_LOGGING_ENABLED': True,    # Enable detailed performance logging
     'DEBUG_VISUALIZATION_ENABLED': False,   # Enable debug visualization windows
@@ -284,6 +286,7 @@ class RobotController:
         self.camera = None
         self.object_detector = None
         self.path_detector = None
+        self.camera_line_detector = None
         self._setup_vision()
         
         # Control
@@ -291,6 +294,7 @@ class RobotController:
         self.state = "STARTING"
         self.latest_frame = None
         self.last_known_line_position = 0.0
+        self.camera_line_position = None
         self.recovery_start_time = None
     
 
@@ -319,6 +323,11 @@ class RobotController:
                 self.path_detector = PathShapeDetector(IMG_PATH_SRC_PTS, IMG_PATH_DST_PTS)
             else:
                 self.path_detector = None
+
+            # Initialize camera line detector if needed
+            if not FEATURES['USE_ESP32_LINE_SENSOR']:
+                self.camera_line_detector = CameraLineDetector(width=640, height=480)
+                print("Camera-based line following is enabled.")
             
         except Exception as e:
             if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
@@ -373,6 +382,18 @@ class RobotController:
                 path_shape = self.path_detector.detect_path_shape(frame)
                 self._handle_path_shape(path_shape)
             
+            # Camera-based line detection
+            if not FEATURES['USE_ESP32_LINE_SENSOR'] and self.camera_line_detector:
+                line_pos, confidence, binary_img = self.camera_line_detector.detect(frame)
+                self.camera_line_position = line_pos
+                if FEATURES['DEBUG_VISUALIZATION_ENABLED']:
+                    # Add visualization for binary image to see what the robot sees
+                    debug_frame = cv2.cvtColor(binary_img, cv2.COLOR_GRAY2BGR)
+                    if line_pos is not None:
+                         line_px = int((line_pos * 320) + 320)
+                         cv2.line(debug_frame, (line_px, 0), (line_px, 480), (0, 255, 0), 2)
+                    cv2.imshow('Line Detection', debug_frame)
+
             # Debug visualization
             if FEATURES['DEBUG_VISUALIZATION_ENABLED']:
                 cv2.imshow('Robot Vision', frame)
@@ -408,6 +429,13 @@ class RobotController:
     def _start_mission(self):
         """Initialize mission."""
         print("Starting robot mission...")
+        
+        # Check for valid configuration
+        if not FEATURES['USE_ESP32_LINE_SENSOR'] and not FEATURES['VISION_SYSTEM_ENABLED']:
+            print("ERROR: Camera line following requires VISION_SYSTEM_ENABLED to be True.")
+            print("Please update FEATURE configuration. Exiting.")
+            self.state = "MISSION_COMPLETE" # Stop execution
+            return
         
         # Calibrate sensors if needed
         if not self.esp32_bridge.connected:
@@ -464,7 +492,14 @@ class RobotController:
             self._handle_intersection()
             return # Skip line following for one cycle to execute the turn
 
-        # Follow line using the simplified PID controller
+        # Follow line using either hardware sensor or camera
+        if FEATURES['USE_ESP32_LINE_SENSOR']:
+            self._follow_line_with_sensor()
+        else:
+            self._follow_line_with_camera()
+    
+    def _follow_line_with_sensor(self):
+        """Follow line using the ESP32 hardware sensors."""
         if self.esp32_bridge.is_line_detected():
             line_position, _, _ = self.esp32_bridge.get_line_sensor_data()
             # Convert ESP32 line position (0-4000) to our expected range (-1.0 to 1.0)
@@ -485,6 +520,22 @@ class RobotController:
             # Line lost - initiate recovery
             if self.state == "FOLLOWING_PATH": # Only trigger once
                 print("Line lost! Attempting to recover...")
+                self.state = "RECOVERING_LINE"
+                self.recovery_start_time = time.time()
+            self._stop_motors()
+
+    def _follow_line_with_camera(self):
+        """Follow line using the camera."""
+        if self.camera_line_position is not None:
+            self.last_known_line_position = self.camera_line_position
+            
+            # Use the same PID controller with the camera-derived position
+            vx, vy, omega = self.line_follower.calculate_control(self.camera_line_position, base_speed=LINE_FOLLOW_SPEED)
+            self._move_omni(vx, vy, omega)
+        else:
+            # Line lost - initiate recovery
+            if self.state == "FOLLOWING_PATH":
+                print("Line lost (camera)! Attempting to recover...")
                 self.state = "RECOVERING_LINE"
                 self.recovery_start_time = time.time()
             self._stop_motors()
