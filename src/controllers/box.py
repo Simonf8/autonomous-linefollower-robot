@@ -48,10 +48,11 @@ class BoxHandler:
         self.total_delivery_time = 0.0
         self.mission_start_time = None
     
-    def start_mission(self):
+    def start_mission(self, silent=False):
         """Start the box collection mission."""
         self.mission_start_time = time.time()
-        self._print_mission_overview()
+        if not silent:
+            self._print_mission_overview()
     
     def _print_mission_overview(self):
         """Print mission overview."""
@@ -264,8 +265,11 @@ class BoxHandler:
             'mission_complete': self.is_mission_complete()
         }
     
-    def print_mission_summary(self):
+    def print_mission_summary(self, silent=False):
         """Print final mission summary."""
+        if silent:
+            return
+            
         stats = self.get_mission_statistics()
         
         print("\n" + "=" * 60)

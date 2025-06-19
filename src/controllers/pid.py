@@ -141,40 +141,29 @@ class PIDController:
 
 class LineFollowPID:
     """
-    Specialized PID controller for line following with dual control modes.
-    Handles both lateral correction (strafe) and rotational correction.
+    PID controller for omni-wheel line following.
+    Uses PID for rotation and direct proportional control for strafing.
     """
     
     def __init__(self):
-        """Initialize line following PID controllers."""
-        # PID controllers for different control modes
-        self.strafe_pid = PIDController(
-            kp=30.0,    # Proportional gain for strafe correction
-            ki=2.2,     # Integral gain
-            kd=15.0,    # Derivative gain
-            output_limits=(-80.0, 80.0),      # Strafe speed limits
-            integral_limits=(-30.0, 30.0)     # Prevent integral windup
-        )
-        
-        self.rotation_pid = PIDController(
-            kp=40.0,    # Proportional gain for rotation
+        """Initialize line following PID controller."""
+        self.pid = PIDController(
+            kp=45.0,    # Proportional gain for rotation
             ki=2.5,     # Integral gain  
-            kd=18.0,    # Derivative gain
-            output_limits=(-100.0, 100.0),    # Rotation speed limits
-            integral_limits=(-25.0, 25.0)     # Prevent integral windup
+            kd=20.0,    # Derivative gain
+            output_limits=(-100.0, 100.0),   # Rotation speed limits
+            integral_limits=(-30.0, 30.0)    # Prevent integral windup
         )
         
-        # Control mode selection
-        self.use_rotation_threshold = 0.7  # Switch to rotation for large errors
+        # Proportional gain for strafing
+        self.strafe_gain = 35.0
     
-    def calculate_control(self, line_position: float, is_corner: bool = False, 
-                         base_speed: float = 60.0) -> Tuple[float, float, float]:
+    def calculate_control(self, line_position: float, base_speed: float = 60.0) -> Tuple[float, float, float]:
         """
-        Calculate omni-wheel control outputs for line following.
+        Calculate omni-wheel control outputs using a combined strategy.
         
         Args:
             line_position: Line position from -1.0 (left) to 1.0 (right), 0.0 = center
-            is_corner: True if robot is on a corner/turn
             base_speed: Forward speed
             
         Returns:
@@ -183,38 +172,34 @@ class LineFollowPID:
         # Error is how far we are from center (0.0)
         error = line_position
         
-        if is_corner or abs(error) > self.use_rotation_threshold:
-            # Use rotation for corners or large errors
-            omega = -self.rotation_pid.update(error)  # Negative for correct direction
-            return (base_speed * 0.8, 0.0, omega)
-        else:
-            # Use strafe for straight line following
-            vy = -self.strafe_pid.update(error)  # Negative for correct direction
-            return (base_speed, vy, 0.0)
+        # Rotational control using PID
+        omega = -self.pid.update(error)
+        
+        # Strafing control using simple proportional gain
+        vy = -self.strafe_gain * error
+        
+        # Reduce forward speed during sharp turns to improve stability
+        # The reduction is proportional to the rotational speed
+        speed_reduction_factor = 1.0 - min(1.0, abs(omega) / 100.0) * 0.7
+        vx = base_speed * speed_reduction_factor
+        
+        return (vx, vy, omega)
     
     def reset_controllers(self):
-        """Reset both PID controllers."""
-        self.strafe_pid.reset()
-        self.rotation_pid.reset()
+        """Reset the PID controller."""
+        self.pid.reset()
     
-    def tune_strafe(self, kp: float, ki: float, kd: float):
-        """Tune strafe PID parameters."""
-        self.strafe_pid.set_gains(kp, ki, kd)
-    
-    def tune_rotation(self, kp: float, ki: float, kd: float):
-        """Tune rotation PID parameters."""
-        self.rotation_pid.set_gains(kp, ki, kd)
+    def tune_pid(self, kp: float, ki: float, kd: float, strafe_gain: float):
+        """Tune PID and strafe parameters."""
+        self.pid.set_gains(kp, ki, kd)
+        self.strafe_gain = strafe_gain
     
     def get_control_stats(self) -> dict:
-        """Get statistics from both controllers."""
+        """Get statistics from the controller."""
         return {
-            'strafe_stats': self.strafe_pid.get_stats(),
-            'rotation_stats': self.rotation_pid.get_stats()
+            'pid_stats': self.pid.get_stats(),
+            'strafe_gain': self.strafe_gain
         }
-    
-    def set_rotation_threshold(self, threshold: float):
-        """Set threshold for switching to rotation control."""
-        self.use_rotation_threshold = threshold
 
 class AdaptivePID:
     """

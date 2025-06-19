@@ -24,7 +24,7 @@ FEATURES = {
     'PATH_SHAPE_DETECTION_ENABLED': True,   # Enable path shape analysis
     'OBSTACLE_AVOIDANCE_ENABLED': False,     # Enable obstacle avoidance behavior
     'VISION_SYSTEM_ENABLED': False,          # Enable camera and vision processing
-    'POSITION_CORRECTION_ENABLED': True,    # Enable waypoint position corrections
+    'POSITION_CORRECTION_ENABLED': False,    # Enable waypoint position corrections
     'PERFORMANCE_LOGGING_ENABLED': True,    # Enable detailed performance logging
     'DEBUG_VISUALIZATION_ENABLED': False,   # Enable debug visualization windows
     'SMOOTH_CORNERING_ENABLED': True,       # Enable smooth cornering like normal wheels
@@ -329,7 +329,7 @@ class RobotController:
     def run(self):
         """Main control loop."""
         self.esp32_bridge.start()
-        self.box_handler.start_mission()
+        self.box_handler.start_mission(silent=True)
         
         try:
             while True:
@@ -472,25 +472,12 @@ class RobotController:
         
         # Follow line using enhanced PID control with smooth cornering
         if self.esp32_bridge.is_line_detected():
-            line_position, line_error, sensor_values = self.esp32_bridge.get_line_sensor_data()
+            line_position, _, _ = self.esp32_bridge.get_line_sensor_data()
             # Convert ESP32 line position (0-4000) to our expected range (-1.0 to 1.0)
             normalized_position = (line_position - 2000) / 2000.0
             
-            # Enhanced corner detection
-            corner_type = self._detect_corner_type(sensor_values, normalized_position)
-            
-            # Determine control strategy based on corner type and features
-            if FEATURES['SMOOTH_CORNERING_ENABLED'] and corner_type in ['SHARP_CORNER', 'GENTLE_CORNER']:
-                # Use smooth cornering like normal wheels
-                vx, vy, omega = self._calculate_smooth_corner_control(normalized_position, corner_type)
-            else:
-                # Use standard omni-wheel control (strafe + rotation)
-                base_speed = LINE_FOLLOW_SPEED
-                if FEATURES['ADAPTIVE_SPEED_ENABLED']:
-                    base_speed = self._get_adaptive_speed(corner_type, normalized_position)
-                
-                is_corner = corner_type != 'STRAIGHT'
-                vx, vy, omega = self.line_follower.calculate_control(normalized_position, is_corner, base_speed)
+            # Use the new, simplified PID controller
+            vx, vy, omega = self.line_follower.calculate_control(normalized_position, base_speed=LINE_FOLLOW_SPEED)
             
             self._move_omni(vx, vy, omega)
             
@@ -502,104 +489,6 @@ class RobotController:
         else:
             # Line lost - stop and search
             self._stop_motors()
-    
-    def _detect_corner_type(self, sensor_values: List[int], line_position: float) -> str:
-        """
-        Enhanced corner detection that classifies the type of turn.
-        
-        Args:
-            sensor_values: List of 5 calibrated sensor readings (0-1000 each)
-            line_position: Normalized line position (-1.0 to 1.0)
-        
-        Returns:
-            Corner type: 'STRAIGHT', 'GENTLE_CORNER', 'SHARP_CORNER', 'INTERSECTION'
-        """
-        # Count sensors detecting line (low values)
-        line_detections = sum(1 for value in sensor_values if value < 300)
-        
-        # Check for intersection (multiple sensors detect line)
-        if line_detections >= 4:
-            return 'INTERSECTION'
-        
-        # Check corner severity based on line position and sensor pattern
-        abs_position = abs(line_position)
-        
-        if abs_position < 0.3:
-            return 'STRAIGHT'
-        elif abs_position < 0.7:
-            # Check if it's a gentle curve or sharp corner
-            outer_sensors = [sensor_values[0], sensor_values[4]]  # Leftmost and rightmost
-            outer_detections = sum(1 for value in outer_sensors if value < 300)
-            
-            if outer_detections > 0:
-                return 'SHARP_CORNER'
-            else:
-                return 'GENTLE_CORNER'
-        else:
-            return 'SHARP_CORNER'
-    
-    def _calculate_smooth_corner_control(self, line_position: float, corner_type: str) -> Tuple[float, float, float]:
-        """
-        Calculate smooth cornering control like normal wheels (forward + rotation).
-        
-        Args:
-            line_position: Normalized line position (-1.0 to 1.0)
-            corner_type: Type of corner detected
-            
-        Returns:
-            Tuple of (vx, vy, omega) control values
-        """
-        # Use forward motion with rotation only (no strafing for smooth corners)
-        if corner_type == 'SHARP_CORNER':
-            base_speed = CORNER_SPEED * 0.7  # Slower for sharp corners
-            rotation_gain = 50.0
-        else:  # GENTLE_CORNER
-            base_speed = CORNER_SPEED
-            rotation_gain = 35.0
-        
-        # Calculate rotation based on line position
-        omega = -rotation_gain * line_position  # Negative for correct direction
-        
-        # Reduce forward speed proportionally to rotation
-        speed_reduction = min(0.4, abs(omega) / 100.0)
-        vx = base_speed * (1.0 - speed_reduction)
-        
-        return (vx, 0.0, omega)  # No strafe (vy=0) for smooth cornering
-    
-    def _get_adaptive_speed(self, corner_type: str, line_position: float) -> float:
-        """
-        Get adaptive speed based on current conditions.
-        
-        Args:
-            corner_type: Type of corner/path detected
-            line_position: Current line position
-            
-        Returns:
-            Adaptive speed value
-        """
-        base_speed = LINE_FOLLOW_SPEED
-        
-        if corner_type == 'SHARP_CORNER':
-            return base_speed * 0.6  # 60% speed for sharp corners
-        elif corner_type == 'GENTLE_CORNER':
-            return base_speed * 0.8  # 80% speed for gentle corners
-        elif corner_type == 'INTERSECTION':
-            return base_speed * 0.5  # 50% speed for intersections
-        else:
-            # Straight line - can use full speed or even boost
-            position_factor = 1.0 - abs(line_position) * 0.2  # Slight reduction if off-center
-            return base_speed * position_factor
-    
-    def _is_intersection(self) -> bool:
-        """Check if robot is at an intersection using enhanced detection."""
-        if not self.esp32_bridge.is_line_detected():
-            return False
-        
-        line_position, _, sensor_values = self.esp32_bridge.get_line_sensor_data()
-        normalized_position = (line_position - 2000) / 2000.0
-        
-        corner_type = self._detect_corner_type(sensor_values, normalized_position)
-        return corner_type == 'INTERSECTION'
     
     def _handle_intersection(self):
         """Handle intersection navigation."""
@@ -699,7 +588,7 @@ class RobotController:
     def _handle_mission_complete(self):
         """Handle mission completion."""
         self._stop_motors()
-        self.box_handler.print_mission_summary()
+        self.box_handler.print_mission_summary(silent=True)
     
     def _move_omni(self, vx: float, vy: float, omega: float):
         """Move robot using omni-wheel kinematics."""
