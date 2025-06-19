@@ -25,7 +25,7 @@ class TrackerSensor:
         self.threshold = threshold
         
         # For compatibility, we'll create 5 virtual sensors from 3 physical
-        self.num_sensors = 3
+        self.num_sensors = 5
         
         # Calibration data (using your threshold as baseline)
         self.min_values = [0] * self.num_sensors
@@ -65,11 +65,11 @@ class TrackerSensor:
         Robot should be moving over the line during calibration.
         """
         # Initialize min/max arrays
-        self.min_values = [4095] * self.num_sensors
+        self.min_values = [65535] * self.num_sensors
         self.max_values = [0] * self.num_sensors
         
         for i in range(samples):
-            sensor_values = self.read_raw_filtered()  # Use filtered readings for calibration
+            sensor_values = self.read_raw()  # Use filtered readings for calibration
             
             for j in range(self.num_sensors):
                 if sensor_values[j] < self.min_values[j]:

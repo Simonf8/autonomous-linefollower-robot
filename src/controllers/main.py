@@ -36,7 +36,7 @@ FEATURES = {
 # ================================
 ESP32_IP = "192.168.128.245"
 CELL_WIDTH_M = 0.025
-BASE_SPEED = 30
+BASE_SPEED = 60
 TURN_SPEED = 40
 CORNER_SPEED = 25  # Slower speed for smooth cornering
 
@@ -54,7 +54,7 @@ START_POSITION = ((START_CELL[0] + 0.5) * CELL_WIDTH_M, (START_CELL[1] + 0.5) * 
 START_HEADING = math.pi  # Facing left
 
 # Line following configuration
-LINE_FOLLOW_SPEED = 30
+LINE_FOLLOW_SPEED = 60
 
 # Vision configuration
 IMG_PATH_SRC_PTS = np.float32([[200, 300], [440, 300], [580, 480], [60, 480]])
@@ -328,12 +328,7 @@ class RobotController:
     
     def run(self):
         """Main control loop."""
-        if self.esp32_bridge.start():
-            print("ESP32 connected. Waiting 2 seconds before motor test...")
-            time.sleep(2)
-            # Run a motor test before starting the main loop for quick validation
-            self._motor_test()
-
+        self.esp32_bridge.start()
         self.box_handler.start_mission()
         
         try:
@@ -706,40 +701,6 @@ class RobotController:
         self._stop_motors()
         self.box_handler.print_mission_summary()
     
-    def _motor_test(self):
-        """Perform a simple test of the motors."""
-        if not self.esp32_bridge.connected:
-            print("Cannot run motor test: ESP32 not connected.")
-            return
-            
-        print("--- Starting motor test ---")
-        
-        # Spin left
-        print("Spinning left...")
-        self.esp32_bridge.send_motor_speeds(-TURN_SPEED, TURN_SPEED, -TURN_SPEED, TURN_SPEED)
-        time.sleep(2)
-        
-        # Spin right
-        print("Spinning right...")
-        self.esp32_bridge.send_motor_speeds(TURN_SPEED, -TURN_SPEED, TURN_SPEED, -TURN_SPEED)
-        time.sleep(2)
-        
-        # Move forward
-        print("Moving forward...")
-        self.esp32_bridge.send_motor_speeds(BASE_SPEED, BASE_SPEED, BASE_SPEED, BASE_SPEED)
-        time.sleep(2)
-        
-        # Move backward
-        print("Moving backward...")
-        self.esp32_bridge.send_motor_speeds(-BASE_SPEED, -BASE_SPEED, -BASE_SPEED, -BASE_SPEED)
-        time.sleep(2)
-        
-        # Stop
-        print("Stopping motors...")
-        self._stop_motors()
-        time.sleep(1)
-        print("--- Motor test complete. Starting main mission. ---")
-
     def _move_omni(self, vx: float, vy: float, omega: float):
         """Move robot using omni-wheel kinematics."""
         R = ROBOT_WIDTH_M / 2
