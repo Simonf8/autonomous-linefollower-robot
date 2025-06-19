@@ -112,6 +112,15 @@
                 <div class="sensor-pattern">
                     <span>Pattern: </span><span id="sensor-pattern" class="cyber-text">00000</span>
                 </div>
+                
+                <!-- Line Detector Threshold Slider -->
+                <div id="threshold-control-container" class="threshold-control" style="display: none;">
+                    <div class="threshold-label">
+                        <span>THRESHOLD</span>
+                        <span id="threshold-value" class="cyber-text">100</span>
+                    </div>
+                    <input type="range" id="threshold-slider" min="0" max="255" value="100" class="cyber-slider">
+                </div>
             </div>
 
             <!-- Navigation Map -->
@@ -212,6 +221,19 @@
                         document.getElementById('map-image').src = 'data:image/png;base64,' + data.grid_image;
                     }
 
+                    // Update and show/hide the threshold slider
+                    const thresholdContainer = document.getElementById('threshold-control-container');
+                    if (data.line_threshold > 0) {
+                        thresholdContainer.style.display = 'block';
+                        document.getElementById('threshold-value').textContent = data.line_threshold;
+                        // Only update slider value if the user is not currently dragging it
+                        if (!isDraggingSlider) {
+                            document.getElementById('threshold-slider').value = data.line_threshold;
+                        }
+                    } else {
+                        thresholdContainer.style.display = 'none';
+                    }
+
                     const statusIndicator = document.getElementById('status-indicator');
                     const statusText = document.getElementById('status-text');
                     if (data.state === 'MISSION_COMPLETE') {
@@ -234,6 +256,32 @@
                     statusText.textContent = 'CONNECTION LOST';
                 });
         }
+
+        let isDraggingSlider = false;
+
+        document.getElementById('threshold-slider').addEventListener('input', function() {
+            document.getElementById('threshold-value').textContent = this.value;
+        });
+
+        document.getElementById('threshold-slider').addEventListener('mousedown', () => isDraggingSlider = true);
+        document.getElementById('threshold-slider').addEventListener('mouseup', () => isDraggingSlider = false);
+        document.getElementById('threshold-slider').addEventListener('touchend', () => isDraggingSlider = false);
+
+        document.getElementById('threshold-slider').addEventListener('change', function() {
+            const threshold = this.value;
+            fetch('/api/set_threshold', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ threshold: parseInt(threshold) })
+            }).then(response => response.json())
+              .then(data => {
+                  if (data.status !== 'success') {
+                      console.error('Failed to set threshold:', data.message);
+                  }
+              });
+        });
 
         setInterval(updateData, 500); // Update data every 500ms
         setInterval(updateTimestamp, 1000);

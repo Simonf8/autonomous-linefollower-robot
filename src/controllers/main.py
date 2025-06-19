@@ -9,7 +9,7 @@ import socket
 import threading
 import base64
 from typing import List, Tuple, Optional
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request
 
 # Import our clean modules
 from object_detection import ObjectDetector, PathShapeDetector
@@ -297,8 +297,11 @@ class RobotController:
         self.camera_line_position = None
         self.recovery_start_time = None
     
+    def set_line_detector_threshold(self, value: int):
+        """Sets the threshold for the camera line detector."""
+        if self.camera_line_detector:
+            self.camera_line_detector.set_threshold(value)
 
-    
     def _setup_vision(self):
         """Initialize camera and vision systems based on feature flags."""
         if not FEATURES['VISION_SYSTEM_ENABLED']:
@@ -326,7 +329,12 @@ class RobotController:
 
             # Initialize camera line detector if needed
             if not FEATURES['USE_ESP32_LINE_SENSOR']:
-                self.camera_line_detector = CameraLineDetector(width=640, height=480)
+                self.camera_line_detector = CameraLineDetector(
+                    width=640, 
+                    height=480,
+                    src_pts=IMG_PATH_SRC_PTS,
+                    dst_pts=IMG_PATH_DST_PTS
+                )
                 print("Camera-based line following is enabled.")
             
         except Exception as e:
@@ -498,6 +506,24 @@ class RobotController:
         else:
             self._follow_line_with_camera()
     
+    def _get_line_following_control(self, normalized_position):
+        """Calculates the control signals for line following and applies cornering logic."""
+        
+        # Get base control signals from PID
+        vx, vy, omega = self.line_follower.calculate_control(normalized_position, base_speed=LINE_FOLLOW_SPEED)
+        
+        # Apply smooth cornering logic if enabled
+        if FEATURES['SMOOTH_CORNERING_ENABLED']:
+            # Eliminate sideways movement for car-like turning
+            vy = 0
+            
+            # Slow down in corners based on rotation speed
+            # The faster the rotation, the slower the forward speed
+            speed_reduction = abs(omega) / TURN_SPEED 
+            vx = max(CORNER_SPEED, LINE_FOLLOW_SPEED * (1 - speed_reduction))
+
+        self._move_omni(vx, vy, omega)
+
     def _follow_line_with_sensor(self):
         """Follow line using the ESP32 hardware sensors."""
         if self.esp32_bridge.is_line_detected():
@@ -506,10 +532,7 @@ class RobotController:
             normalized_position = (line_position - 2000) / 2000.0
             self.last_known_line_position = normalized_position
             
-            # Use the new, simplified PID controller
-            vx, vy, omega = self.line_follower.calculate_control(normalized_position, base_speed=LINE_FOLLOW_SPEED)
-            
-            self._move_omni(vx, vy, omega)
+            self._get_line_following_control(normalized_position)
             
             # Performance logging
             if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
@@ -529,9 +552,7 @@ class RobotController:
         if self.camera_line_position is not None:
             self.last_known_line_position = self.camera_line_position
             
-            # Use the same PID controller with the camera-derived position
-            vx, vy, omega = self.line_follower.calculate_control(self.camera_line_position, base_speed=LINE_FOLLOW_SPEED)
-            self._move_omni(vx, vy, omega)
+            self._get_line_following_control(self.camera_line_position)
         else:
             # Line lost - initiate recovery
             if self.state == "FOLLOWING_PATH":
@@ -690,9 +711,17 @@ class RobotController:
 
         if turn_direction != "STRAIGHT":
             # Execute the turn by rotating in place
+            turn_angle_rad = math.pi / 2  # 90 degrees
+            
+            # Determine omega based on turn direction
             omega = TURN_SPEED if turn_direction == "LEFT" else -TURN_SPEED
+            
+            # Calculate time needed for the turn. omega is in rad/s (scaled).
+            # We need to calibrate this. Let's assume TURN_SPEED of 50 is approx 90deg/s.
+            turn_duration = (turn_angle_rad / (abs(omega) / 50 * (math.pi / 2))) * 0.9
+            
             self._move_omni(vx=0, vy=0, omega=omega)
-            time.sleep(0.7) # Approximate time for a 90-degree turn
+            time.sleep(turn_duration)
 
         # Move forward to exit the intersection and find the new line
         self._move_omni(vx=40, vy=0, omega=0)
@@ -762,9 +791,28 @@ def main():
             "delivered_boxes": 0,
             "total_tasks": 0,
             "sensors": sensors,
-            "grid_image": grid_image
+            "grid_image": grid_image,
+            "line_threshold": robot_controller.camera_line_detector.manual_threshold if not FEATURES['USE_ESP32_LINE_SENSOR'] and robot_controller.camera_line_detector else 0
         }
         return jsonify(data)
+
+    @app.route('/api/set_threshold', methods=['POST'])
+    def set_threshold():
+        """Set the line detector threshold."""
+        data = request.get_json()
+        if not data or 'threshold' not in data:
+            return jsonify({"status": "error", "message": "Missing threshold value"}), 400
+        
+        try:
+            threshold_value = int(data['threshold'])
+            if not 0 <= threshold_value <= 255:
+                raise ValueError("Threshold must be between 0 and 255")
+            
+            robot_controller.set_line_detector_threshold(threshold_value)
+            
+            return jsonify({"status": "success", "threshold": threshold_value})
+        except (ValueError, TypeError) as e:
+            return jsonify({"status": "error", "message": str(e)}), 400
 
     @app.route('/video_feed')
     def video_feed():

@@ -2,90 +2,96 @@
 
 import cv2
 import numpy as np
+from collections import deque
 
 class CameraLineDetector:
-    """Detects the line position from a camera frame."""
-    def __init__(self, width, height):
+    """
+    Detects the line position from a camera frame using a bird's-eye view
+    transformation and provides a smoothed output.
+    """
+    def __init__(self, width, height, src_pts, dst_pts, smoothing_window=5, manual_threshold=100):
         self.width = width
         self.height = height
+        
+        # Bird's-eye view transformation
+        self.M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        
+        # Image processing kernels
         self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        
+        # Detection history for smoothing
+        self.positions_history = deque(maxlen=smoothing_window)
 
-        # Zone configuration
-        self.zone_bottom_height = 0.4  # Use bottom 40% for primary detection
-        self.zone_middle_height = 0.3  # Middle 30% for prediction
+        # Manual threshold value
+        self.manual_threshold = manual_threshold
 
-    def preprocess(self, frame):
+    def set_threshold(self, value: int):
+        """Set the manual threshold value for line detection."""
+        self.manual_threshold = int(value)
+        print(f"Line detection threshold set to: {self.manual_threshold}")
+
+    def _transform_to_bev(self, frame):
+        """Transform the frame to a bird's-eye view."""
+        return cv2.warpPerspective(frame, self.M, (self.width, self.height), flags=cv2.INTER_LINEAR)
+
+    def _preprocess(self, frame):
         """Preprocess the frame for line detection."""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Improve contrast
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
+        # A bilateral filter is effective at smoothing while preserving edges.
+        blurred = cv2.bilateralFilter(gray, 9, 75, 75)
         
-        blurred = cv2.GaussianBlur(enhanced, (7, 7), 0)
-        
-        # Adaptive thresholding is generally robust
-        binary = cv2.adaptiveThreshold(
-            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, 11, 2
+        # Use manual thresholding instead of adaptive
+        _, binary = cv2.threshold(
+            blurred, self.manual_threshold, 255, cv2.THRESH_BINARY_INV
         )
         
         # Clean up noise
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self.morph_kernel)
         return binary
 
-    def find_line_in_roi(self, roi):
-        """Finds the line center in a region of interest."""
-        contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    def _find_line_center(self, binary_bev):
+        """Finds the line center from the bottom half of the bird's-eye view image."""
+        # Focus on the bottom half of the BEV image, which is closest to the robot
+        roi = binary_bev[self.height // 2:, :]
         
-        if not contours:
+        # Summing the pixels vertically gives a histogram of the line's position
+        histogram = np.sum(roi, axis=0)
+        
+        if np.sum(histogram) < 1000: # Threshold for detecting any line
             return None, 0.0
 
-        # Find the largest contour
-        largest_contour = max(contours, key=cv2.contourArea)
+        # The line center is the weighted average (centroid) of the histogram
+        line_center_px = np.average(np.arange(len(histogram)), weights=histogram)
         
-        area = cv2.contourArea(largest_contour)
-        if area < 100:  # Min area to be considered a line
-            return None, 0.0
-            
-        M = cv2.moments(largest_contour)
-        if M["m00"] == 0:
-            return None, 0.0
-            
-        cx = int(M["m10"] / M["m00"])
+        # Confidence can be estimated from the strength of the signal
+        confidence = np.sum(histogram) / (roi.shape[0] * roi.shape[1] * 255 * 0.1)
         
-        # Confidence based on area
-        confidence = min(1.0, area / (roi.shape[1] * roi.shape[0] * 0.5))
-        
-        return cx, confidence
+        return line_center_px, min(1.0, confidence)
 
     def detect(self, frame):
-        """Detect the line and return its normalized position."""
-        binary_image = self.preprocess(frame)
+        """
+        Detect the line, smooth the result, and return its normalized position.
         
-        # Define detection zones
-        bottom_y1 = int(self.height * (1 - self.zone_bottom_height))
-        middle_y1 = int(self.height * (1 - self.zone_bottom_height - self.zone_middle_height))
-        middle_y2 = bottom_y1
-
-        # Extract ROIs
-        bottom_roi = binary_image[bottom_y1:self.height, :]
-        middle_roi = binary_image[middle_y1:middle_y2, :]
-
-        # Detect line in zones
-        bottom_cx, bottom_conf = self.find_line_in_roi(bottom_roi)
-        middle_cx, middle_conf = self.find_line_in_roi(middle_roi)
+        Returns:
+            - normalized_position: Smoothed line position (-1.0 to 1.0) or None if not found.
+            - confidence: Confidence of the detection (0.0 to 1.0).
+            - debug_image: The binary bird's-eye view image for visualization.
+        """
+        bev_frame = self._transform_to_bev(frame)
+        binary_bev = self._preprocess(bev_frame)
         
-        line_position_px = None
+        center_px, confidence = self._find_line_center(binary_bev)
         
-        if bottom_conf > 0.1:
-            line_position_px = bottom_cx
-        elif middle_conf > 0.1:
-            line_position_px = middle_cx
-            
-        if line_position_px is not None:
-            # Normalize to -1.0 to 1.0
-            normalized_position = (line_position_px - self.width / 2) / (self.width / 2)
-            return normalized_position, max(bottom_conf, middle_conf), binary_image
+        # If a line is detected with sufficient confidence, update history
+        if center_px is not None and confidence > 0.1:
+            self.positions_history.append(center_px)
         
-        return None, 0.0, binary_image 
+        # If we have historical data, use the smoothed average
+        if self.positions_history:
+            smoothed_center_px = np.mean(self.positions_history)
+            # Normalize to the range -1.0 to 1.0
+            normalized_position = (smoothed_center_px - self.width / 2) / (self.width / 2)
+            return normalized_position, confidence, binary_bev
+        
+        return None, 0.0, binary_bev 
