@@ -54,7 +54,7 @@ START_POSITION = ((START_CELL[0] + 0.5) * CELL_WIDTH_M, (START_CELL[1] + 0.5) * 
 START_HEADING = math.pi  # Facing left
 
 # Line following configuration
-LINE_FOLLOW_SPEED = 60
+LINE_FOLLOW_SPEED = 50
 
 # Vision configuration
 IMG_PATH_SRC_PTS = np.float32([[200, 300], [440, 300], [580, 480], [60, 480]])
@@ -464,13 +464,8 @@ class RobotController:
             
             # Move to next waypoint
             self.current_waypoint_idx += 1
-            
-            # Check for intersection turn if needed
-            if self._is_intersection():
-                self._handle_intersection()
-                return
         
-        # Follow line using enhanced PID control with smooth cornering
+        # Follow line using the simplified PID controller
         if self.esp32_bridge.is_line_detected():
             line_position, _, _ = self.esp32_bridge.get_line_sensor_data()
             # Convert ESP32 line position (0-4000) to our expected range (-1.0 to 1.0)
@@ -489,58 +484,6 @@ class RobotController:
         else:
             # Line lost - stop and search
             self._stop_motors()
-    
-    def _handle_intersection(self):
-        """Handle intersection navigation."""
-        if self.current_waypoint_idx < len(self.current_path):
-            # Determine turn direction based on next waypoint
-            turn_direction = self._get_turn_direction()
-            self._execute_turn(turn_direction)
-        
-        self.line_follower.reset_controllers()
-    
-    def _get_turn_direction(self) -> str:
-        """Calculate turn direction for next waypoint."""
-        if self.current_waypoint_idx >= len(self.current_path):
-            return "STRAIGHT"
-        
-        current_pos = self.position_tracker.odometry.get_position()
-        current_heading = self.position_tracker.odometry.get_heading()
-        
-        next_waypoint = self.current_path[self.current_waypoint_idx]
-        target_x = (next_waypoint[0] + 0.5) * CELL_WIDTH_M
-        target_y = (next_waypoint[1] + 0.5) * CELL_WIDTH_M
-        
-        angle_to_target = math.atan2(target_y - current_pos[1], target_x - current_pos[0])
-        heading_error = angle_to_target - current_heading
-        
-        # Normalize angle
-        while heading_error > math.pi:
-            heading_error -= 2 * math.pi
-        while heading_error < -math.pi:
-            heading_error += 2 * math.pi
-        
-        if abs(heading_error) < math.pi / 4:
-            return "STRAIGHT"
-        elif heading_error > 0:
-            return "LEFT"
-        else:
-            return "RIGHT"
-    
-    def _execute_turn(self, direction: str):
-        """Execute turn at intersection."""
-        # Executing turn
-        
-        if direction == "STRAIGHT":
-            return
-        
-        # Simple turn execution
-        omega = TURN_SPEED if direction == "LEFT" else -TURN_SPEED
-        self._move_omni(BASE_SPEED * 0.3, 0, omega)
-        
-        # Wait for turn completion (simplified)
-        time.sleep(0.5)
-        self._stop_motors()
     
     def _handle_pickup(self):
         """Handle package pickup."""

@@ -148,15 +148,15 @@ class LineFollowPID:
     def __init__(self):
         """Initialize line following PID controller."""
         self.pid = PIDController(
-            kp=45.0,    # Proportional gain for rotation
+            kp=55.0,    # Proportional gain for rotation
             ki=2.5,     # Integral gain  
-            kd=20.0,    # Derivative gain
+            kd=25.0,    # Derivative gain
             output_limits=(-100.0, 100.0),   # Rotation speed limits
             integral_limits=(-30.0, 30.0)    # Prevent integral windup
         )
         
         # Proportional gain for strafing
-        self.strafe_gain = 35.0
+        self.strafe_gain = 40.0
     
     def calculate_control(self, line_position: float, base_speed: float = 60.0) -> Tuple[float, float, float]:
         """

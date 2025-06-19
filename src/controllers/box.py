@@ -249,20 +249,15 @@ class BoxHandler:
         avg_delivery_time = 0
         if delivered_boxes:
             delivery_times = [(box['delivered_time'] - box['collected_time']) 
-                             for box in delivered_boxes if box['collected_time']]
-            if delivery_times:
-                avg_delivery_time = sum(delivery_times) / len(delivery_times)
-        
+                           for box in delivered_boxes]
+            avg_delivery_time = sum(delivery_times) / len(delivery_times)
+            
         return {
-            'total_mission_time': total_time,
-            'boxes_collected': collection_progress['collected'],
-            'boxes_delivered': delivery_progress['delivered'],
-            'total_boxes': len(self.box_states),
-            'collection_percentage': collection_progress['percentage'],
-            'delivery_percentage': delivery_progress['percentage'],
-            'average_pickup_time': avg_pickup_time,
-            'average_delivery_time': avg_delivery_time,
-            'mission_complete': self.is_mission_complete()
+            "total_time": total_time,
+            "collection_progress": collection_progress,
+            "delivery_progress": delivery_progress,
+            "avg_pickup_time": avg_pickup_time,
+            "avg_delivery_time": avg_delivery_time
         }
     
     def print_mission_summary(self, silent=False):
@@ -272,32 +267,46 @@ class BoxHandler:
             
         stats = self.get_mission_statistics()
         
+        if not stats:
+            print("Mission has not started.")
+            return
+            
         print("\n" + "=" * 60)
         print("MISSION SUMMARY")
         print("=" * 60)
-        print(f"Total Mission Time: {stats['total_mission_time']:.1f}s")
-        print(f"Boxes Collected: {stats['boxes_collected']}/{stats['total_boxes']}")
-        print(f"Boxes Delivered: {stats['boxes_delivered']}/{stats['total_boxes']}")
-        print(f"Collection Rate: {stats['collection_percentage']:.1f}%")
-        print(f"Delivery Rate: {stats['delivery_percentage']:.1f}%")
         
-        if stats['average_pickup_time'] > 0:
-            print(f"Average Pickup Time: {stats['average_pickup_time']:.1f}s")
-        if stats['average_delivery_time'] > 0:
-            print(f"Average Delivery Time: {stats['average_delivery_time']:.1f}s")
+        print(f"Total Mission Time: {stats['total_time']:.1f}s")
         
-        if stats['mission_complete']:
-            print("STATUS: MISSION COMPLETED SUCCESSFULLY!")
+        # Collection stats
+        coll_prog = stats['collection_progress']
+        print(f"Boxes Collected: {coll_prog['collected']}/{coll_prog['total']} "
+              f"({coll_prog['percentage']:.1f}%)")
+        
+        # Delivery stats
+        del_prog = stats['delivery_progress']
+        print(f"Boxes Delivered: {del_prog['delivered']}/{del_prog['total']} "
+              f"({del_prog['percentage']:.1f}%)")
+        
+        # Performance
+        if stats['avg_pickup_time'] > 0:
+            print(f"Average Pickup Time: {stats['avg_pickup_time']:.1f}s")
+        if stats['avg_delivery_time'] > 0:
+            print(f"Average Delivery Time: {stats['avg_delivery_time']:.1f}s")
+        
+        # Final status
+        print("-" * 60)
+        if self.is_mission_complete():
+            print("STATUS: Mission complete!")
         else:
             print("STATUS: Mission incomplete")
         print("=" * 60)
     
     def get_box_status(self, box_id: str) -> Optional[Dict]:
-        """Get status of specific box."""
+        """Get status of a specific box."""
         return self.box_states.get(box_id)
     
     def get_current_box_info(self) -> Optional[Dict]:
-        """Get information about currently carried box."""
+        """Get info about the currently held box."""
         if self.current_box_id:
-            return self.box_states.get(self.current_box_id)
+            return self.get_box_status(self.current_box_id)
         return None 
