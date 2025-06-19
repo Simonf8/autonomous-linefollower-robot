@@ -6,7 +6,10 @@ import cv2
 import numpy as np
 import math
 import socket
+import threading
+import base64
 from typing import List, Tuple, Optional
+from flask import Flask, jsonify, render_template
 
 # Import our clean modules
 from object_detection import ObjectDetector, PathShapeDetector
@@ -24,7 +27,7 @@ FEATURES = {
     'PATH_SHAPE_DETECTION_ENABLED': True,   # Enable path shape analysis
     'OBSTACLE_AVOIDANCE_ENABLED': False,     # Enable obstacle avoidance behavior
     'VISION_SYSTEM_ENABLED': False,          # Enable camera and vision processing
-    'POSITION_CORRECTION_ENABLED': False,    # Enable waypoint position corrections
+    'POSITION_CORRECTION_ENABLED': True,    # Enable waypoint position corrections
     'PERFORMANCE_LOGGING_ENABLED': True,    # Enable detailed performance logging
     'DEBUG_VISUALIZATION_ENABLED': False,   # Enable debug visualization windows
     'SMOOTH_CORNERING_ENABLED': True,       # Enable smooth cornering like normal wheels
@@ -37,8 +40,8 @@ FEATURES = {
 ESP32_IP = "192.168.128.245"
 CELL_WIDTH_M = 0.025
 BASE_SPEED = 60
-TURN_SPEED = 40
-CORNER_SPEED = 25  # Slower speed for smooth cornering
+TURN_SPEED = 50
+CORNER_SPEED = 55  # Slower speed for smooth cornering
 
 # Robot physical constants
 PULSES_PER_REV = 960
@@ -47,11 +50,10 @@ ROBOT_WIDTH_M = 0.225
 ROBOT_LENGTH_M = 0.075
 
 # Mission configuration
-START_CELL = (11, 2)
-PICKUP_CELLS = [(20, 14), (18, 14), (16, 14), (14, 14)]
-DROPOFF_CELLS = [(0, 0), (2, 0), (4, 0), (6, 0)]
+START_CELL = (0, 12)
+END_CELL = (8, 12)
 START_POSITION = ((START_CELL[0] + 0.5) * CELL_WIDTH_M, (START_CELL[1] + 0.5) * CELL_WIDTH_M)
-START_HEADING = math.pi  # Facing left
+START_HEADING = 0.0  # Facing right for horizontal movement
 
 # Line following configuration
 LINE_FOLLOW_SPEED = 50
@@ -278,9 +280,6 @@ class RobotController:
         self.current_path = None
         self.current_waypoint_idx = 0
         
-        # Box handling
-        self.box_handler = BoxHandler(PICKUP_CELLS, DROPOFF_CELLS)
-        
         # Vision system
         self.camera = None
         self.object_detector = None
@@ -291,6 +290,8 @@ class RobotController:
         self.line_follower = LineFollowPID()
         self.state = "STARTING"
         self.latest_frame = None
+        self.last_known_line_position = 0.0
+        self.recovery_start_time = None
     
 
     
@@ -329,7 +330,6 @@ class RobotController:
     def run(self):
         """Main control loop."""
         self.esp32_bridge.start()
-        self.box_handler.start_mission(silent=True)
         
         try:
             while True:
@@ -398,10 +398,8 @@ class RobotController:
             self._plan_path_to_target()
         elif self.state == "FOLLOWING_PATH":
             self._follow_path()
-        elif self.state == "AT_PICKUP":
-            self._handle_pickup()
-        elif self.state == "AT_DROPOFF":
-            self._handle_dropoff()
+        elif self.state == "RECOVERING_LINE":
+            self._recover_line()
         elif self.state == "AVOIDING_OBSTACLE":
             self._handle_obstacle_avoidance()
         elif self.state == "MISSION_COMPLETE":
@@ -422,54 +420,56 @@ class RobotController:
         self.state = "PLANNING_PATH"
     
     def _plan_path_to_target(self):
-        """Plan path to next target."""
-        target_info = self.box_handler.get_current_target()
-        
-        if target_info is None:
-            self.state = "MISSION_COMPLETE"
-            return
-        
-        target_cell, mission_type = target_info
+        """Plan path to the end cell."""
         current_cell = self.position_tracker.get_current_cell()
         
-        self.current_path = self.pathfinder.find_path(current_cell, target_cell)
+        if self.state == "MISSION_COMPLETE" or current_cell == END_CELL:
+            self.state = "MISSION_COMPLETE"
+            return
+            
+        print(f"Planning path from {current_cell} to {END_CELL}...")
+        self.current_path = self.pathfinder.find_path(current_cell, END_CELL)
         
         if self.current_path:
             self.current_waypoint_idx = 0
             self.state = "FOLLOWING_PATH"
+            print(f"Path found! Length: {len(self.current_path)} waypoints.")
         else:
+            print(f"Could not find a path from {current_cell} to {END_CELL}")
             self.state = "MISSION_COMPLETE"
     
     def _follow_path(self):
         """Follow the planned path using line following."""
         if not self.current_path or self.current_waypoint_idx >= len(self.current_path):
             # Reached end of path
-            target_info = self.box_handler.get_current_target()
-            if target_info:
-                _, mission_type = target_info
-                if mission_type == "PICKUP":
-                    self.state = "AT_PICKUP"
-                else:
-                    self.state = "AT_DROPOFF"
-            else:
-                self.state = "MISSION_COMPLETE"
+            print("Reached the end of the path.")
+            self.state = "MISSION_COMPLETE"
             return
-        
+
         # Check if we're at current waypoint
         current_waypoint = self.current_path[self.current_waypoint_idx]
         if self.position_tracker.is_at_cell(current_waypoint[0], current_waypoint[1]):
             # Correct odometry at waypoint if enabled
             if FEATURES['POSITION_CORRECTION_ENABLED']:
-                self.position_tracker.correct_at_waypoint(current_waypoint)
+                # We'll disable the correction to prevent it from interfering with the line follower,
+                # but we'll keep the waypoint tracking active.
+                # self.position_tracker.correct_at_waypoint(current_waypoint)
+                print(f"--- Reached waypoint {self.current_waypoint_idx}: {current_waypoint} ---")
             
             # Move to next waypoint
             self.current_waypoint_idx += 1
-        
+            
+        # Check if we are at an intersection and should handle a turn
+        if self._is_at_intersection() and self.position_tracker.is_at_cell(current_waypoint[0], current_waypoint[1]):
+            self._handle_intersection()
+            return # Skip line following for one cycle to execute the turn
+
         # Follow line using the simplified PID controller
         if self.esp32_bridge.is_line_detected():
             line_position, _, _ = self.esp32_bridge.get_line_sensor_data()
             # Convert ESP32 line position (0-4000) to our expected range (-1.0 to 1.0)
             normalized_position = (line_position - 2000) / 2000.0
+            self.last_known_line_position = normalized_position
             
             # Use the new, simplified PID controller
             vx, vy, omega = self.line_follower.calculate_control(normalized_position, base_speed=LINE_FOLLOW_SPEED)
@@ -482,29 +482,12 @@ class RobotController:
                 if stats['status']['is_strafing']:
                     print(f"Strafing: pos={normalized_position:.2f}, strafe_eff={stats['performance']['strafe_efficiency']:.2f}")
         else:
-            # Line lost - stop and search
+            # Line lost - initiate recovery
+            if self.state == "FOLLOWING_PATH": # Only trigger once
+                print("Line lost! Attempting to recover...")
+                self.state = "RECOVERING_LINE"
+                self.recovery_start_time = time.time()
             self._stop_motors()
-    
-    def _handle_pickup(self):
-        """Handle package pickup."""
-        current_cell = self.position_tracker.get_current_cell()
-        
-        if self.box_handler.collect_package(current_cell):
-            self.state = "PLANNING_PATH"  # Plan path to dropoff  
-        else:
-            self.state = "MISSION_COMPLETE"
-    
-    def _handle_dropoff(self):
-        """Handle package dropoff."""
-        current_cell = self.position_tracker.get_current_cell()
-        
-        if self.box_handler.deliver_package(current_cell):
-            if self.box_handler.is_mission_complete():
-                self.state = "MISSION_COMPLETE"
-            else:
-                self.state = "PLANNING_PATH"  # Plan path to next pickup
-        else:
-            self.state = "MISSION_COMPLETE"
     
     def _handle_obstacle_avoidance(self):
         """Handle obstacle avoidance."""
@@ -531,7 +514,7 @@ class RobotController:
     def _handle_mission_complete(self):
         """Handle mission completion."""
         self._stop_motors()
-        self.box_handler.print_mission_summary(silent=True)
+        print("Mission complete: Reached target destination.")
     
     def _move_omni(self, vx: float, vy: float, omega: float):
         """Move robot using omni-wheel kinematics."""
@@ -569,6 +552,106 @@ class RobotController:
         
         cv2.destroyAllWindows()
 
+    def _recover_line(self):
+        """Try to find the line again after losing it."""
+        # If line is found, go back to following
+        if self.esp32_bridge.is_line_detected():
+            print("Line re-acquired! Resuming path following.")
+            self.state = "FOLLOWING_PATH"
+            self.recovery_start_time = None
+            self.line_follower.reset_controllers() # Reset PID to avoid integral windup jump
+            return
+
+        # Check for recovery timeout
+        if self.recovery_start_time and (time.time() - self.recovery_start_time > 2.0):
+            print("Line recovery failed. Stopping robot.")
+            self._stop_motors()
+            self.state = "MISSION_COMPLETE" # Or a new FAILED state
+            return
+            
+        # Recovery maneuver: move backward and strafe toward last known line position
+        # If last position was > 0 (right), we need to strafe right (vy > 0)
+        strafe_speed = 40.0
+        vy_recovery = strafe_speed if self.last_known_line_position > 0 else -strafe_speed
+        vx_recovery = -20.0 # Slowly move backward
+
+        self._move_omni(vx_recovery, vy_recovery, 0)
+
+    def _is_at_intersection(self) -> bool:
+        """Check if the robot is at an intersection based on sensor readings."""
+        if not self.esp32_bridge.is_line_detected():
+            return False
+        
+        _, _, sensor_values = self.esp32_bridge.get_line_sensor_data()
+        
+        # An intersection is detected if 3 or more sensors see the line.
+        # A low sensor value (e.g., < 300) indicates a line.
+        line_detections = sum(1 for value in sensor_values if value < 300)
+        
+        return line_detections >= 3
+
+    def _get_turn_direction(self) -> str:
+        """Calculate turn direction for the next waypoint based on path geometry."""
+        if self.current_waypoint_idx + 1 >= len(self.current_path):
+            return "STRAIGHT"  # End of path
+
+        # Determine the vector of the path segment the robot is currently on
+        prev_waypoint = self.current_path[self.current_waypoint_idx - 1] if self.current_waypoint_idx > 0 else START_CELL
+        current_waypoint = self.current_path[self.current_waypoint_idx]
+        dx_in = current_waypoint[0] - prev_waypoint[0]
+        dy_in = current_waypoint[1] - prev_waypoint[1]
+        angle_in = math.atan2(dy_in, dx_in)
+
+        # Determine the vector of the path segment the robot needs to join
+        next_waypoint = self.current_path[self.current_waypoint_idx + 1]
+        dx_out = next_waypoint[0] - current_waypoint[0]
+        dy_out = next_waypoint[1] - current_waypoint[1]
+        angle_out = math.atan2(dy_out, dx_out)
+
+        # Find the difference in angle to determine the turn
+        turn_angle = angle_out - angle_in
+        
+        # Normalize angle to the range [-pi, pi]
+        while turn_angle <= -math.pi:
+            turn_angle += 2 * math.pi
+        while turn_angle > math.pi:
+            turn_angle -= 2 * math.pi
+
+        # Classify the turn based on the angle
+        if abs(turn_angle) < math.pi / 4:  # Less than 45 degrees is straight
+            return "STRAIGHT"
+        elif turn_angle > 0:
+            return "LEFT"
+        else:
+            return "RIGHT"
+
+    def _handle_intersection(self):
+        """Handle navigation at an intersection."""
+        print(f"Intersection detected at waypoint {self.current_waypoint_idx}.")
+
+        # Decide which way to go
+        turn_direction = self._get_turn_direction()
+        print(f"Intersection decision: {turn_direction}")
+
+        # Move forward a bit to center the robot over the intersection
+        self._move_omni(vx=30, vy=0, omega=0)
+        time.sleep(0.3)
+
+        if turn_direction != "STRAIGHT":
+            # Execute the turn by rotating in place
+            omega = TURN_SPEED if turn_direction == "LEFT" else -TURN_SPEED
+            self._move_omni(vx=0, vy=0, omega=omega)
+            time.sleep(0.7) # Approximate time for a 90-degree turn
+
+        # Move forward to exit the intersection and find the new line
+        self._move_omni(vx=40, vy=0, omega=0)
+        time.sleep(0.4)
+
+        # The waypoint has now been passed
+        self.current_waypoint_idx += 1
+        self.line_follower.reset_controllers()
+        print(f"Proceeding to waypoint {self.current_waypoint_idx}.")
+
 def print_feature_status():
     """Print current feature configuration for debugging."""
     print("=" * 50)
@@ -582,27 +665,96 @@ def print_feature_status():
 
 def main():
     """Main entry point."""
-    # Print feature status
     print_feature_status()
     
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
+    # Global instance to be shared between threads
+    robot_controller = RobotController()
     
-    controller = RobotController()
+    # Start the robot's main control loop in a background thread
+    robot_thread = threading.Thread(target=robot_controller.run, daemon=True)
+    robot_thread.start()
     
-    try:
-        print("Robot controller initialized successfully")
-        print("Starting main control loop...")
-        controller.run()
-    except KeyboardInterrupt:
-        print("\nShutdown requested by user")
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        controller.stop()
-        print("Robot controller stopped")
+    # Start the Flask web server in the main thread
+    app = Flask(__name__, template_folder='../../templates', static_folder='../../static')
+    
+    @app.route('/')
+    def index():
+        """Serve the main dashboard page."""
+        return render_template('navigation.html')
 
-if __name__ == "__main__":
+    @app.route('/api/robot_data')
+    def robot_data():
+        """Provide robot status as JSON."""
+        if not robot_controller or not robot_controller.position_tracker:
+            return jsonify({})
+
+        pose = robot_controller.position_tracker.get_pose()
+        robot_cell = robot_controller.position_tracker.get_current_cell()
+        _, _, sensor_values = robot_controller.esp32_bridge.get_line_sensor_data()
+        
+        sensors = [1 if val < 500 else 0 for val in sensor_values]
+        
+        grid_image = generate_grid_image(
+            robot_controller.pathfinder,
+            robot_cell,
+            robot_controller.current_path,
+            START_CELL,
+            END_CELL
+        )
+
+        data = {
+            "position": {"x": pose[0], "y": pose[1], "heading": pose[2]},
+            "state": robot_controller.state,
+            "has_package": False,
+            "package_detected": False,
+            "collected_boxes": 0,
+            "delivered_boxes": 0,
+            "total_tasks": 0,
+            "sensors": sensors,
+            "grid_image": grid_image
+        }
+        return jsonify(data)
+
+    @app.route('/video_feed')
+    def video_feed():
+        return "", 204 # No content
+
+    print("Starting Flask web server...")
+    app.run(host='0.0.0.0', port=5000)
+
+def generate_grid_image(pathfinder, robot_cell, path, start_cell, end_cell):
+    cell_size = 20
+    grid = pathfinder.grid
+    height, width = len(grid), len(grid[0])
+    
+    img = np.zeros((height * cell_size, width * cell_size, 3), dtype=np.uint8) + 26
+
+    for y in range(height):
+        for x in range(width):
+            if grid[y][x] == 1:
+                cv2.rectangle(img, (x * cell_size, y * cell_size), ((x+1) * cell_size, (y+1) * cell_size), (22, 33, 62), -1)
+
+    if path:
+        for (x, y) in path:
+             cv2.rectangle(img, (x * cell_size, y * cell_size), ((x+1) * cell_size, (y+1) * cell_size), (0, 255, 255), -1)
+
+    if start_cell:
+        x, y = start_cell
+        cv2.rectangle(img, (x * cell_size, y * cell_size), ((x+1) * cell_size, (y+1) * cell_size), (0, 255, 65), -1)
+        
+    if end_cell:
+        x, y = end_cell
+        cv2.rectangle(img, (x * cell_size, y * cell_size), ((x+1) * cell_size, (y+1) * cell_size), (255, 140, 0), -1)
+
+    if robot_cell:
+        x, y = robot_cell
+        cv2.rectangle(img, (x * cell_size, y * cell_size), ((x+1) * cell_size, (y+1) * cell_size), (255, 0, 128), -1)
+
+    is_success, buffer = cv2.imencode(".png", img)
+    if not is_success:
+        return None
+    
+    return base64.b64encode(buffer).decode('utf-8')
+
+if __name__ == '__main__':
     main() 

@@ -94,14 +94,16 @@ class OmniWheelOdometry:
             fl_dist, fr_dist, bl_dist, br_dist = wheel_distances
             
             # Enhanced forward kinematics for X-shaped omni-wheel configuration
-            wheel_radius = math.sqrt(self.ROBOT_WIDTH_M**2 + self.ROBOT_LENGTH_M**2) / 2.0
+            # The distance from the center to any wheel
+            L = self.ROBOT_WIDTH_M / 2.0
+            W = self.ROBOT_LENGTH_M / 2.0
             
             # Local velocity components (robot frame)
-            vx_local = (fl_dist + fr_dist + bl_dist + br_dist) / 4.0   # Forward/backward
-            vy_local = (-fl_dist + fr_dist - bl_dist + br_dist) / 4.0  # Left/right strafe
+            vx_local = ( fl_dist + fr_dist + bl_dist + br_dist) / 4.0
+            vy_local = (-fl_dist + fr_dist - bl_dist + br_dist) / 4.0
             
-            # Rotational velocity (improved calculation)
-            delta_heading = (-fl_dist + fr_dist + bl_dist - br_dist) / (4.0 * wheel_radius)
+            # Rotational velocity (corrected calculation)
+            delta_heading = (-fl_dist + fr_dist + bl_dist - br_dist) / (4.0 * (L + W))
             
             # Apply velocity filtering to reduce encoder noise
             self.vx_history.append(vx_local / dt)
@@ -579,4 +581,8 @@ class PositionTracker:
     
     def set_waypoint_threshold(self, threshold: float):
         """Set waypoint detection threshold."""
-        self.waypoint_threshold = threshold 
+        self.waypoint_threshold = threshold
+    
+    def get_pose(self) -> Tuple[float, float, float]:
+        """Get current robot pose (x, y, heading) - delegates to odometry."""
+        return self.odometry.get_pose() 

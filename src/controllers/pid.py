@@ -156,7 +156,7 @@ class LineFollowPID:
         )
         
         # Proportional gain for strafing
-        self.strafe_gain = 40.0
+        self.strafe_gain = 30.0
     
     def calculate_control(self, line_position: float, base_speed: float = 60.0) -> Tuple[float, float, float]:
         """
@@ -176,7 +176,7 @@ class LineFollowPID:
         omega = -self.pid.update(error)
         
         # Strafing control using simple proportional gain
-        vy = -self.strafe_gain * error
+        vy = self.strafe_gain * error
         
         # Reduce forward speed during sharp turns to improve stability
         # The reduction is proportional to the rotational speed
