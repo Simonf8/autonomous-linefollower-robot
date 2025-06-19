@@ -5,124 +5,59 @@ import math
 from machine import Pin, PWM, ADC
 
 # WiFi Configuration
-WIFI_SSID = "YOUR_SSID"
-WIFI_PASSWORD = "YOUR_PASSWORD"
+WIFI_SSID = "CJ"
+WIFI_PASSWORD = "4533simon"
 SERVER_PORT = 1234
 
 class TrackerSensor:
-    """5-channel analog infrared line tracker sensor with median filtering"""
+    """3-channel analog infrared line tracker sensor using working pins"""
     
-    def __init__(self, sensor_pins=[19, 20, 21], median_window_size=5):
+    def __init__(self, left_pin=5, center_pin=2, right_pin=4, threshold=65000):
         """
-        Initialize tracker sensor with median filtering.
+        Initialize tracker sensor with proven working configuration.
         """
-        # Initialize ADC pins for analog reading
-        self.adcs = []
-        for pin in sensor_pins:
-            adc = ADC(Pin(pin))
-            adc.atten(ADC.ATTN_11DB)  # 0-3.3V range
-            self.adcs.append(adc)
+        # Initialize ADC pins for analog reading using your working pins
+        self.left_sensor = ADC(Pin(left_pin), atten=ADC.ATTN_11DB)
+        self.center_sensor = ADC(Pin(center_pin), atten=ADC.ATTN_11DB)
+        self.right_sensor = ADC(Pin(right_pin), atten=ADC.ATTN_11DB)
         
-        # For 5 sensors, we'll read 3 physical + interpolate 2 virtual sensors
-        self.num_sensors = 5
-        self.median_window_size = median_window_size
+        # Working threshold from your testing
+        self.threshold = threshold
         
-        # Median filter buffers for each sensor
-        self.raw_buffers = [[] for _ in range(self.num_sensors)]
+        # For compatibility, we'll create 5 virtual sensors from 3 physical
+        self.num_sensors = 3
         
-        # Calibration data
+        # Calibration data (using your threshold as baseline)
         self.min_values = [0] * self.num_sensors
-        self.max_values = [4095] * self.num_sensors  # 12-bit ADC max
-        self.calibrated = False
+        self.max_values = [65535] * self.num_sensors  # 16-bit ADC max
+        self.calibrated = True  # Already calibrated with your threshold
         
         # Sensor weights for weighted average (0, 1000, 2000, 3000, 4000)
         self.weights = [i * 1000 for i in range(self.num_sensors)]
         
-        # Tracker sensor initialized
+        print(f"Line sensor initialized - Pins: Left={left_pin}, Center={center_pin}, Right={right_pin}")
+        print(f"Threshold: {threshold} - Line detected when below this value")
     
     def read_raw(self):
-        """Read raw ADC values from all sensors"""
-        if len(self.adcs) == 3:
-            # Read 3 physical sensors
-            raw = [adc.read() for adc in self.adcs]
-            
-            # Interpolate to create 5 virtual sensors
-            # Left sensor, Left-Center interpolation, Center, Right-Center interpolation, Right
-            sensor_values = [
-                raw[0],                           # Leftmost (sensor 0)
-                (raw[0] + raw[1]) // 2,          # Left-Center (sensor 1) 
-                raw[1],                           # Center (sensor 2)
-                (raw[1] + raw[2]) // 2,          # Right-Center (sensor 3)
-                raw[2]                            # Rightmost (sensor 4)
-            ]
-        else:
-            # If we have exactly 5 sensors, read them directly
-            sensor_values = [adc.read() for adc in self.adcs[:5]]
-            
+        """Read raw ADC values from all sensors using your working code"""
+        # Read 3 physical sensors using your proven method
+        left_raw = self.left_sensor.read_u16()
+        center_raw = self.center_sensor.read_u16()
+        right_raw = self.right_sensor.read_u16()
+        
+        # Create 5 virtual sensors from 3 physical sensors for compatibility
+        # Left sensor, Left-Center interpolation, Center, Right-Center interpolation, Right
+        sensor_values = [
+            left_raw,                                    # Leftmost (sensor 0)
+            (left_raw + center_raw) // 2,               # Left-Center (sensor 1) 
+            center_raw,                                  # Center (sensor 2)
+            (center_raw + right_raw) // 2,              # Right-Center (sensor 3)
+            right_raw                                    # Rightmost (sensor 4)
+        ]
+        
         return sensor_values
     
-    def _median_filter(self, values):
-        """Simple median filter implementation for MicroPython"""
-        sorted_values = sorted(values)
-        n = len(sorted_values)
-        if n % 2 == 1:
-            return sorted_values[n // 2]
-        else:
-            return (sorted_values[n // 2 - 1] + sorted_values[n // 2]) // 2
-    
-    def _apply_median_filter(self, sensor_idx, raw_value):
-        """
-        Apply median filtering to reduce noise spikes while preserving edges.
-        
-        Args:
-            sensor_idx: Index of the sensor (0-4)
-            raw_value: Raw sensor reading
-            
-        Returns:
-            Median-filtered value
-        """
-        # Add new value to buffer
-        self.raw_buffers[sensor_idx].append(raw_value)
-        
-        # Maintain buffer size
-        if len(self.raw_buffers[sensor_idx]) > self.median_window_size:
-            self.raw_buffers[sensor_idx].pop(0)  # Remove oldest value
-        
-        # Return median of buffer values
-        if len(self.raw_buffers[sensor_idx]) >= 3:  # Need at least 3 values for meaningful median
-            return self._median_filter(self.raw_buffers[sensor_idx])
-        else:
-            # Not enough data for median, return raw value
-            return raw_value
-    
-    def read_raw_filtered(self):
-        """Read raw ADC values with median filtering applied"""
-        if len(self.adcs) == 3:
-            # Read 3 physical sensors
-            raw = [adc.read() for adc in self.adcs]
-            
-            # Apply median filtering to physical sensors
-            filtered_raw = [self._apply_median_filter(i, raw[i]) for i in range(3)]
-            
-            # Interpolate to create 5 virtual sensors using filtered data
-            sensor_values = [
-                filtered_raw[0],                                    # Leftmost (sensor 0)
-                (filtered_raw[0] + filtered_raw[1]) // 2,          # Left-Center (sensor 1) 
-                filtered_raw[1],                                    # Center (sensor 2)
-                (filtered_raw[1] + filtered_raw[2]) // 2,          # Right-Center (sensor 3)
-                filtered_raw[2]                                     # Rightmost (sensor 4)
-            ]
-            
-            # Apply median filtering to interpolated sensors
-            for i in range(3, 5):  # Only filter the interpolated sensors
-                sensor_values[i] = self._apply_median_filter(i, sensor_values[i])
-                
-        else:
-            # If we have exactly 5 sensors, read and filter them directly
-            raw_values = [adc.read() for adc in self.adcs[:5]]
-            sensor_values = [self._apply_median_filter(i, raw_values[i]) for i in range(5)]
-            
-        return sensor_values
+
     
     def calibrate(self, samples=100):
         """
@@ -148,31 +83,23 @@ class TrackerSensor:
     
     def read_calibrated(self):
         """
-        Read normalized sensor values (0-1000 range).
+        Read normalized sensor values using your working threshold method.
         1000 = far from line (white surface)
         0 = on line (black surface)
         """
-        if not self.calibrated:
-            # Use default calibration values
-            self.min_values = [500] * self.num_sensors
-            self.max_values = [3500] * self.num_sensors
-        
-        raw_values = self.read_raw_filtered()  # Use filtered readings
+        raw_values = self.read_raw()
         calibrated_values = []
         
         for i in range(self.num_sensors):
             raw = raw_values[i]
-            min_val = self.min_values[i]
-            max_val = self.max_values[i]
             
-            # Normalize to 0-1000 range
-            if max_val > min_val:
-                normalized = (raw - min_val) * 1000 // (max_val - min_val)
-                normalized = max(0, min(1000, normalized))
+            # Use your proven threshold method
+            # If below threshold = line detected (return low value)
+            # If above threshold = no line (return high value)
+            if raw < self.threshold:
+                calibrated_values.append(0)    # Line detected
             else:
-                normalized = 500  # Default middle value
-            
-            calibrated_values.append(normalized)
+                calibrated_values.append(1000) # No line detected
         
         return calibrated_values
     
@@ -198,19 +125,24 @@ class TrackerSensor:
         return max(0, min(4000, position))
     
     def is_line_detected(self):
-        """Check if any sensor detects the line"""
-        sensor_values = self.read_calibrated()
-        # If any sensor value is below threshold, line is detected
-        return any(value < 300 for value in sensor_values)
+        """Check if any sensor detects the line using your working method"""
+        # Read 3 physical sensors directly using your proven approach
+        left = 1 if self.left_sensor.read_u16() < self.threshold else 0
+        center = 1 if self.center_sensor.read_u16() < self.threshold else 0
+        right = 1 if self.right_sensor.read_u16() < self.threshold else 0
+        
+        # Line detected if any sensor detects line
+        return (left == 1) or (center == 1) or (right == 1)
     
-    def reset_filters(self):
-        """Reset median filter buffers (useful after line loss or significant changes)"""
-        for buffer in self.raw_buffers:
-            buffer.clear()
+    def print_sensor_debug(self):
+        """Print sensor readings like your original code"""
+        left = 1 if self.left_sensor.read_u16() < self.threshold else 0
+        center = 1 if self.center_sensor.read_u16() < self.threshold else 0
+        right = 1 if self.right_sensor.read_u16() < self.threshold else 0
+        
+        print(f"[{left} {center} {right}]")
     
-    def get_filter_status(self):
-        """Get the current state of median filter buffers"""
-        return [len(buffer) for buffer in self.raw_buffers]
+
     
     def get_line_error(self):
         """
@@ -224,10 +156,10 @@ class OmniwheelRobot:
     def __init__(self):
         # Motor pin setup
         self.motors = {
-            'fl': {'p1': PWM(Pin(5), freq=50), 'p2': PWM(Pin(4), freq=50)},
-            'fr': {'p1': PWM(Pin(6), freq=50), 'p2': PWM(Pin(7), freq=50)},
-            'bl': {'p1': PWM(Pin(17), freq=50), 'p2': PWM(Pin(16), freq=50)},
-            'br': {'p1': PWM(Pin(18), freq=50), 'p2': PWM(Pin(8), freq=50)}
+            'fl': {'p1': PWM(Pin(6), freq=500), 'p2': PWM(Pin(19), freq=500)},
+            'fr': {'p1': PWM(Pin(7), freq=500), 'p2': PWM(Pin(42), freq=500)},
+            'bl': {'p1': PWM(Pin(18), freq=500), 'p2': PWM(Pin(17), freq=500)},
+            'br': {'p1': PWM(Pin(15), freq=500), 'p2': PWM(Pin(16), freq=500)}
         }
         
         # Encoder pin setup
@@ -238,8 +170,8 @@ class OmniwheelRobot:
             'br': {'a': Pin(13, Pin.IN, Pin.PULL_UP), 'b': Pin(14, Pin.IN, Pin.PULL_UP)}
         }
         
-        # Initialize tracker sensor with median filtering
-        self.tracker = TrackerSensor([19, 20, 21], median_window_size=5)
+        # Initialize tracker sensor with your working configuration
+        self.tracker = TrackerSensor(left_pin=5, center_pin=2, right_pin=4, threshold=65000)
         
         # Global-like storage for ticks and encoder B-pins for ISRs
         self.ticks = {'fl': 0, 'fr': 0, 'bl': 0, 'br': 0}
@@ -313,6 +245,23 @@ class OmniwheelRobot:
         self.set_motor_speed('fr', fr)
         self.set_motor_speed('bl', bl)
         self.set_motor_speed('br', br)
+
+    def line_follow(self, base_speed=40):
+        """Follows the line using a simple proportional controller."""
+        error = self.tracker.get_line_error()
+        
+        # This Kp value is a starting point and may need tuning.
+        Kp = 0.05
+        turn = Kp * error
+        
+        # For an omni-wheel robot, turning involves all four wheels.
+        # This logic should make it turn in place based on the line error.
+        fl_speed = base_speed + turn
+        fr_speed = base_speed - turn
+        bl_speed = base_speed + turn
+        br_speed = base_speed - turn
+        
+        self.set_all_speeds(fl_speed, fr_speed, bl_speed, br_speed)
 
     def stop(self):
         """Stop all motors."""
@@ -395,6 +344,8 @@ def run_server(robot):
                     if command == "CALIBRATE":
                         robot.calibrate_tracker()
                         client.sendall(b"CALIBRATION_COMPLETE\n")
+                    elif command == "STOP":
+                        robot.stop()
                     elif command.startswith("LINE_FOLLOW"):
                         # Extract base speed if provided
                         parts = command.split(',')

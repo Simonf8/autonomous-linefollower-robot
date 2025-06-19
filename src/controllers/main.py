@@ -5,14 +5,15 @@ import logging
 import cv2
 import numpy as np
 import math
+import socket
 from typing import List, Tuple, Optional
 
 # Import our clean modules
 from object_detection import ObjectDetector, PathShapeDetector
 from pathfinder import Pathfinder
-from box_handler import BoxHandler
+from box import BoxHandler
 from position_tracker import OmniWheelOdometry, PositionTracker
-from pid_controller import LineFollowPID
+from pid import LineFollowPID
 
 # ================================
 # FEATURE CONFIGURATION
@@ -21,10 +22,10 @@ from pid_controller import LineFollowPID
 FEATURES = {
     'OBJECT_DETECTION_ENABLED': True,       # Enable YOLO object detection
     'PATH_SHAPE_DETECTION_ENABLED': True,   # Enable path shape analysis
-    'OBSTACLE_AVOIDANCE_ENABLED': True,     # Enable obstacle avoidance behavior
-    'VISION_SYSTEM_ENABLED': True,          # Enable camera and vision processing
+    'OBSTACLE_AVOIDANCE_ENABLED': False,     # Enable obstacle avoidance behavior
+    'VISION_SYSTEM_ENABLED': False,          # Enable camera and vision processing
     'POSITION_CORRECTION_ENABLED': True,    # Enable waypoint position corrections
-    'PERFORMANCE_LOGGING_ENABLED': False,   # Enable detailed performance logging
+    'PERFORMANCE_LOGGING_ENABLED': True,    # Enable detailed performance logging
     'DEBUG_VISUALIZATION_ENABLED': False,   # Enable debug visualization windows
     'SMOOTH_CORNERING_ENABLED': True,       # Enable smooth cornering like normal wheels
     'ADAPTIVE_SPEED_ENABLED': True,         # Enable speed adaptation based on conditions
@@ -35,9 +36,9 @@ FEATURES = {
 # ================================
 ESP32_IP = "192.168.128.245"
 CELL_WIDTH_M = 0.025
-BASE_SPEED = 60
-TURN_SPEED = 80
-CORNER_SPEED = 45  # Slower speed for smooth cornering
+BASE_SPEED = 30
+TURN_SPEED = 40
+CORNER_SPEED = 25  # Slower speed for smooth cornering
 
 # Robot physical constants
 PULSES_PER_REV = 960
@@ -53,7 +54,7 @@ START_POSITION = ((START_CELL[0] + 0.5) * CELL_WIDTH_M, (START_CELL[1] + 0.5) * 
 START_HEADING = math.pi  # Facing left
 
 # Line following configuration
-LINE_FOLLOW_SPEED = 60
+LINE_FOLLOW_SPEED = 30
 
 # Vision configuration
 IMG_PATH_SRC_PTS = np.float32([[200, 300], [440, 300], [580, 480], [60, 480]])
@@ -62,40 +63,117 @@ IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
 class ESP32Bridge:
     """ESP32 communication bridge for motors, encoders, and line sensors."""
     
-    def __init__(self, ip: str):
+    def __init__(self, ip: str, port: int = 1234):
         self.ip = ip
+        self.port = port
+        self.socket = None
         self.connected = False
+        self.connection_attempts = 0
+        
         # Latest sensor data from ESP32
         self.latest_encoder_data = [0, 0, 0, 0]
         self.latest_line_position = -1  # -1 means no line detected
         self.latest_line_error = 0
         self.latest_sensor_values = [0, 0, 0, 0, 0]
-        # Placeholder for actual socket implementation
+        
+        # Command tracking
+        self.last_command = None
+        self.last_send_time = 0.0
         
     def start(self):
         """Start communication with ESP32."""
-        self.connected = True
+        return self.connect()
+        
+    def connect(self):
+        """Establish connection to ESP32."""
+        if self.socket:
+            try:
+                self.socket.close()
+            except:
+                pass
+            self.socket = None
+        
+        try:
+            import socket
+            self.socket = socket.create_connection((self.ip, self.port), timeout=3)
+            self.socket.settimeout(0.5)
+            self.connected = True
+            self.connection_attempts = 0
+            print(f"Connected to ESP32 at {self.ip}:{self.port}")
+            return True
+        except Exception as e:
+            self.connected = False
+            self.connection_attempts += 1
+            if self.connection_attempts % 10 == 1:  # Log every 10 attempts
+                print(f"Failed to connect to ESP32 (attempt {self.connection_attempts}): {e}")
+            self.socket = None
+            return False
         
     def send_motor_speeds(self, fl: int, fr: int, bl: int, br: int):
         """Send motor speeds to ESP32."""
-        if self.connected:
-            # Placeholder for actual motor command sending
-            pass
+        if not self.connected and not self.connect():
+            return False
+            
+        try:
+            command = f"{fl},{fr},{bl},{br}"
+            return self._send_command(command)
+        except Exception as e:
+            print(f"Error sending motor speeds: {e}")
+            self.connected = False
+            return False
     
     def send_line_follow_command(self, base_speed: int = 60):
         """Send line following command to ESP32."""
-        if self.connected:
-            # Placeholder - would send "LINE_FOLLOW,{base_speed}"
-            pass
+        if not self.connected and not self.connect():
+            return False
+            
+        try:
+            command = f"LINE_FOLLOW,{base_speed}"
+            return self._send_command(command)
+        except Exception as e:
+            print(f"Error sending line follow command: {e}")
+            self.connected = False
+            return False
     
     def send_calibrate_command(self):
         """Send calibration command to ESP32."""
-        if self.connected:
-            # Placeholder - would send "CALIBRATE"
-            pass
+        if not self.connected and not self.connect():
+            return False
+            
+        try:
+            return self._send_command("CALIBRATE")
+        except Exception as e:
+            print(f"Error sending calibrate command: {e}")
+            self.connected = False
+            return False
+    
+    def _send_command(self, command: str):
+        """Internal method to send command to ESP32."""
+        if not self.socket:
+            return False
+            
+        try:
+            full_command = f"{command}\n"
+            current_time = time.time()
+            
+            # Send commands to ESP32
+            self.socket.sendall(full_command.encode())
+            self.last_command = full_command
+            self.last_send_time = current_time
+            
+            if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
+                print(f"Sent to ESP32: {command}")
+            
+            return True
+        except Exception as e:
+            print(f"Socket error: {e}")
+            self.connected = False
+            self.socket = None
+            return False
             
     def get_encoder_ticks(self) -> List[int]:
         """Get encoder ticks from ESP32."""
+        self._receive_data()  # Try to get fresh data
         return self.latest_encoder_data
     
     def get_line_sensor_data(self) -> Tuple[int, int, List[int]]:
@@ -108,11 +186,30 @@ class ESP32Bridge:
             line_error: -2000 to +2000 (error from center)
             sensor_values: List of 5 calibrated sensor readings (0-1000 each)
         """
+        self._receive_data()  # Try to get fresh data
         return (self.latest_line_position, self.latest_line_error, self.latest_sensor_values)
     
     def is_line_detected(self) -> bool:
         """Check if line is currently detected."""
+        self._receive_data()  # Try to get fresh data
         return self.latest_line_position != -1
+    
+    def _receive_data(self):
+        """Try to receive data from ESP32 (non-blocking)."""
+        if not self.socket or not self.connected:
+            return
+            
+        try:
+            # Non-blocking receive
+            data = self.socket.recv(1024)
+            if data:
+                data_string = data.decode().strip()
+                for line in data_string.split('\n'):
+                    if line:
+                        self.update_sensor_data(line)
+        except Exception:
+            # No data available or connection error - that's okay for non-blocking
+            pass
     
     def update_sensor_data(self, data_string: str):
         """
@@ -129,12 +226,28 @@ class ESP32Bridge:
                 self.latest_line_position = int(parts[4])
                 self.latest_line_error = int(parts[5])
                 self.latest_sensor_values = [int(parts[i]) for i in range(6, 11)]
+                
+                # Show sensor readings in your format [Left Center Right]
+                if len(self.latest_sensor_values) >= 3:
+                    left = 1 if self.latest_sensor_values[0] < 500 else 0
+                    center = 1 if self.latest_sensor_values[2] < 500 else 0  
+                    right = 1 if self.latest_sensor_values[4] < 500 else 0
+                    print(f"[{left} {center} {right}]")
         except (ValueError, IndexError):
             # Invalid data format - keep previous values
-            pass
+            if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
+                print(f"Invalid data format: {data_string}")
         
     def stop(self):
         """Stop ESP32 communication."""
+        if self.socket:
+            try:
+                self._send_command("STOP")
+                time.sleep(0.1)
+                self.socket.close()
+            except:
+                pass
+            self.socket = None
         self.connected = False
 
 
@@ -145,7 +258,7 @@ class RobotController:
     def __init__(self):
         """Initialize robot controller with all modules."""
         # Hardware interfaces
-        self.esp32_bridge = ESP32Bridge(ESP32_IP)
+        self.esp32_bridge = ESP32Bridge(ESP32_IP, 1234)
         
         # Position tracking
         initial_pose = (START_POSITION[0], START_POSITION[1], START_HEADING)
@@ -159,8 +272,9 @@ class RobotController:
         self.position_tracker = PositionTracker(self.odometry, CELL_WIDTH_M)
         
         # Navigation
-        maze_grid = self._create_maze_grid()
-        self.pathfinder = Pathfinder(maze_grid, CELL_WIDTH_M)
+        self.pathfinder = Pathfinder([], CELL_WIDTH_M)  # Initialize with empty grid first
+        maze_grid = self.pathfinder.create_maze_grid()  # Get the maze grid
+        self.pathfinder = Pathfinder(maze_grid, CELL_WIDTH_M)  # Reinitialize with actual grid
         self.current_path = None
         self.current_waypoint_idx = 0
         
@@ -178,9 +292,7 @@ class RobotController:
         self.state = "STARTING"
         self.latest_frame = None
     
-    def _create_maze_grid(self) -> List[List[int]]:
-        """Create the maze grid layout."""
-        return self.pathfinder.create_maze_grid()
+
     
     def _setup_vision(self):
         """Initialize camera and vision systems based on feature flags."""
@@ -216,7 +328,12 @@ class RobotController:
     
     def run(self):
         """Main control loop."""
-        self.esp32_bridge.start()
+        if self.esp32_bridge.start():
+            print("ESP32 connected. Waiting 2 seconds before motor test...")
+            time.sleep(2)
+            # Run a motor test before starting the main loop for quick validation
+            self._motor_test()
+
         self.box_handler.start_mission()
         
         try:
@@ -297,6 +414,16 @@ class RobotController:
     
     def _start_mission(self):
         """Initialize mission."""
+        print("Starting robot mission...")
+        
+        # Calibrate sensors if needed
+        if not self.esp32_bridge.connected:
+            print("Connecting to ESP32...")
+            if not self.esp32_bridge.connect():
+                print("Warning: ESP32 not connected - running in simulation mode")
+        else:
+            print("ESP32 connected - starting real mission")
+        
         self.state = "PLANNING_PATH"
     
     def _plan_path_to_target(self):
@@ -339,8 +466,6 @@ class RobotController:
             # Correct odometry at waypoint if enabled
             if FEATURES['POSITION_CORRECTION_ENABLED']:
                 self.position_tracker.correct_at_waypoint(current_waypoint)
-                if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
-                    print(f"Position corrected at waypoint {current_waypoint}")
             
             # Move to next waypoint
             self.current_waypoint_idx += 1
@@ -382,8 +507,6 @@ class RobotController:
         else:
             # Line lost - stop and search
             self._stop_motors()
-            if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
-                print("Line lost - searching...")
     
     def _detect_corner_type(self, sensor_values: List[int], line_position: float) -> str:
         """
@@ -540,7 +663,7 @@ class RobotController:
         current_cell = self.position_tracker.get_current_cell()
         
         if self.box_handler.collect_package(current_cell):
-            self.state = "PLANNING_PATH"  # Plan path to dropoff
+            self.state = "PLANNING_PATH"  # Plan path to dropoff  
         else:
             self.state = "MISSION_COMPLETE"
     
@@ -583,6 +706,40 @@ class RobotController:
         self._stop_motors()
         self.box_handler.print_mission_summary()
     
+    def _motor_test(self):
+        """Perform a simple test of the motors."""
+        if not self.esp32_bridge.connected:
+            print("Cannot run motor test: ESP32 not connected.")
+            return
+            
+        print("--- Starting motor test ---")
+        
+        # Spin left
+        print("Spinning left...")
+        self.esp32_bridge.send_motor_speeds(-TURN_SPEED, TURN_SPEED, -TURN_SPEED, TURN_SPEED)
+        time.sleep(2)
+        
+        # Spin right
+        print("Spinning right...")
+        self.esp32_bridge.send_motor_speeds(TURN_SPEED, -TURN_SPEED, TURN_SPEED, -TURN_SPEED)
+        time.sleep(2)
+        
+        # Move forward
+        print("Moving forward...")
+        self.esp32_bridge.send_motor_speeds(BASE_SPEED, BASE_SPEED, BASE_SPEED, BASE_SPEED)
+        time.sleep(2)
+        
+        # Move backward
+        print("Moving backward...")
+        self.esp32_bridge.send_motor_speeds(-BASE_SPEED, -BASE_SPEED, -BASE_SPEED, -BASE_SPEED)
+        time.sleep(2)
+        
+        # Stop
+        print("Stopping motors...")
+        self._stop_motors()
+        time.sleep(1)
+        print("--- Motor test complete. Starting main mission. ---")
+
     def _move_omni(self, vx: float, vy: float, omega: float):
         """Move robot using omni-wheel kinematics."""
         R = ROBOT_WIDTH_M / 2
@@ -600,7 +757,10 @@ class RobotController:
             scale = 100 / max_speed
             speeds = [s * scale for s in speeds]
         
-        self.esp32_bridge.send_motor_speeds(*speeds)
+        # Convert to integers for the ESP32
+        int_speeds = [int(s) for s in speeds]
+        
+        self.esp32_bridge.send_motor_speeds(*int_speeds)
     
     def _stop_motors(self):
         """Stop all motors."""
