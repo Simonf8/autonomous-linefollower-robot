@@ -272,7 +272,9 @@ def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     if wlan.isconnected():
-        return wlan.ifconfig()[0]
+        ip = wlan.ifconfig()[0]
+        print(f"WiFi already connected. IP: {ip}")
+        return ip
     
     print(f"Connecting to WiFi SSID: {WIFI_SSID}...")
     wlan.connect(WIFI_SSID, WIFI_PASSWORD)
