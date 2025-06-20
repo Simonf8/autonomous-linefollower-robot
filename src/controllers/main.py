@@ -28,7 +28,7 @@ FEATURES = {
     'PATH_SHAPE_DETECTION_ENABLED': True,   # Enable path shape analysis
     'OBSTACLE_AVOIDANCE_ENABLED': False,     # Enable obstacle avoidance behavior
     'VISION_SYSTEM_ENABLED': False,          # Enable camera and vision processing
-    'USE_ESP32_LINE_SENSOR': False,          # NEW: Use ESP32 hardware sensor for line following
+    'USE_ESP32_LINE_SENSOR': False,          # Use ESP32 hardware sensor for line following
     'POSITION_CORRECTION_ENABLED': True,    # Enable waypoint position corrections
     'PERFORMANCE_LOGGING_ENABLED': True,    # Enable detailed performance logging
     'DEBUG_VISUALIZATION_ENABLED': False,   # Enable debug visualization windows
@@ -40,7 +40,7 @@ FEATURES = {
 # ROBOT CONFIGURATION
 # ================================
 ESP32_IP = "192.168.128.245"
-CELL_WIDTH_M = 0.025
+CELL_SIZE_M = 0.11
 BASE_SPEED = 60
 TURN_SPEED = 50
 CORNER_SPEED = 55  # Slower speed for smooth cornering
@@ -54,7 +54,7 @@ ROBOT_LENGTH_M = 0.075
 # Mission configuration
 START_CELL = (0, 12)
 END_CELL = (8, 12)
-START_POSITION = ((START_CELL[0] + 0.5) * CELL_WIDTH_M, (START_CELL[1] + 0.5) * CELL_WIDTH_M)
+START_POSITION = ((START_CELL[0] + 0.5) * CELL_SIZE_M, (START_CELL[1] + 0.5) * CELL_SIZE_M)
 START_HEADING = 0.0  # Facing right for horizontal movement
 
 # Line following configuration
@@ -273,12 +273,12 @@ class RobotController:
             robot_width=ROBOT_WIDTH_M,
             robot_length=ROBOT_LENGTH_M
         )
-        self.position_tracker = PositionTracker(self.odometry, CELL_WIDTH_M)
+        self.position_tracker = PositionTracker(self.odometry, CELL_SIZE_M)
         
         # Navigation
-        self.pathfinder = Pathfinder([], CELL_WIDTH_M)  # Initialize with empty grid first
+        self.pathfinder = Pathfinder([], CELL_SIZE_M)  # Initialize with empty grid first
         maze_grid = self.pathfinder.create_maze_grid()  # Get the maze grid
-        self.pathfinder = Pathfinder(maze_grid, CELL_WIDTH_M)  # Reinitialize with actual grid
+        self.pathfinder = Pathfinder(maze_grid, CELL_SIZE_M)  # Reinitialize with actual grid
         self.current_path = None
         self.current_waypoint_idx = 0
         

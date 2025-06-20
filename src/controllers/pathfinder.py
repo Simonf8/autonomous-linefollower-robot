@@ -9,17 +9,17 @@ class Pathfinder:
     Dijkstra-based pathfinding for grid-based navigation with dynamic replanning.
     """
     
-    def __init__(self, grid: List[List[int]], cell_width_m: float = 0.025):
+    def __init__(self, grid: List[List[int]], cell_size_m: float = 0.025):
         """
         Initialize pathfinder.
         
         Args:
             grid: 2D grid where 0 = path, 1 = obstacle
-            cell_width_m: Width of each grid cell in meters
+            cell_size_m: Width of each grid cell in meters
         """
         self.original_grid = [row[:] for row in grid]  # Keep original for reset
         self.grid = [row[:] for row in grid]  # Working copy
-        self.cell_width_m = cell_width_m
+        self.cell_size_m = cell_size_m
         
         self.height = len(grid)
         self.width = len(grid[0]) if grid else 0
@@ -135,14 +135,14 @@ class Pathfinder:
     
     def world_to_cell(self, world_x: float, world_y: float) -> Tuple[int, int]:
         """Convert world coordinates to grid cell coordinates."""
-        cell_x = int(world_x / self.cell_width_m)
-        cell_y = int(world_y / self.cell_width_m)
+        cell_x = int(world_x / self.cell_size_m)
+        cell_y = int(world_y / self.cell_size_m)
         return (cell_x, cell_y)
     
     def cell_to_world(self, cell_x: int, cell_y: int) -> Tuple[float, float]:
         """Convert grid cell coordinates to world coordinates (center of cell)."""
-        world_x = (cell_x + 0.5) * self.cell_width_m
-        world_y = (cell_y + 0.5) * self.cell_width_m
+        world_x = (cell_x + 0.5) * self.cell_size_m
+        world_y = (cell_y + 0.5) * self.cell_size_m
         return (world_x, world_y)
     
     def update_obstacle(self, cell_x: int, cell_y: int, is_obstacle: bool):
@@ -169,7 +169,7 @@ class Pathfinder:
         if not path or len(path) < 2:
             return 0.0
         
-        return (len(path) - 1) * self.cell_width_m
+        return (len(path) - 1) * self.cell_size_m
     
     def is_path_blocked(self, path: List[Tuple[int, int]]) -> Tuple[bool, Optional[Tuple[int, int]]]:
         """

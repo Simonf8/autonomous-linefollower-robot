@@ -6,6 +6,7 @@ import logging
 import threading
 from typing import Tuple, List, Optional, Dict
 from collections import deque
+from . import OmniWheelOdometry
 
 class OmniWheelOdometry:
     """Enhanced odometry system for omni-wheel robots with improved accuracy and slip compensation."""
@@ -317,16 +318,16 @@ class OmniWheelOdometry:
 class PositionTracker:
     """Enhanced position tracker with omni-wheel specific features and movement analysis."""
     
-    def __init__(self, odometry: OmniWheelOdometry, cell_width_m: float = 0.025):
+    def __init__(self, odometry: OmniWheelOdometry, cell_size_m: float = 0.025):
         """
         Initialize enhanced position tracker.
         
         Args:
             odometry: OmniWheelOdometry instance
-            cell_width_m: Grid cell width in meters
+            cell_size_m: Grid cell width in meters
         """
         self.odometry = odometry
-        self.cell_width_m = cell_width_m
+        self.cell_size_m = cell_size_m
         
         # Enhanced path tracking
         self.path_history = deque(maxlen=1500)  # Store more history
@@ -449,8 +450,8 @@ class PositionTracker:
     def get_current_cell(self) -> Tuple[int, int]:
         """Get current grid cell coordinates."""
         x, y = self.odometry.get_position()
-        cell_x = int(x / self.cell_width_m)
-        cell_y = int(y / self.cell_width_m)
+        cell_x = int(x / self.cell_size_m)
+        cell_y = int(y / self.cell_size_m)
         return (cell_x, cell_y)
     
     def get_distance_to_point(self, target_x: float, target_y: float) -> float:
@@ -460,8 +461,8 @@ class PositionTracker:
     
     def get_distance_to_cell(self, cell_x: int, cell_y: int) -> float:
         """Calculate distance to center of target cell."""
-        target_x = (cell_x + 0.5) * self.cell_width_m
-        target_y = (cell_y + 0.5) * self.cell_width_m
+        target_x = (cell_x + 0.5) * self.cell_size_m
+        target_y = (cell_y + 0.5) * self.cell_size_m
         return self.get_distance_to_point(target_x, target_y)
     
     def is_at_waypoint(self, waypoint_x: float, waypoint_y: float, threshold: float = None) -> bool:
@@ -470,16 +471,19 @@ class PositionTracker:
             threshold = self.waypoint_threshold
         return self.get_distance_to_point(waypoint_x, waypoint_y) <= threshold
     
-    def is_at_cell(self, cell_x: int, cell_y: int, threshold: float = None) -> bool:
-        """Check if robot is at a specific cell."""
-        if threshold is None:
-            threshold = self.waypoint_threshold
-        return self.get_distance_to_cell(cell_x, cell_y) <= threshold
+    def is_at_cell(self, cell_x: int, cell_y: int, tolerance_m: float = 0.03) -> bool:
+        """Check if robot is at a specific cell within a tolerance."""
+        target_x = (cell_x + 0.5) * self.cell_size_m
+        target_y = (cell_y + 0.5) * self.cell_size_m
+        
+        current_x, current_y, _ = self.odometry.get_position()
+        
+        return self.get_distance_to_point(target_x, target_y) <= tolerance_m
     
     def correct_at_waypoint(self, waypoint_cell: Tuple[int, int]):
         """Correct odometry to snap to exact waypoint coordinates."""
-        ideal_x = (waypoint_cell[0] + 0.5) * self.cell_width_m
-        ideal_y = (waypoint_cell[1] + 0.5) * self.cell_width_m
+        ideal_x = (waypoint_cell[0] + 0.5) * self.cell_size_m
+        ideal_y = (waypoint_cell[1] + 0.5) * self.cell_size_m
         
         # Get current position for error calculation
         current_x, current_y = self.odometry.get_position()
