@@ -9,7 +9,7 @@ class CameraLineDetector:
     Detects the line position from a camera frame using a bird's-eye view
     transformation and provides a smoothed output.
     """
-    def __init__(self, width, height, src_pts, dst_pts, smoothing_window=5, manual_threshold=100):
+    def __init__(self, width, height, src_pts, dst_pts, smoothing_window=5, manual_threshold=80):
         self.width = width
         self.height = height
         
@@ -24,6 +24,9 @@ class CameraLineDetector:
 
         # Manual threshold value
         self.manual_threshold = manual_threshold
+
+        # Store the latest debug image
+        self.last_debug_image = None
 
     def set_threshold(self, value: int):
         """Set the manual threshold value for line detection."""
@@ -95,9 +98,21 @@ class CameraLineDetector:
             smoothed_center_px = np.mean(self.positions_history)
             # Normalize to the range -1.0 to 1.0
             normalized_position = (smoothed_center_px - self.width / 2) / (self.width / 2)
+            
+            # Store the latest debug image before returning
+            self.last_debug_image = debug_image
             return normalized_position, confidence, debug_image
         
+        # Store the latest debug image even if no line is found
+        self.last_debug_image = debug_image
         return None, 0.0, debug_image
+
+    def get_last_detection_image(self):
+        """Returns the most recent debug image without re-running detection."""
+        if self.last_debug_image is None:
+            # Return a black screen if no detection has occurred yet
+            return np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        return self.last_debug_image
 
     def _create_navigation_overlay(self, binary_bev, center_px, confidence):
         """

@@ -31,7 +31,7 @@ FEATURES = {
     'USE_ESP32_LINE_SENSOR': False,          # Use ESP32 hardware sensor for line following
     'POSITION_CORRECTION_ENABLED': True,    # Enable waypoint position corrections
     'PERFORMANCE_LOGGING_ENABLED': True,    # Enable detailed performance logging
-    'DEBUG_VISUALIZATION_ENABLED': True,    # Enable debug visualization windows - ENABLED to see camera feed
+    'DEBUG_VISUALIZATION_ENABLED': False,   # Enable debug visualization windows - DISABLED for headless operation
     'SMOOTH_CORNERING_ENABLED': True,       # Enable smooth cornering like normal wheels
     'ADAPTIVE_SPEED_ENABLED': True,         # Enable speed adaptation based on conditions
 }
@@ -39,7 +39,7 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-ESP32_IP = "192.168.128.245"
+ESP32_IP = "192.168.2.36"
 CELL_SIZE_M = 0.11
 BASE_SPEED = 60
 TURN_SPEED = 50
@@ -84,6 +84,9 @@ class ESP32Bridge:
         self.last_command = None
         self.last_send_time = 0.0
         
+        # For simulation when not connected
+        self.simulated_motor_speeds = [0, 0, 0, 0]
+        
     def start(self):
         """Start communication with ESP32."""
         return self.connect()
@@ -97,9 +100,23 @@ class ESP32Bridge:
                 pass
             self.socket = None
         
+        # Add a small delay before reconnecting to give the server time to reset
+        if self.connection_attempts > 0:
+            time.sleep(1)
+
         try:
-            import socket
             self.socket = socket.create_connection((self.ip, self.port), timeout=3)
+            
+            # Enable TCP keep-alives for better connection stability
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # These options might not be available on all OS, but are on Linux
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 3)
+            if hasattr(socket, "TCP_KEEPCNT"):
+                self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
+
             self.socket.settimeout(0.5)
             self.connected = True
             self.connection_attempts = 0
@@ -115,6 +132,8 @@ class ESP32Bridge:
         
     def send_motor_speeds(self, fl: int, fr: int, bl: int, br: int):
         """Send motor speeds to ESP32."""
+        self.simulated_motor_speeds = [fl, fr, bl, br] # Always store for simulation
+        
         if not self.connected and not self.connect():
             return False
             
@@ -175,6 +194,10 @@ class ESP32Bridge:
             self.socket = None
             return False
             
+    def get_simulated_motor_speeds(self) -> List[int]:
+        """Returns the last commanded motor speeds for simulation."""
+        return self.simulated_motor_speeds
+            
     def get_encoder_ticks(self) -> List[int]:
         """Get encoder ticks from ESP32."""
         self._receive_data()  # Try to get fresh data
@@ -211,9 +234,20 @@ class ESP32Bridge:
                 for line in data_string.split('\n'):
                     if line:
                         self.update_sensor_data(line)
-        except Exception:
-            # No data available or connection error - that's okay for non-blocking
+            # If recv returns empty bytes, the peer has closed the connection
+            elif len(data) == 0:
+                print("ESP32 closed the connection.")
+                self.connected = False
+                self.socket.close()
+                self.socket = None
+        except (socket.timeout, BlockingIOError):
+            # This is expected in non-blocking mode when no data is available
             pass
+        except Exception as e:
+            # Any other exception likely means the connection is dead
+            print(f"Socket receive error: {e}")
+            self.connected = False
+            self.socket = None
     
     def update_sensor_data(self, data_string: str):
         """
@@ -296,6 +330,10 @@ class RobotController:
         self.last_known_line_position = 0.0
         self.camera_line_position = None
         self.recovery_start_time = None
+
+        # For simulation
+        self.simulated_encoder_ticks = [0, 0, 0, 0]
+        self.last_sim_update_time = time.time()
     
     def set_line_detector_threshold(self, value: int):
         """Sets the threshold for the camera line detector."""
@@ -351,7 +389,12 @@ class RobotController:
         try:
             while True:
                 # Update position tracking
-                encoder_ticks = self.esp32_bridge.get_encoder_ticks()
+                if self.esp32_bridge.connected:
+                    encoder_ticks = self.esp32_bridge.get_encoder_ticks()
+                else:
+                    # Run simulation if not connected
+                    encoder_ticks = self._simulate_encoders()
+
                 self.position_tracker.update(encoder_ticks)
                 
                 # Update ESP32 sensor data (this would normally come from network)
@@ -371,6 +414,36 @@ class RobotController:
         finally:
             self.stop()
     
+    def _simulate_encoders(self) -> List[int]:
+        """
+        Simulate encoder ticks based on last motor commands.
+        This allows the robot to move in the simulation.
+        """
+        current_time = time.time()
+        dt = current_time - self.last_sim_update_time
+        self.last_sim_update_time = current_time
+
+        # Constants for simulation
+        # This is an approximation of how speed commands (0-100) relate to wheel velocity
+        MAX_SPEED_MPS = 0.5 # Estimated max speed in meters/sec at speed 100
+        
+        # Get last commanded speeds
+        speeds = self.esp32_bridge.get_simulated_motor_speeds()
+        
+        # Calculate distance moved by each wheel in dt
+        wheel_velocities = [(s / 100.0) * MAX_SPEED_MPS for s in speeds]
+        wheel_distances = [v * dt for v in wheel_velocities]
+        
+        # Convert distances to ticks
+        dist_per_pulse = self.position_tracker.odometry.DISTANCE_PER_PULSE
+        delta_ticks = [d / dist_per_pulse for d in wheel_distances]
+        
+        # Update simulated total ticks
+        for i in range(4):
+            self.simulated_encoder_ticks[i] += delta_ticks[i]
+            
+        return [int(t) for t in self.simulated_encoder_ticks]
+
     def _process_vision(self):
         """Process camera frame for object detection and path analysis."""
         if not FEATURES['VISION_SYSTEM_ENABLED'] or self.camera is None:
@@ -378,6 +451,9 @@ class RobotController:
             
         ret, frame = self.camera.read()
         if ret:
+            # Fix for upside-down camera: flip the frame 180 degrees
+            frame = cv2.flip(frame, -1)
+
             self.latest_frame = frame.copy()
             
             # Object detection
@@ -395,30 +471,36 @@ class RobotController:
                 line_pos, confidence, navigation_img = self.camera_line_detector.detect(frame)
                 self.camera_line_position = line_pos
                 
+                # Log line detection status instead of showing windows
+                if FEATURES['PERFORMANCE_LOGGING_ENABLED'] and line_pos is not None:
+                    print(f"Line detected: pos={line_pos:.2f}, confidence={confidence:.2f}")
+                
                 if FEATURES['DEBUG_VISUALIZATION_ENABLED']:
-                    # Show enhanced navigation view
-                    cv2.imshow('Navigation View', navigation_img)
-                    
-                    # Show original camera view with line position overlay
-                    display_frame = frame.copy()
-                    if line_pos is not None:
-                        # Draw line position on original frame
-                        line_px = int((line_pos * 320) + 320)  # Convert normalized to pixel
-                        cv2.line(display_frame, (line_px, 0), (line_px, 480), (0, 255, 0), 3)
+                    try:
+                        # Show enhanced navigation view
+                        cv2.imshow('Navigation View', navigation_img)
                         
-                        # Add status text
-                        status_text = f"Line Pos: {line_pos:.2f} | Conf: {confidence:.2f}"
-                        cv2.putText(display_frame, status_text, (10, 30), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    else:
-                        cv2.putText(display_frame, "NO LINE DETECTED", (10, 30), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    
-                    cv2.imshow('Robot Camera', display_frame)
-
-            # Debug visualization
-            if FEATURES['DEBUG_VISUALIZATION_ENABLED']:
-                cv2.waitKey(1)
+                        # Show original camera view with line position overlay
+                        display_frame = frame.copy()
+                        if line_pos is not None:
+                            # Draw line position on original frame
+                            line_px = int((line_pos * 320) + 320)  # Convert normalized to pixel
+                            cv2.line(display_frame, (line_px, 0), (line_px, 480), (0, 255, 0), 3)
+                            
+                            # Add status text
+                            status_text = f"Line Pos: {line_pos:.2f} | Conf: {confidence:.2f}"
+                            cv2.putText(display_frame, status_text, (10, 30), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        else:
+                            cv2.putText(display_frame, "NO LINE DETECTED", (10, 30), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        
+                        cv2.imshow('Robot Camera', display_frame)
+                        cv2.waitKey(1)
+                    except Exception as e:
+                        print(f"Warning: Could not display debug windows (headless mode?): {e}")
+                        # Disable debug visualization to prevent further errors
+                        FEATURES['DEBUG_VISUALIZATION_ENABLED'] = False
     
     def _handle_detections(self, detections: dict):
         """Handle object detection results."""
@@ -635,7 +717,12 @@ class RobotController:
         if self.camera:
             self.camera.release()
         
-        cv2.destroyAllWindows()
+        # Only destroy windows if we were using debug visualization
+        if FEATURES['DEBUG_VISUALIZATION_ENABLED']:
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass  # Ignore errors when running headless
 
     def _recover_line(self):
         """Try to find the line again after losing it."""
@@ -830,26 +917,34 @@ def main():
     @app.route('/video_feed')
     def video_feed():
         """Stream camera feed with navigation overlay."""
-        response = Response(generate_camera_frames(), 
-                           mimetype='multipart/x-mixed-replace; boundary=frame')
-        # Add headers to prevent caching and ensure proper streaming
-        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-        response.headers['Pragma'] = 'no-cache'
-        response.headers['Expires'] = '0'
-        response.headers['Connection'] = 'close'
-        return response
+        return Response(generate_camera_frames(), 
+                        mimetype='multipart/x-mixed-replace; boundary=frame')
     
     def generate_camera_frames():
         """Generate camera frames for streaming."""
         while True:
-            try:
-                if robot_controller.latest_frame is not None:
+            time.sleep(0.033) # ~30 FPS
+            if robot_controller.latest_frame is None:
+                # No frame available, send a black frame to keep the stream alive
+                black_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(black_frame, "WAITING FOR CAMERA...", (150, 240), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                ret, buffer = cv2.imencode('.jpg', black_frame)
+                if not ret:
+                    continue
+                frame_bytes = buffer.tobytes()
+            else:
+                try:
                     # Get the latest camera frame
                     frame = robot_controller.latest_frame.copy()
                     
                     # Add navigation overlay if line detection is active
                     if not FEATURES['USE_ESP32_LINE_SENSOR'] and robot_controller.camera_line_detector:
-                        line_pos, confidence, navigation_img = robot_controller.camera_line_detector.detect(frame)
+                        # Use the already detected line position if available
+                        line_pos = robot_controller.camera_line_position
+                        
+                        # Get the latest navigation image without re-running detection
+                        navigation_img = robot_controller.camera_line_detector.get_last_detection_image()
                         
                         # Create a side-by-side view: original camera + navigation view
                         # Resize navigation view to match camera frame height
@@ -866,9 +961,9 @@ def main():
                         
                         # Add line position info on camera view
                         if line_pos is not None:
-                            line_px = int((line_pos * 320) + 320)
+                            line_px = int((line_pos * (frame.shape[1] / 2)) + (frame.shape[1] / 2))
                             cv2.line(combined_frame, (line_px, 0), (line_px, frame.shape[0]), (0, 255, 0), 3)
-                            status_text = f"Line: {line_pos:.2f} | Conf: {confidence:.2f}"
+                            status_text = f"Line: {line_pos:.2f}"
                             cv2.putText(combined_frame, status_text, (10, 60), 
                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                         else:
@@ -881,38 +976,28 @@ def main():
                         display_frame = frame
                     
                     # Encode frame as JPEG with optimized settings for streaming
-                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, 75,  # Good quality vs size balance
-                                   cv2.IMWRITE_JPEG_OPTIMIZE, 1]    # Optimize for smaller file size
+                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70, cv2.IMWRITE_JPEG_OPTIMIZE, 1]
                     ret, buffer = cv2.imencode('.jpg', display_frame, encode_params)
                     
-                    if ret:
-                        frame_bytes = buffer.tobytes()
-                        yield (b'--frame\r\n'
-                               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-                else:
-                    # No frame available, send a black frame to keep the stream alive
-                    black_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                    cv2.putText(black_frame, "WAITING FOR CAMERA...", (150, 240), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-                    ret, buffer = cv2.imencode('.jpg', black_frame)
-                    if ret:
-                        frame_bytes = buffer.tobytes()
-                        yield (b'--frame\r\n'
-                               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-                
-            except Exception as e:
-                print(f"Error in video stream: {e}")
-                # Send error frame
-                error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                cv2.putText(error_frame, "VIDEO ERROR", (250, 240), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                ret, buffer = cv2.imencode('.jpg', error_frame)
-                if ret:
+                    if not ret:
+                        continue
                     frame_bytes = buffer.tobytes()
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-            
-            time.sleep(0.033)  # ~30 FPS
+
+                except Exception as e:
+                    print(f"Error generating video frame: {e}")
+                    # Send error frame
+                    error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(error_frame, "VIDEO ERROR", (250, 240), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    ret, buffer = cv2.imencode('.jpg', error_frame)
+                    if not ret:
+                        continue
+                    frame_bytes = buffer.tobytes()
+
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n'
+                   b'Content-Length: ' + str(len(frame_bytes)).encode() + b'\r\n\r\n' + 
+                   frame_bytes + b'\r\n')
 
     print("Starting Flask web server...")
     app.run(host='0.0.0.0', port=5000)

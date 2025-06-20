@@ -48,10 +48,10 @@ except ImportError:
     print("Text-to-speech not available")
 
 # Configuration
-ESP32_IP = '192.168.128.117'  
+ESP32_IP = '192.168.2.36'  
 ESP32_PORT = 1234
-CAMERA_WIDTH, CAMERA_HEIGHT = 730, 420
-CAMERA_FPS = 10  # Increased for better responsiveness
+CAMERA_WIDTH, CAMERA_HEIGHT = 120, 120
+CAMERA_FPS = 5  # Increased for better responsiveness
 
 # Enhanced line detection parameters
 BLACK_THRESHOLD = 80

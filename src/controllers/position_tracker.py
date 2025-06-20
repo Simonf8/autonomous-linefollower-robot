@@ -470,13 +470,14 @@ class PositionTracker:
         return self.get_distance_to_point(waypoint_x, waypoint_y) <= threshold
     
     def is_at_cell(self, cell_x: int, cell_y: int, tolerance_m: float = 0.03) -> bool:
-        """Check if robot is at a specific cell within a tolerance."""
-        target_x = (cell_x + 0.5) * self.cell_size_m
-        target_y = (cell_y + 0.5) * self.cell_size_m
+        """Check if robot is within a certain cell."""
+        waypoint_x = (cell_x + 0.5) * self.cell_size_m
+        waypoint_y = (cell_y + 0.5) * self.cell_size_m
         
-        current_x, current_y, _ = self.odometry.get_position()
+        current_x, current_y, _ = self.odometry.get_pose()
         
-        return self.get_distance_to_point(target_x, target_y) <= tolerance_m
+        distance = math.sqrt((current_x - waypoint_x)**2 + (current_y - waypoint_y)**2)
+        return distance <= tolerance_m
     
     def correct_at_waypoint(self, waypoint_cell: Tuple[int, int]):
         """Correct odometry to snap to exact waypoint coordinates."""
