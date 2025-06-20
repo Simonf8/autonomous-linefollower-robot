@@ -6,8 +6,6 @@ import logging
 import threading
 from typing import Tuple, List, Optional, Dict
 from collections import deque
-from . import OmniWheelOdometry
-
 class OmniWheelOdometry:
     """Enhanced odometry system for omni-wheel robots with improved accuracy and slip compensation."""
     

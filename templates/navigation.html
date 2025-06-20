@@ -101,7 +101,7 @@
             </div>
 
             <!-- Sensor Array -->
-            <div class.="panel sensor-panel">
+            <div class="panel sensor-panel">
                 <div class="panel-header">
                     <h2>SENSOR ARRAY</h2>
                     <div class="panel-indicator"></div>
@@ -289,6 +289,34 @@
         // Initial calls
         updateData();
         updateTimestamp();
+        
+        // Setup video feed with proper streaming support
+        function setupVideoFeed() {
+            const cameraFeed = document.getElementById('camera-feed');
+            
+            // Add timestamp to prevent caching and ensure continuous streaming
+            function refreshVideoFeed() {
+                const timestamp = new Date().getTime();
+                cameraFeed.src = `/video_feed?t=${timestamp}`;
+            }
+            
+            // Handle video feed errors by attempting to reconnect
+            cameraFeed.addEventListener('error', function() {
+                console.log('Video feed error, attempting to reconnect...');
+                setTimeout(refreshVideoFeed, 1000); // Try again after 1 second
+            });
+            
+            // Handle successful load
+            cameraFeed.addEventListener('load', function() {
+                console.log('Video feed connected successfully');
+            });
+            
+            // Initial load
+            refreshVideoFeed();
+        }
+        
+        // Setup video feed when page loads
+        setupVideoFeed();
     </script>
 </body>
 </html> 

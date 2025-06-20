@@ -9,7 +9,7 @@ import socket
 import threading
 import base64
 from typing import List, Tuple, Optional
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, Response
 
 # Import our clean modules
 from object_detection import ObjectDetector, PathShapeDetector
@@ -24,14 +24,14 @@ from camera_line_detector import CameraLineDetector
 # ================================
 # Enable/disable features for easy testing and debugging
 FEATURES = {
-    'OBJECT_DETECTION_ENABLED': True,       # Enable YOLO object detection
+    'OBJECT_DETECTION_ENABLED': False,      # Enable YOLO object detection - DISABLED for performance
     'PATH_SHAPE_DETECTION_ENABLED': True,   # Enable path shape analysis
     'OBSTACLE_AVOIDANCE_ENABLED': False,     # Enable obstacle avoidance behavior
-    'VISION_SYSTEM_ENABLED': False,          # Enable camera and vision processing
+    'VISION_SYSTEM_ENABLED': True,          # Enable camera and vision processing - ENABLED for camera line following
     'USE_ESP32_LINE_SENSOR': False,          # Use ESP32 hardware sensor for line following
     'POSITION_CORRECTION_ENABLED': True,    # Enable waypoint position corrections
     'PERFORMANCE_LOGGING_ENABLED': True,    # Enable detailed performance logging
-    'DEBUG_VISUALIZATION_ENABLED': False,   # Enable debug visualization windows
+    'DEBUG_VISUALIZATION_ENABLED': True,    # Enable debug visualization windows - ENABLED to see camera feed
     'SMOOTH_CORNERING_ENABLED': True,       # Enable smooth cornering like normal wheels
     'ADAPTIVE_SPEED_ENABLED': True,         # Enable speed adaptation based on conditions
 }
@@ -392,19 +392,32 @@ class RobotController:
             
             # Camera-based line detection
             if not FEATURES['USE_ESP32_LINE_SENSOR'] and self.camera_line_detector:
-                line_pos, confidence, binary_img = self.camera_line_detector.detect(frame)
+                line_pos, confidence, navigation_img = self.camera_line_detector.detect(frame)
                 self.camera_line_position = line_pos
+                
                 if FEATURES['DEBUG_VISUALIZATION_ENABLED']:
-                    # Add visualization for binary image to see what the robot sees
-                    debug_frame = cv2.cvtColor(binary_img, cv2.COLOR_GRAY2BGR)
+                    # Show enhanced navigation view
+                    cv2.imshow('Navigation View', navigation_img)
+                    
+                    # Show original camera view with line position overlay
+                    display_frame = frame.copy()
                     if line_pos is not None:
-                         line_px = int((line_pos * 320) + 320)
-                         cv2.line(debug_frame, (line_px, 0), (line_px, 480), (0, 255, 0), 2)
-                    cv2.imshow('Line Detection', debug_frame)
+                        # Draw line position on original frame
+                        line_px = int((line_pos * 320) + 320)  # Convert normalized to pixel
+                        cv2.line(display_frame, (line_px, 0), (line_px, 480), (0, 255, 0), 3)
+                        
+                        # Add status text
+                        status_text = f"Line Pos: {line_pos:.2f} | Conf: {confidence:.2f}"
+                        cv2.putText(display_frame, status_text, (10, 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    else:
+                        cv2.putText(display_frame, "NO LINE DETECTED", (10, 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    
+                    cv2.imshow('Robot Camera', display_frame)
 
             # Debug visualization
             if FEATURES['DEBUG_VISUALIZATION_ENABLED']:
-                cv2.imshow('Robot Vision', frame)
                 cv2.waitKey(1)
     
     def _handle_detections(self, detections: dict):
@@ -816,7 +829,90 @@ def main():
 
     @app.route('/video_feed')
     def video_feed():
-        return "", 204 # No content
+        """Stream camera feed with navigation overlay."""
+        response = Response(generate_camera_frames(), 
+                           mimetype='multipart/x-mixed-replace; boundary=frame')
+        # Add headers to prevent caching and ensure proper streaming
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        response.headers['Connection'] = 'close'
+        return response
+    
+    def generate_camera_frames():
+        """Generate camera frames for streaming."""
+        while True:
+            try:
+                if robot_controller.latest_frame is not None:
+                    # Get the latest camera frame
+                    frame = robot_controller.latest_frame.copy()
+                    
+                    # Add navigation overlay if line detection is active
+                    if not FEATURES['USE_ESP32_LINE_SENSOR'] and robot_controller.camera_line_detector:
+                        line_pos, confidence, navigation_img = robot_controller.camera_line_detector.detect(frame)
+                        
+                        # Create a side-by-side view: original camera + navigation view
+                        # Resize navigation view to match camera frame height
+                        nav_resized = cv2.resize(navigation_img, (frame.shape[1], frame.shape[0]))
+                        
+                        # Combine horizontally
+                        combined_frame = np.hstack([frame, nav_resized])
+                        
+                        # Add labels
+                        cv2.putText(combined_frame, "CAMERA VIEW", (10, 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                        cv2.putText(combined_frame, "NAVIGATION VIEW", (frame.shape[1] + 10, 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                        
+                        # Add line position info on camera view
+                        if line_pos is not None:
+                            line_px = int((line_pos * 320) + 320)
+                            cv2.line(combined_frame, (line_px, 0), (line_px, frame.shape[0]), (0, 255, 0), 3)
+                            status_text = f"Line: {line_pos:.2f} | Conf: {confidence:.2f}"
+                            cv2.putText(combined_frame, status_text, (10, 60), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                        else:
+                            cv2.putText(combined_frame, "NO LINE DETECTED", (10, 60), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                        
+                        display_frame = combined_frame
+                    else:
+                        # Just show camera if line detection is disabled
+                        display_frame = frame
+                    
+                    # Encode frame as JPEG with optimized settings for streaming
+                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, 75,  # Good quality vs size balance
+                                   cv2.IMWRITE_JPEG_OPTIMIZE, 1]    # Optimize for smaller file size
+                    ret, buffer = cv2.imencode('.jpg', display_frame, encode_params)
+                    
+                    if ret:
+                        frame_bytes = buffer.tobytes()
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                else:
+                    # No frame available, send a black frame to keep the stream alive
+                    black_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(black_frame, "WAITING FOR CAMERA...", (150, 240), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    ret, buffer = cv2.imencode('.jpg', black_frame)
+                    if ret:
+                        frame_bytes = buffer.tobytes()
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                
+            except Exception as e:
+                print(f"Error in video stream: {e}")
+                # Send error frame
+                error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(error_frame, "VIDEO ERROR", (250, 240), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                ret, buffer = cv2.imencode('.jpg', error_frame)
+                if ret:
+                    frame_bytes = buffer.tobytes()
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            
+            time.sleep(0.033)  # ~30 FPS
 
     print("Starting Flask web server...")
     app.run(host='0.0.0.0', port=5000)
