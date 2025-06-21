@@ -29,18 +29,23 @@
         <!-- Main Grid Layout -->
         <div class="dashboard-grid">
             
-            <!-- Live Camera Feed -->
-            <div class="panel camera-panel">
+            <!-- Navigation Map -->
+            <div class="panel map-panel">
                 <div class="panel-header">
-                    <h2>VISUAL CORTEX</h2>
+                    <h2>NAVIGATION MATRIX</h2>
                     <div class="panel-indicator"></div>
                 </div>
-                <div class="camera-container">
-                    <img id="camera-feed" src="{{ url_for('video_feed') }}" alt="Live Camera Feed" class="camera-feed">
-                    <div class="camera-overlay">
-                        <div class="crosshair"></div>
-                        <div class="scan-line"></div>
+                <div class="map-container">
+                    <img id="map-image" class="map-image" src="{{ url_for('grid_feed') }}" alt="Navigation Map">
+                    <div class="map-overlay">
+                        <div class="scan-grid"></div>
                     </div>
+                </div>
+                <div class="map-legend">
+                    <div class="legend-item"><span class="legend-color planned-path"></span><span>PLANNED PATH</span></div>
+                    <div class="legend-item"><span class="legend-color robot-color"></span><span>ROBOT</span></div>
+                    <div class="legend-item"><span class.="legend-color start-color"></span><span>START</span></div>
+                    <div class="legend-item"><span class="legend-color end-color"></span><span>END</span></div>
                 </div>
             </div>
 
@@ -78,28 +83,6 @@
                 </div>
             </div>
 
-            <!-- Mission Control -->
-            <div class="panel mission-panel">
-                <div class="panel-header">
-                    <h2>MISSION CONTROL</h2>
-                    <div class="panel-indicator"></div>
-                </div>
-                <div class="mission-info">
-                    <div class="mission-item">
-                        <div class="mission-label">PICKUP LOCATIONS</div>
-                        <div class="location-grid" id="pickup-locations">
-                            <!-- Pickup locations will be populated here -->
-                        </div>
-                    </div>
-                    <div class="mission-item">
-                        <div class="mission-label">DROPOFF LOCATIONS</div>
-                        <div class="location-grid" id="dropoff-locations">
-                            <!-- Dropoff locations will be populated here -->
-                        </div>
-                    </div>
-                </div>
-            </div>
-
             <!-- Sensor Array -->
             <div class="panel sensor-panel">
                 <div class="panel-header">
@@ -110,38 +93,7 @@
                     <!-- Sensors will be dynamically added here -->
                 </div>
                 <div class="sensor-pattern">
-                    <span>Pattern: </span><span id="sensor-pattern" class="cyber-text">00000</span>
-                </div>
-                
-                <!-- Line Detector Threshold Slider -->
-                <div id="threshold-control-container" class="threshold-control" style="display: none;">
-                    <div class="threshold-label">
-                        <span>THRESHOLD</span>
-                        <span id="threshold-value" class="cyber-text">100</span>
-                    </div>
-                    <input type="range" id="threshold-slider" min="0" max="255" value="100" class="cyber-slider">
-                </div>
-            </div>
-
-            <!-- Navigation Map -->
-            <div class="panel map-panel">
-                <div class="panel-header">
-                    <h2>NAVIGATION MATRIX</h2>
-                    <div class="panel-indicator"></div>
-                </div>
-                <div class="map-container">
-                    <img id="map-image" class="map-image" src="" alt="Navigation Map">
-                    <div class="map-overlay">
-                        <div class="scan-grid"></div>
-                    </div>
-                </div>
-                <div class="map-legend">
-                    <div class="legend-item"><span class="legend-color robot-trail"></span><span>ROBOT TRAIL</span></div>
-                    <div class="legend-item"><span class="legend-color planned-path"></span><span>PLANNED PATH</span></div>
-                    <div class="legend-item"><span class="legend-color robot-color"></span><span>ROBOT</span></div>
-                    <div class="legend-item"><span class="legend-color pickup-color"></span><span>PICKUP BOXES</span></div>
-                    <div class="legend-item"><span class="legend-color dropoff-color"></span><span>DROPOFF ZONES</span></div>
-                    <div class="legend-item"><span class="legend-color goal-color"></span><span>CURRENT GOAL</span></div>
+                    <span>Pattern: </span><span id="sensor-pattern" class="cyber-text">000</span>
                 </div>
             </div>
         </div>
@@ -169,8 +121,8 @@
                     return response.json();
                 })
                 .then(data => {
-                    document.getElementById('robot-position').textContent = `(${data.position.x.toFixed(2)}, ${data.position.y.toFixed(2)})`;
-                    document.getElementById('robot-heading').textContent = `${(data.position.heading * 180 / Math.PI).toFixed(1)}°`;
+                    document.getElementById('robot-position').textContent = `(${data.x.toFixed(2)}, ${data.y.toFixed(2)})`;
+                    document.getElementById('robot-heading').textContent = `${data.heading.toFixed(1)}°`;
                     document.getElementById('robot-state').textContent = data.state;
                     
                     // Update package status
@@ -183,65 +135,30 @@
 
                     // Update sensor display
                     const sensorContainer = document.getElementById('sensor-array');
-                    const sensorLabels = ['L2', 'L1', 'C', 'R1', 'R2'];
+                    const sensorLabels = ['L', 'C', 'R'];
                     let sensorPattern = "";
-                    sensorContainer.innerHTML = data.sensors.map((sensor, index) => {
-                        const status = sensor ? 'ACTIVE' : 'INACTIVE';
-                        const className = sensor ? 'sensor-active' : 'sensor-inactive';
-                        sensorPattern += sensor ? '1' : '0';
-                        return `<div class="sensor-item ${className}">
-                                    <span class="sensor-label">${sensorLabels[index]}</span>
-                                </div>`;
-                    }).join('');
-                    document.getElementById('sensor-pattern').textContent = sensorPattern;
                     
-                    // Update pickup locations
-                    if (data.pickup_cells) {
-                        const pickupContainer = document.getElementById('pickup-locations');
-                        pickupContainer.innerHTML = data.pickup_cells.map((cell, index) => {
-                            return `<div class="location-item">
-                                        <span class="location-id">P${index + 1}</span>
-                                        <span class="location-coords">(${cell[0]}, ${cell[1]})</span>
+                    if (data.line_sensors) {
+                        sensorContainer.innerHTML = data.line_sensors.map((sensor, index) => {
+                            // In ESP32 code, 0 means line detected (dark), 1000 means no line (bright)
+                            const isActive = sensor < 500; 
+                            const className = isActive ? 'sensor-active' : 'sensor-inactive';
+                            sensorPattern += isActive ? '1' : '0';
+                            return `<div class="sensor-item ${className}">
+                                        <span class="sensor-label">${sensorLabels[index]}</span>
                                     </div>`;
                         }).join('');
-                    }
-                    
-                    // Update dropoff locations
-                    if (data.dropoff_cells) {
-                        const dropoffContainer = document.getElementById('dropoff-locations');
-                        dropoffContainer.innerHTML = data.dropoff_cells.map((cell, index) => {
-                            return `<div class="location-item">
-                                        <span class="location-id">D${index + 1}</span>
-                                        <span class="location-coords">(${cell[0]}, ${cell[1]})</span>
-                                    </div>`;
-                        }).join('');
-                    }
-                    
-                    if (data.grid_image) {
-                        document.getElementById('map-image').src = 'data:image/png;base64,' + data.grid_image;
-                    }
-
-                    // Update and show/hide the threshold slider
-                    const thresholdContainer = document.getElementById('threshold-control-container');
-                    if (data.line_threshold > 0) {
-                        thresholdContainer.style.display = 'block';
-                        document.getElementById('threshold-value').textContent = data.line_threshold;
-                        // Only update slider value if the user is not currently dragging it
-                        if (!isDraggingSlider) {
-                            document.getElementById('threshold-slider').value = data.line_threshold;
-                        }
-                    } else {
-                        thresholdContainer.style.display = 'none';
+                        document.getElementById('sensor-pattern').textContent = sensorPattern;
                     }
 
                     const statusIndicator = document.getElementById('status-indicator');
                     const statusText = document.getElementById('status-text');
-                    if (data.state === 'MISSION_COMPLETE') {
+                    if (data.state === 'mission_complete') {
                         statusIndicator.className = 'status-indicator goal';
                         statusText.textContent = 'MISSION COMPLETE';
-                    } else if (data.state === 'NO_PATH') {
+                    } else if (data.state === 'error') {
                         statusIndicator.className = 'status-indicator error';
-                        statusText.textContent = 'NO PATH';
+                        statusText.textContent = 'ERROR';
                     } else {
                         statusIndicator.className = 'status-indicator online';
                         statusText.textContent = 'SYSTEM ONLINE';
@@ -249,52 +166,19 @@
 
                 })
                 .catch(error => {
-                    console.error('Error fetching robot data:', error);
-                    const statusIndicator = document.getElementById('status-indicator');
-                    const statusText = document.getElementById('status-text');
-                    statusIndicator.className = 'status-indicator offline';
-                    statusText.textContent = 'CONNECTION LOST';
+                    console.error('Error fetching data:', error);
+                    document.getElementById('status-indicator').className = 'status-indicator error';
+                    document.getElementById('status-text').textContent = 'CONNECTION LOST';
                 });
         }
-
-        // Global flag to track slider interaction
-        let isDraggingSlider = false;
         
-        document.addEventListener('DOMContentLoaded', function() {
-            // Initial data load
+        // Initial setup and periodic updates
+        document.addEventListener("DOMContentLoaded", function() {
             updateData();
-            updateTimestamp();
-
-            // Set intervals for updates
-            setInterval(updateData, 500); // Poll for robot data every 500ms
-            setInterval(updateTimestamp, 1000); // Update clock every second
-
-            // Handle threshold slider input
-            const thresholdSlider = document.getElementById('threshold-slider');
-            thresholdSlider.addEventListener('input', function() {
-                document.getElementById('threshold-value').textContent = this.value;
-            });
-
-            thresholdSlider.addEventListener('mousedown', () => isDraggingSlider = true);
-            thresholdSlider.addEventListener('mouseup', () => isDraggingSlider = false);
-            thresholdSlider.addEventListener('touchend', () => isDraggingSlider = false);
-
-            thresholdSlider.addEventListener('change', function() {
-                const threshold = this.value;
-                fetch('/api/set_threshold', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ threshold: parseInt(threshold) })
-                }).then(response => response.json())
-                  .then(data => {
-                      if (data.status !== 'success') {
-                          console.error('Failed to set threshold:', data.message);
-                      }
-                  });
-            });
+            setInterval(updateData, 1000); // Update every second
+            setInterval(updateTimestamp, 1000);
         });
+
     </script>
 </body>
 </html> 
