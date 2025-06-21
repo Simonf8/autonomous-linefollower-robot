@@ -1,0 +1,39 @@
+==================================================
+ROBOT FEATURE CONFIGURATION
+==================================================
+OBJECT_DETECTION_ENABLED       : DISABLED
+PATH_SHAPE_DETECTION_ENABLED   : DISABLED
+OBSTACLE_AVOIDANCE_ENABLED     : DISABLED
+VISION_SYSTEM_ENABLED          : DISABLED
+USE_ESP32_LINE_SENSOR          : ENABLED
+POSITION_CORRECTION_ENABLED    : ENABLED
+PERFORMANCE_LOGGING_ENABLED    : ENABLED
+DEBUG_VISUALIZATION_ENABLED    : DISABLED
+SMOOTH_CORNERING_ENABLED       : ENABLED
+ADAPTIVE_SPEED_ENABLED         : ENABLED
+==================================================
+
+Starting Flask web server...
+ * Serving Flask app 'main'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://192.168.2.20:5000
+Press CTRL+C to quit
+127.0.0.1 - - [21/Jun/2025 12:23:45] "GET /start_mission HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:46] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:47] "GET /static/styles.css HTTP/1.1" 304 -
+127.0.0.1 - - [21/Jun/2025 12:23:47] "GET /grid_feed HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:47] "GET /api/robot_data?t=1750505027153 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:48] "GET /api/robot_data?t=1750505028153 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:49] "GET /api/robot_data?t=1750505029209 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:50] "GET /api/robot_data?t=1750505030211 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:51] "GET /api/robot_data?t=1750505031212 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:52] "GET /api/robot_data?t=1750505032251 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:53] "GET /api/robot_data?t=1750505033252 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:54] "GET /api/robot_data?t=1750505034256 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:55] "GET /api/robot_data?t=1750505035257 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:56] "GET /api/robot_data?t=1750505036257 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:57] "GET /api/robot_data?t=1750505037257 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:23:58] "GET /api/robot_data?t=1750505038352 HTTP/1.1" 200 -

@@ -67,35 +67,19 @@ class Pathfinder:
     
     def get_neighbors(self, cell: Tuple[int, int]) -> List[Tuple[Tuple[int, int], int]]:
         """
-        Get valid neighboring cells, handling both solid and dashed lines.
+        Get valid neighboring cells (adjacent cells only for proper corridor following).
         Returns a list of tuples, where each tuple contains the neighbor cell and the cost to move to it.
         """
         x, y = cell
         neighbors = []
         
-        # Check for neighbors 1 unit away (for solid paths) and 2 units away (for dashed paths).
+        # Check only adjacent cells (1 unit away) to ensure proper corridor following
         # Format: (dx, dy, cost)
-        for dx, dy, cost in [(0, -1, 1), (0, 1, 1), (-1, 0, 1), (1, 0, 1),
-                             (0, -2, 2), (0, 2, 2), (-2, 0, 2), (2, 0, 2)]:
+        for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
             nx, ny = x + dx, y + dy
             
-            # For a 2-step move, ensure the intermediate cell is not a path.
-            # This prevents jumping over valid intersections on solid paths.
-            if cost == 2:
-                ix, iy = x + dx // 2, y + dy // 2
-                if self.is_valid_cell(ix, iy):
-                    continue # Don't jump over a valid path cell
-
             if self.is_valid_cell(nx, ny):
-                # Avoid adding duplicates. If a 1-step neighbor was already found,
-                # a 2-step check in the same direction is redundant or invalid.
-                is_duplicate = False
-                for neighbor_cell, _ in neighbors:
-                    if neighbor_cell == (nx, ny):
-                        is_duplicate = True
-                        break
-                if not is_duplicate:
-                    neighbors.append(((nx, ny), cost))
+                neighbors.append(((nx, ny), 1))
         
         return neighbors
     
