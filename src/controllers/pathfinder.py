@@ -50,6 +50,10 @@ class Pathfinder:
         # Flip horizontally to match coordinate system
         return [row[::-1] for row in maze]
     
+    def get_grid(self) -> List[List[int]]:
+        """Return the current grid."""
+        return self.grid
+    
     def is_valid_cell(self, x: int, y: int) -> bool:
         """Check if cell coordinates are valid and passable."""
         return (0 <= x < self.width and 

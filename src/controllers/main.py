@@ -16,7 +16,7 @@ from object_detection import ObjectDetector, PathShapeDetector
 from pathfinder import Pathfinder
 from box import BoxHandler
 from position_tracker import OmniWheelOdometry, PositionTracker
-from pid import LineFollowPID
+from pid import PIDController
 
 # ================================
 # FEATURE CONFIGURATION
@@ -51,8 +51,8 @@ ROBOT_WIDTH_M = 0.225
 ROBOT_LENGTH_M = 0.075
 
 # Mission configuration
-START_CELL = (0, 12)
-END_CELL = (8, 12)
+START_CELL = (14, 20)
+END_CELL = (0, 00)
 START_POSITION = ((START_CELL[0] + 0.5) * CELL_SIZE_M, (START_CELL[1] + 0.5) * CELL_SIZE_M)
 START_HEADING = 0.0  # Facing right for horizontal movement
 
@@ -281,11 +281,15 @@ class RobotController:
         )
         self.position_tracker = PositionTracker(odometry=odometry, cell_size_m=CELL_SIZE_M)
         
-        self.pathfinder = Pathfinder()
+        # Pathfinder setup
+        temp_pathfinder = Pathfinder(grid=[[]])
+        maze_grid = temp_pathfinder.create_maze_grid()
+        self.pathfinder = Pathfinder(grid=maze_grid, cell_size_m=CELL_SIZE_M)
+        
         self.path = []
         self.current_target_index = 0
         
-        self.line_pid = LineFollowPID(kp=0.5, ki=0.01, kd=0.1, setpoint=0)
+        self.line_pid = PIDController(kp=0.5, ki=0.01, kd=0.1, output_limits=(-100, 100))
         self.state = "idle"
         
         if FEATURES['VISION_SYSTEM_ENABLED']:
@@ -401,7 +405,7 @@ def main():
     
     robot = RobotController()
     
-    app = Flask(__name__)
+    app = Flask(__name__, template_folder='../../templates', static_folder='../../static')
     
     @app.route('/')
     def index():
@@ -411,7 +415,8 @@ def main():
     def robot_data():
         """Provide robot data to the web UI."""
         line_pos, line_err, sensor_vals = robot.esp32.get_line_sensor_data()
-        x, y, heading_deg = robot.position_tracker.get_state_for_web()
+        x, y, heading_rad = robot.position_tracker.get_pose()
+        heading_deg = math.degrees(heading_rad)
         motor_speeds = robot.esp32.latest_encoder_data
         
         data = {
@@ -443,7 +448,7 @@ def main():
         def generate():
             while robot.running:
                 robot_cell = robot.position_tracker.get_current_cell()
-                path = robot.pathfinder.last_path_nodes
+                path = robot.path  # Use the main path attribute
                 
                 grid_img = generate_grid_image(
                     pathfinder=robot.pathfinder,
@@ -464,7 +469,7 @@ def main():
 
     def generate_grid_image(pathfinder, robot_cell, path, start_cell, end_cell):
         """Generates the grid image for the web UI."""
-        grid = pathfinder.get_grid()
+        grid = np.array(pathfinder.get_grid())
         cell_size = 20
         height, width = grid.shape
         grid_img = np.zeros((height * cell_size, width * cell_size, 3), dtype=np.uint8)
