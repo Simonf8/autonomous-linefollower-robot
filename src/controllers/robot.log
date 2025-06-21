@@ -21,19 +21,324 @@ WARNING: This is a development server. Do not use it in a production deployment.
  * Running on http://127.0.0.1:5000
  * Running on http://192.168.2.20:5000
 Press CTRL+C to quit
-127.0.0.1 - - [21/Jun/2025 12:23:45] "GET /start_mission HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:46] "GET / HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:47] "GET /static/styles.css HTTP/1.1" 304 -
-127.0.0.1 - - [21/Jun/2025 12:23:47] "GET /grid_feed HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:47] "GET /api/robot_data?t=1750505027153 HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:48] "GET /api/robot_data?t=1750505028153 HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:49] "GET /api/robot_data?t=1750505029209 HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:50] "GET /api/robot_data?t=1750505030211 HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:51] "GET /api/robot_data?t=1750505031212 HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:52] "GET /api/robot_data?t=1750505032251 HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:53] "GET /api/robot_data?t=1750505033252 HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:54] "GET /api/robot_data?t=1750505034256 HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:55] "GET /api/robot_data?t=1750505035257 HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:56] "GET /api/robot_data?t=1750505036257 HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:57] "GET /api/robot_data?t=1750505037257 HTTP/1.1" 200 -
-127.0.0.1 - - [21/Jun/2025 12:23:58] "GET /api/robot_data?t=1750505038352 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:44:56] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:44:56] "GET /static/styles.css HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:44:56] "GET /api/robot_data?t=1750506296106 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:44:56] "GET /start_mission HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:44:56] "GET /grid_feed HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:44:56] "GET /api/robot_data?t=1750506296300 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:44:57] "GET /api/robot_data?t=1750506297301 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:44:58] "GET /api/robot_data?t=1750506298300 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:44:59] "GET /api/robot_data?t=1750506299302 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:00] "GET /api/robot_data?t=1750506300302 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:01] "GET /api/robot_data?t=1750506301302 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:02] "GET /api/robot_data?t=1750506302302 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:03] "GET /api/robot_data?t=1750506303303 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:04] "GET /api/robot_data?t=1750506304306 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:05] "GET /api/robot_data?t=1750506305306 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:06] "GET /api/robot_data?t=1750506306306 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:07] "GET /api/robot_data?t=1750506307306 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:08] "GET /api/robot_data?t=1750506308306 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:09] "GET /api/robot_data?t=1750506309307 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:10] "GET /api/robot_data?t=1750506310340 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:11] "GET /api/robot_data?t=1750506311341 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:12] "GET /api/robot_data?t=1750506312343 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:13] "GET /api/robot_data?t=1750506313343 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:14] "GET /api/robot_data?t=1750506314361 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:15] "GET /api/robot_data?t=1750506315367 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:16] "GET /api/robot_data?t=1750506316367 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:17] "GET /api/robot_data?t=1750506317367 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:18] "GET /api/robot_data?t=1750506318376 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:19] "GET /api/robot_data?t=1750506319379 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:20] "GET /api/robot_data?t=1750506320389 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:21] "GET /api/robot_data?t=1750506321390 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:23] "GET /api/robot_data?t=1750506322402 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:23] "GET /api/robot_data?t=1750506323402 HTTP/1.1" 200 -
+Connected to ESP32 at 192.168.2.36:1234
+Starting mission...
+Planning path from (20, 14) to (0, 0)...
+Path planned: 35 waypoints
+Loop time: 500.98 ms
+Cannot start mission, robot is not idle.
+Reached waypoint 0: (20, 14)
+ESP32 closed the connection.
+Socket receive error: [Errno 9] Bad file descriptor
+Line lost!
+Line lost!
+Connected to ESP32 at 192.168.2.36:1234
+Sent to ESP32: 0,0,0,0
+Loop time: 618.98 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 1001.16 ms
+Received from ESP32: LINE,1000,0,1000,0,1000
+Connected to ESP32 at 192.168.2.36:1234
+Sent to ESP32: 0,0,0,0
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,1000,0,1000,0,1000
+Sent to ESP32: 50,50,50,50
+Loop time: 39.12 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Sent to ESP32: 50,50,50,50
+Loop time: 1001.20 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+DEBUG: Rendering path with 35 waypoints
+Received from ESP32: LINE,1000,0,1000,0,1000
+DEBUG: Rendering path with 35 waypoints
+Sent to ESP32: 50,50,50,50
+Loop time: 518.71 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Sent to ESP32: 50,50,50,50
+Loop time: 1001.36 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Sent to ESP32: 50,50,50,50
+Loop time: 1001.24 ms
+DEBUG: Rendering path with 35 waypoints
+Socket receive error: [Errno 104] Connection reset by peer
+ESP32 closed the connection.
+Socket receive error: 'NoneType' object has no attribute 'close'
+Failed to connect to ESP32 (attempt 1): [Errno 111] Connection refused
+Loop time: 873.51 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Connected to ESP32 at 192.168.2.36:1234
+Sent to ESP32: 50,50,50,50
+Loop time: 1052.56 ms
+Received from ESP32: ENCODERS,0,-4,0,0
+DEBUG: Rendering path with 35 waypoints
+Sent to ESP32: 50,50,50,50
+Loop time: 517.44 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Sent to ESP32: 50,50,50,50
+Loop time: 1001.19 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Sent to ESP32: 50,50,50,50
+Loop time: 1001.20 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Sent to ESP32: 50,50,50,50
+Loop time: 1001.06 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Socket receive error: [Errno 104] Connection reset by peer
+ESP32 closed the connection.
+Socket receive error: 'NoneType' object has no attribute 'close'
+Connected to ESP32 at 192.168.2.36:1234
+Sent to ESP32: 50,50,50,50
+Loop time: 925.31 ms
+Received from ESP32: ENCODERS,0,5,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 35.77 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 1001.20 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 1001.18 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 1001.18 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 1001.19 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 1001.22 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 1001.20 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 1001.11 ms
+Socket receive error: [Errno 104] Connection reset by peer
+Line lost!
+DEBUG: Rendering path with 35 waypoints
+Connected to ESP32 at 192.168.2.36:1234
+Sent to ESP32: 0,0,0,0
+Loop time: 25.34 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 41.57 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 211.92 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 100.13 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 69.42 ms
+DEBUG: Rendering path with 35 waypoints
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 76.68 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 224.03 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+DEBUG: Rendering path with 35 waypoints
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 609.59 ms
+DEBUG: Rendering path with 35 waypoints
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 117.52 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 176.43 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+DEBUG: Rendering path with 35 waypoints
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 527.78 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 168.74 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+DEBUG: Rendering path with 35 waypoints
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 190.78 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 205.48 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+DEBUG: Rendering path with 35 waypoints
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 523.52 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 84.25 ms
+DEBUG: Rendering path with 35 waypoints
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 303.15 ms
+Received from ESP32: ENCODERS,0,-3,0,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+DEBUG: Rendering path with 35 waypoints
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 513.60 ms
+Received from ESP32: ENCODERS,0,2,-3,0
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 81.64 ms
+Received from ESP32: ENCODERS,0,2,-3,0
+DEBUG: Rendering path with 35 waypoints
+Received from ESP32: LINE,-1,0,1000,1000,1000
+Line lost!
+Sent to ESP32: 0,0,0,0
+Loop time: 161.87 ms
+Received from ESP32: ENCODERS,0,2,-4,0
+Received from ESP32: LINE,1000,0,1000,0,1000
+Sent to ESP32: 50,50,50,50
+Loop time: 195.00 ms
+Received from ESP32: ENCODERS,0,2,-4,0
+DEBUG: Rendering path with 35 waypoints
+Sent to ESP32: 50,50,50,50
+Loop time: 514.63 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Sent to ESP32: 50,50,50,50
+Loop time: 1001.22 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Sent to ESP32: 50,50,50,50
+Loop time: 1001.23 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Sent to ESP32: 50,50,50,50
+Loop time: 1001.22 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+Sent to ESP32: 50,50,50,50
+Loop time: 1001.23 ms
+Socket receive error: [Errno 104] Connection reset by peer
+ESP32 closed the connection.
+Socket receive error: 'NoneType' object has no attribute 'close'
+DEBUG: Rendering path with 35 waypoints
+Connected to ESP32 at 192.168.2.36:1234
+Sent to ESP32: 50,50,50,50
+Loop time: 227.59 ms
+Received from ESP32: ENCODERS,0,2,0,0
+Received from ESP32: LINE,1000,0,1000,0,0
+Sent to ESP32: 50,50,50,50
+Loop time: 32.41 ms
+DEBUG: Rendering path with 35 waypoints
+DEBUG: Rendering path with 35 waypoints
+127.0.0.1 - - [21/Jun/2025 12:45:24] "GET /api/robot_data?t=1750506324408 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:25] "GET /api/robot_data?t=1750506325409 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:27] "GET /api/robot_data?t=1750506326410 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:27] "GET /api/robot_data?t=1750506327409 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:29] "GET /api/robot_data?t=1750506328430 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:30] "GET /api/robot_data?t=1750506329437 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:31] "GET /api/robot_data?t=1750506330438 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:32] "GET /api/robot_data?t=1750506331443 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:33] "GET /api/robot_data?t=1750506332443 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:34] "GET /api/robot_data?t=1750506333461 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:35] "GET /api/robot_data?t=1750506334462 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:36] "GET /api/robot_data?t=1750506335463 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:37] "GET /api/robot_data?t=1750506336463 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:38] "GET /api/robot_data?t=1750506337488 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:39] "GET /api/robot_data?t=1750506338489 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:40] "GET /api/robot_data?t=1750506339499 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:41] "GET /api/robot_data?t=1750506340503 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:41] "GET /api/robot_data?t=1750506341503 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:43] "GET /api/robot_data?t=1750506342525 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:44] "GET /api/robot_data?t=1750506343524 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:45] "GET /api/robot_data?t=1750506344542 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:46] "GET /api/robot_data?t=1750506345543 HTTP/1.1" 200 -
+127.0.0.1 - - [21/Jun/2025 12:45:47] "GET /api/robot_data?t=1750506346929 HTTP/1.1" 200 -

@@ -88,17 +88,44 @@
                     </div>
                 </div>
 
-                <!-- Sensor Array -->
+                <!-- Line Sensor Array -->
                 <div class="panel sensor-panel">
                     <div class="panel-header">
-                        <h2>SENSOR ARRAY</h2>
+                        <h2>LINE SENSOR ARRAY</h2>
                         <div class="panel-indicator"></div>
                     </div>
                     <div class="sensor-display" id="sensor-array">
                         <!-- Sensors will be dynamically added here -->
                     </div>
-                    <div class="sensor-pattern">
-                        <span>Pattern: </span><span id="sensor-pattern" class="cyber-text">000</span>
+                    <div class="sensor-details">
+                        <div class="sensor-info">
+                            <div class="sensor-info-item">
+                                <span class="sensor-info-label">LINE POSITION:</span>
+                                <span class="sensor-info-value cyber-text" id="line-position">-1</span>
+                            </div>
+                            <div class="sensor-info-item">
+                                <span class="sensor-info-label">LINE ERROR:</span>
+                                <span class="sensor-info-value cyber-text" id="line-error">0</span>
+                            </div>
+                            <div class="sensor-info-item">
+                                <span class="sensor-info-label">PATTERN:</span>
+                                <span class="sensor-info-value cyber-text" id="sensor-pattern">000</span>
+                            </div>
+                        </div>
+                        <div class="sensor-values">
+                            <div class="sensor-value-item">
+                                <span class="sensor-label">LEFT</span>
+                                <span class="sensor-value cyber-text" id="sensor-left">0</span>
+                            </div>
+                            <div class="sensor-value-item">
+                                <span class="sensor-label">CENTER</span>
+                                <span class="sensor-value cyber-text" id="sensor-center">0</span>
+                            </div>
+                            <div class="sensor-value-item">
+                                <span class="sensor-label">RIGHT</span>
+                                <span class="sensor-value cyber-text" id="sensor-right">0</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -139,12 +166,17 @@
                     document.getElementById('boxes-collected').textContent = `${data.collected_boxes || 0}/${data.total_tasks || 4}`;
                     document.getElementById('boxes-delivered').textContent = `${data.delivered_boxes || 0}/${data.total_tasks || 4}`;
 
-                    // Update sensor display
+                    // Update line sensor display
                     const sensorContainer = document.getElementById('sensor-array');
                     const sensorLabels = ['L', 'C', 'R'];
                     let sensorPattern = "";
                     
-                    if (data.line_sensors) {
+                    // Update line position and error
+                    document.getElementById('line-position').textContent = data.line_position !== undefined ? data.line_position : -1;
+                    document.getElementById('line-error').textContent = data.line_error !== undefined ? data.line_error : 0;
+                    
+                    if (data.line_sensors && data.line_sensors.length >= 3) {
+                        // Update visual sensor display
                         sensorContainer.innerHTML = data.line_sensors.map((sensor, index) => {
                             // In ESP32 code, 0 means line detected (dark), 1000 means no line (bright)
                             const isActive = sensor < 500; 
@@ -152,9 +184,24 @@
                             sensorPattern += isActive ? '1' : '0';
                             return `<div class="sensor-item ${className}">
                                         <span class="sensor-label">${sensorLabels[index]}</span>
+                                        <span class="sensor-raw-value">${sensor}</span>
                                     </div>`;
                         }).join('');
+                        
+                        // Update pattern
                         document.getElementById('sensor-pattern').textContent = sensorPattern;
+                        
+                        // Update individual sensor values
+                        document.getElementById('sensor-left').textContent = data.line_sensors[0];
+                        document.getElementById('sensor-center').textContent = data.line_sensors[1];
+                        document.getElementById('sensor-right').textContent = data.line_sensors[2];
+                    } else {
+                        // No sensor data available
+                        sensorContainer.innerHTML = `<div class="sensor-offline">SENSORS OFFLINE</div>`;
+                        document.getElementById('sensor-pattern').textContent = "---";
+                        document.getElementById('sensor-left').textContent = "---";
+                        document.getElementById('sensor-center').textContent = "---";
+                        document.getElementById('sensor-right').textContent = "---";
                     }
 
                     const statusIndicator = document.getElementById('status-indicator');
