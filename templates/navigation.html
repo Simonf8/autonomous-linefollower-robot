@@ -16,10 +16,10 @@
     <div class="container">
         <!-- Header Section -->
         <header class="header">
-            <h1 class="cyber-title">
-                <span class="glitch" data-text="AUTONOMOUS ROBOT">ROBOT</span>
-                <span class="subtitle">MAP</span>
-            </h1>
+            <div class="main-title-container">
+                <h1 class="cyber-title glitch" data-text="ROBONOMOUS">ROBONOMOUS</h1>
+                <h1 class="cyber-title" style="font-size: 2rem; color: var(--cyber-pink);">ROBOT</h1>
+            </div>
             <div class="system-status">
                 <div class="status-indicator online" id="status-indicator"></div>
                 <span id="status-text">SYSTEM ONLINE</span>
@@ -29,71 +29,77 @@
         <!-- Main Grid Layout -->
         <div class="dashboard-grid">
             
-            <!-- Navigation Map -->
-            <div class="panel map-panel">
-                <div class="panel-header">
-                    <h2>NAVIGATION MATRIX</h2>
-                    <div class="panel-indicator"></div>
-                </div>
-                <div class="map-container">
-                    <img id="map-image" class="map-image" src="{{ url_for('grid_feed') }}" alt="Navigation Map">
-                    <div class="map-overlay">
-                        <div class="scan-grid"></div>
+            <!-- Left Column -->
+            <div class="left-column">
+                <!-- Navigation Map -->
+                <div class="panel map-panel">
+                    <div class="panel-header">
+                        <h2>NAVIGATION MATRIX</h2>
+                        <div class="panel-indicator"></div>
                     </div>
-                </div>
-                <div class="map-legend">
-                    <div class="legend-item"><span class="legend-color planned-path"></span><span>PLANNED PATH</span></div>
-                    <div class="legend-item"><span class="legend-color robot-color"></span><span>ROBOT</span></div>
-                    <div class="legend-item"><span class.="legend-color start-color"></span><span>START</span></div>
-                    <div class="legend-item"><span class="legend-color end-color"></span><span>END</span></div>
-                </div>
-            </div>
-
-            <!-- Robot Status -->
-            <div class="panel status-panel">
-                <div class="panel-header">
-                    <h2>ROBOT STATUS</h2>
-                    <div class="panel-indicator"></div>
-                </div>
-                <div class="status-grid">
-                    <div class="status-item">
-                        <div class="status-label">COORDINATES (X, Y)</div>
-                        <div class="status-value cyber-text" id="robot-position">(0.00, 0.00)</div>
+                    <div class="map-container">
+                        <img id="map-image" class="map-image" src="{{ url_for('grid_feed') }}" alt="Navigation Map">
+                        <div class="map-overlay">
+                            <div class="scan-grid"></div>
+                        </div>
                     </div>
-                    <div class="status-item">
-                        <div class="status-label">HEADING</div>
-                        <div class="status-value cyber-text" id="robot-heading">0.0°</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-label">MODE</div>
-                        <div class="status-value cyber-text" id="robot-state">PLANNING</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-label">PACKAGE</div>
-                        <div class="status-value cyber-text" id="box-status">NONE</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-label">BOXES COLLECTED</div>
-                        <div class="status-value cyber-text" id="boxes-collected">0/4</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-label">BOXES DELIVERED</div>
-                        <div class="status-value cyber-text" id="boxes-delivered">0/4</div>
+                    <div class="map-legend">
+                        <div class="legend-item"><span class="legend-color" style="background: #800080;"></span><span>PLANNED PATH</span></div>
+                        <div class="legend-item"><span class="legend-color robot-color"></span><span>ROBOT</span></div>
+                        <div class="legend-item"><span class="legend-color" style="background: #00ff00;"></span><span>START</span></div>
+                        <div class="legend-item"><span class="legend-color" style="background: #ff0000;"></span><span>END</span></div>
                     </div>
                 </div>
             </div>
 
-            <!-- Sensor Array -->
-            <div class="panel sensor-panel">
-                <div class="panel-header">
-                    <h2>SENSOR ARRAY</h2>
-                    <div class="panel-indicator"></div>
+            <!-- Right Column -->
+            <div class="right-column">
+                <!-- Robot Status -->
+                <div class="panel status-panel">
+                    <div class="panel-header">
+                        <h2>ROBOT STATUS</h2>
+                        <div class="panel-indicator"></div>
+                    </div>
+                    <div class="status-grid">
+                        <div class="status-item">
+                            <div class="status-label">COORDINATES (X, Y)</div>
+                            <div class="status-value cyber-text" id="robot-position">(0.00, 0.00)</div>
+                        </div>
+                        <div class="status-item">
+                            <div class="status-label">HEADING</div>
+                            <div class="status-value cyber-text" id="robot-heading">0.0°</div>
+                        </div>
+                        <div class="status-item">
+                            <div class="status-label">MODE</div>
+                            <div class="status-value cyber-text" id="robot-state">PLANNING</div>
+                        </div>
+                        <div class="status-item">
+                            <div class="status-label">PACKAGE</div>
+                            <div class="status-value cyber-text" id="box-status">NONE</div>
+                        </div>
+                        <div class="status-item">
+                            <div class="status-label">BOXES COLLECTED</div>
+                            <div class="status-value cyber-text" id="boxes-collected">0/4</div>
+                        </div>
+                        <div class="status-item">
+                            <div class="status-label">BOXES DELIVERED</div>
+                            <div class="status-value cyber-text" id="boxes-delivered">0/4</div>
+                        </div>
+                    </div>
                 </div>
-                <div class="sensor-display" id="sensor-array">
-                    <!-- Sensors will be dynamically added here -->
-                </div>
-                <div class="sensor-pattern">
-                    <span>Pattern: </span><span id="sensor-pattern" class="cyber-text">000</span>
+
+                <!-- Sensor Array -->
+                <div class="panel sensor-panel">
+                    <div class="panel-header">
+                        <h2>SENSOR ARRAY</h2>
+                        <div class="panel-indicator"></div>
+                    </div>
+                    <div class="sensor-display" id="sensor-array">
+                        <!-- Sensors will be dynamically added here -->
+                    </div>
+                    <div class="sensor-pattern">
+                        <span>Pattern: </span><span id="sensor-pattern" class="cyber-text">000</span>
+                    </div>
                 </div>
             </div>
         </div>

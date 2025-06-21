@@ -42,7 +42,7 @@ ESP32_IP = "192.168.2.36"
 CELL_SIZE_M = 0.11
 BASE_SPEED = 60
 TURN_SPEED = 50
-CORNER_SPEED = 55  # Slower speed for smooth cornering
+CORNER_SPEED = 55  
 
 # Robot physical constants
 PULSES_PER_REV = 960
@@ -51,8 +51,8 @@ ROBOT_WIDTH_M = 0.225
 ROBOT_LENGTH_M = 0.075
 
 # Mission configuration
-START_CELL = (14, 20)
-END_CELL = (0, 00)
+START_CELL = (20, 14)
+END_CELL = (0, 0)
 START_POSITION = ((START_CELL[0] + 0.5) * CELL_SIZE_M, (START_CELL[1] + 0.5) * CELL_SIZE_M)
 START_HEADING = 0.0  # Facing right for horizontal movement
 
@@ -233,16 +233,18 @@ class ESP32Bridge:
     def update_sensor_data(self, data_string: str):
         """Update sensor data from ESP32 string."""
         try:
+            if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
+                print(f"Received from ESP32: {data_string}")
+
             parts = data_string.split(',')
             
             if parts[0] == "ENCODERS" and len(parts) == 5:
                 self.latest_encoder_data = [int(p) for p in parts[1:]]
-            elif parts[0] == "LINE" and len(parts) == 5:
+            elif parts[0] == "LINE" and len(parts) == 6:
                 self.latest_line_position = int(parts[1])
                 self.latest_line_error = int(parts[2])
                 self.latest_sensor_values = [int(p) for p in parts[3:]]
-            elif FEATURES['PERFORMANCE_LOGGING_ENABLED']:
-                print(f"Received from ESP32: {data_string}")
+
         except (ValueError, IndexError) as e:
             print(f"Error parsing sensor data '{data_string}': {e}")
 
@@ -282,8 +284,7 @@ class RobotController:
         self.position_tracker = PositionTracker(odometry=odometry, cell_size_m=CELL_SIZE_M)
         
         # Pathfinder setup
-        temp_pathfinder = Pathfinder(grid=[[]])
-        maze_grid = temp_pathfinder.create_maze_grid()
+        maze_grid = Pathfinder.create_maze_grid()
         self.pathfinder = Pathfinder(grid=maze_grid, cell_size_m=CELL_SIZE_M)
         
         self.path = []
@@ -318,17 +319,18 @@ class RobotController:
     def run(self):
         """Main control loop."""
         if not self.esp32.start():
-            print("CRITICAL: ESP32 not connected. Robot cannot start.")
-            return
-
-        self.state = "line_following"
+            print("WARNING: ESP32 not connected. Running in simulation mode for pathfinding visualization.")
+        
+        # Auto-start mission for pathfinding visualization
+        self._start_mission()
 
         while self.running:
             start_time = time.time()
             
             # Update odometry
             encoder_ticks = self.esp32.get_encoder_ticks()
-            self.position_tracker.update(encoder_ticks)
+            if encoder_ticks:
+                self.position_tracker.update(encoder_ticks)
             
             self._run_state_machine()
 
@@ -341,16 +343,59 @@ class RobotController:
         
         self.stop()
         
+    def _start_mission(self):
+        """Start the defined mission."""
+        if self.state != "idle":
+            print("Cannot start mission, robot is not idle.")
+            return
+
+        print("Starting mission...")
+        self.position_tracker.odometry.set_pose(START_POSITION[0], START_POSITION[1], START_HEADING)
+        self.state = "planning"
+
+    def _plan_path_to_target(self):
+        """Plan the path to the target cell."""
+        current_cell = self.position_tracker.get_current_cell()
+        print(f"Planning path from {current_cell} to {END_CELL}...")
+        
+        path_nodes = self.pathfinder.find_path(current_cell, END_CELL)
+        
+        if path_nodes:
+            self.path = path_nodes
+            self.current_target_index = 0
+            self.state = "path_following"
+            print(f"Path planned: {len(self.path)} waypoints")
+        else:
+            print(f"Failed to plan path from {current_cell} to {END_CELL}")
+            self.state = "error"
+
+    def _follow_path(self):
+        """Follow the planned path using line following."""
+        if not self.path or self.current_target_index >= len(self.path):
+            print("Mission complete!")
+            self.state = "mission_complete"
+            self._stop_motors()
+            return
+        
+        current_cell = self.position_tracker.get_current_cell()
+        target_cell = self.path[self.current_target_index]
+        
+        if current_cell == target_cell:
+            print(f"Reached waypoint {self.current_target_index}: {target_cell}")
+            self.current_target_index += 1
+        
+        self._follow_line_with_sensor()
+
     def _run_state_machine(self):
         """Run the robot's state machine."""
         if self.state == "idle":
             self._stop_motors()
-        elif self.state == "line_following":
-            if FEATURES['USE_ESP32_LINE_SENSOR']:
-                self._follow_line_with_sensor()
-            else:
-                print("Error: Line following with camera is disabled.")
-                self._stop_motors()
+        elif self.state == "planning":
+            self._plan_path_to_target()
+        elif self.state == "path_following":
+            self._follow_path()
+        elif self.state == "mission_complete":
+            self._stop_motors()
         elif self.state == "error":
             self._stop_motors()
             self.running = False
@@ -441,6 +486,17 @@ def main():
     def video_feed():
         """Video streaming route. Returns a placeholder since camera is disabled."""
         return Response(status=204) # No content
+    
+    @app.route('/start_mission')
+    def start_mission():
+        """Manually start the mission and pathfinding."""
+        robot._start_mission()
+        robot._run_state_machine()  # Run one cycle to trigger planning
+        return jsonify({
+            'status': 'Mission started',
+            'robot_state': robot.state,
+            'path_length': len(robot.path)
+        })
 
     @app.route('/grid_feed')
     def grid_feed():
@@ -469,34 +525,54 @@ def main():
 
     def generate_grid_image(pathfinder, robot_cell, path, start_cell, end_cell):
         """Generates the grid image for the web UI."""
+        # Debug: Print path info
+        if path and len(path) > 0:
+            print(f"DEBUG: Rendering path with {len(path)} waypoints")
+        else:
+            print("DEBUG: No path to render")
+            
         grid = np.array(pathfinder.get_grid())
         cell_size = 20
         height, width = grid.shape
+        # Image is created with (height, width) but cv2 functions use (x, y) coordinates
         grid_img = np.zeros((height * cell_size, width * cell_size, 3), dtype=np.uint8)
 
         for r in range(height):
             for c in range(width):
-                color = (255, 255, 255) if grid[r, c] == 0 else (100, 100, 100)
+                # grid is indexed by (row, col) which is (y, x)
+                # Obstacles (1) are white, paths (0) are black
+                color = (255, 255, 255) if grid[r, c] == 1 else (0, 0, 0)
+                # cv2.rectangle uses (x, y) for its points
                 cv2.rectangle(grid_img, (c * cell_size, r * cell_size), 
                               ((c + 1) * cell_size, (r + 1) * cell_size), color, -1)
         
         if path:
             for i in range(len(path) - 1):
-                p1 = (path[i][1] * cell_size + cell_size // 2, path[i][0] * cell_size + cell_size // 2)
-                p2 = (path[i+1][1] * cell_size + cell_size // 2, path[i+1][0] * cell_size + cell_size // 2)
-                cv2.line(grid_img, p1, p2, (255, 0, 0), 2)
+                # Path cells are (x, y)
+                # cv2.line expects points as (x, y)
+                p1_x = path[i][0] * cell_size + cell_size // 2
+                p1_y = path[i][1] * cell_size + cell_size // 2
+                p2_x = path[i+1][0] * cell_size + cell_size // 2
+                p2_y = path[i+1][1] * cell_size + cell_size // 2
+                cv2.line(grid_img, (p1_x, p1_y), (p2_x, p2_y), (128, 0, 128), 2)
 
+        # Start cell is (x, y), draw it in green
         start_color = (0, 255, 0)
-        cv2.rectangle(grid_img, (start_cell[1] * cell_size, start_cell[0] * cell_size),
-                      ((start_cell[1] + 1) * cell_size, (start_cell[0] + 1) * cell_size), start_color, -1)
+        start_x, start_y = start_cell[0], start_cell[1]
+        cv2.rectangle(grid_img, (start_x * cell_size, start_y * cell_size),
+                      ((start_x + 1) * cell_size, (start_y + 1) * cell_size), start_color, -1)
         
+        # End cell is (x, y), draw it in red (but path is also red, let's use blue)
         end_color = (0, 0, 255)
-        cv2.rectangle(grid_img, (end_cell[1] * cell_size, end_cell[0] * cell_size),
-                      ((end_cell[1] + 1) * cell_size, (end_cell[0] + 1) * cell_size), end_color, -1)
+        end_x, end_y = end_cell[0], end_cell[1]
+        cv2.rectangle(grid_img, (end_x * cell_size, end_y * cell_size),
+                      ((end_x + 1) * cell_size, (end_y + 1) * cell_size), end_color, -1)
 
         if robot_cell:
+            # Robot cell is (x, y), draw it as an orange circle
+            robot_x, robot_y = robot_cell[0], robot_cell[1]
             cv2.circle(grid_img, 
-                       (robot_cell[1] * cell_size + cell_size // 2, robot_cell[0] * cell_size + cell_size // 2), 
+                       (robot_x * cell_size + cell_size // 2, robot_y * cell_size + cell_size // 2), 
                        cell_size // 3, (255, 165, 0), -1)
         
         return grid_img

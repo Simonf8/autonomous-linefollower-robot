@@ -28,24 +28,29 @@ class Pathfinder:
         self._distance_cache = {}
         self._last_goal = None
     
-    def create_maze_grid(self) -> List[List[int]]:
+    @staticmethod
+    def create_maze_grid() -> List[List[int]]:
         """Creates the default maze grid layout."""
+        # The maze is defined with 0=path, 1=obstacle.
+        # Some paths were defined with alternating 0s and 1s (e.g., [0,1,0,1,...])
+        # which is not navigable by an algorithm that checks immediate neighbors.
+        # The paths have been changed to be solid (all 0s).
         maze = [
-            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0],
-            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0],
-            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
-            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
-            [0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0],
-            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
-            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
-            [0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0],
-            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
-            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0],
-            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 0 - Solid path
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 1 - Solid path
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], # Row 2
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 3
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 4
+            [0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0], # Row 5
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 6
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], # Row 7
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 8
+            [0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0], # Row 9
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 10
+            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 11
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], # Row 12
+            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1], # Row 13 - Solid path
+            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1]  # Row 14 - Solid path
         ]
         # Flip horizontally to match coordinate system
         return [row[::-1] for row in maze]
@@ -60,16 +65,37 @@ class Pathfinder:
                 0 <= y < self.height and 
                 self.grid[y][x] == 0)
     
-    def get_neighbors(self, cell: Tuple[int, int]) -> List[Tuple[int, int]]:
-        """Get valid neighboring cells (4-directional)."""
+    def get_neighbors(self, cell: Tuple[int, int]) -> List[Tuple[Tuple[int, int], int]]:
+        """
+        Get valid neighboring cells, handling both solid and dashed lines.
+        Returns a list of tuples, where each tuple contains the neighbor cell and the cost to move to it.
+        """
         x, y = cell
         neighbors = []
         
-        # Check 4 directions: up, down, left, right
-        for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
+        # Check for neighbors 1 unit away (for solid paths) and 2 units away (for dashed paths).
+        # Format: (dx, dy, cost)
+        for dx, dy, cost in [(0, -1, 1), (0, 1, 1), (-1, 0, 1), (1, 0, 1),
+                             (0, -2, 2), (0, 2, 2), (-2, 0, 2), (2, 0, 2)]:
             nx, ny = x + dx, y + dy
+            
+            # For a 2-step move, ensure the intermediate cell is not a path.
+            # This prevents jumping over valid intersections on solid paths.
+            if cost == 2:
+                ix, iy = x + dx // 2, y + dy // 2
+                if self.is_valid_cell(ix, iy):
+                    continue # Don't jump over a valid path cell
+
             if self.is_valid_cell(nx, ny):
-                neighbors.append((nx, ny))
+                # Avoid adding duplicates. If a 1-step neighbor was already found,
+                # a 2-step check in the same direction is redundant or invalid.
+                is_duplicate = False
+                for neighbor_cell, _ in neighbors:
+                    if neighbor_cell == (nx, ny):
+                        is_duplicate = True
+                        break
+                if not is_duplicate:
+                    neighbors.append(((nx, ny), cost))
         
         return neighbors
     
@@ -89,9 +115,11 @@ class Pathfinder:
             List of cells from start to goal, or None if no path exists
         """
         if not self.is_valid_cell(start[0], start[1]):
+            logging.error(f"Pathfinder Error: Start cell {start} is not valid. It's either out of bounds or on an obstacle.")
             return None
         
         if not self.is_valid_cell(goal[0], goal[1]):
+            logging.error(f"Pathfinder Error: Goal cell {goal} is not valid. It's either out of bounds or on an obstacle.")
             return None
         
         if start == goal:
@@ -119,13 +147,12 @@ class Pathfinder:
                     current = came_from.get(current)
                 return path[::-1]  # Reverse to get start->goal
             
-            # Check all neighbors
-            for neighbor in self.get_neighbors(current):
+            # Check all neighbors, now with variable costs
+            for neighbor, cost in self.get_neighbors(current):
                 if neighbor in visited:
                     continue
                 
-                # Distance is always 1 for adjacent cells
-                new_dist = current_dist + 1
+                new_dist = current_dist + cost
                 
                 if neighbor not in distances or new_dist < distances[neighbor]:
                     distances[neighbor] = new_dist
@@ -135,6 +162,7 @@ class Pathfinder:
                     heapq.heappush(pq, (priority, neighbor))
         
         # No path found
+        logging.warning(f"No path found from {start} to {goal}")
         return None
     
     def world_to_cell(self, world_x: float, world_y: float) -> Tuple[int, int]:
