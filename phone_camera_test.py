@@ -12,7 +12,7 @@ print("Using simple obstacle detection (non-black objects on line path)")
 app = Flask(__name__)
 
 # CHANGE THIS TO YOUR PHONE'S IP ADDRESS
-PHONE_IP = "192.168.2.6"
+PHONE_IP = "192.168.83.169"
 
 # Configuration
 CAMERA_WIDTH, CAMERA_HEIGHT = 416, 320

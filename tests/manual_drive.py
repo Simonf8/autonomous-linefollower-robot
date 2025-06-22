@@ -5,10 +5,12 @@ import time
 import select
 import termios
 import tty
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'controllers'))
 from main import ESP32Bridge
 
 # Configuration - UPDATE THIS IP WHEN YOU FIND YOUR ESP32
-ESP32_IP = "192.168.2.36"  # Change this to your ESP32's actual IP
+ESP32_IP = "192.168.83.245"  # Change this to your ESP32's actual IP
 BASE_SPEED = 60
 TURN_SPEED = 50
 

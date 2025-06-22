@@ -38,7 +38,7 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-ESP32_IP = "192.168.2.36"
+ESP32_IP = "192.168.83.245"
 CELL_SIZE_M = 0.11
 BASE_SPEED = 60
 TURN_SPEED = 50
