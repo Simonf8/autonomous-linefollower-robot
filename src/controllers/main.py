@@ -51,13 +51,27 @@ ROBOT_WIDTH_M = 0.225
 ROBOT_LENGTH_M = 0.075
 
 # Mission configuration
-START_CELL = (20, 14)
-END_CELL = (0, 0)
+START_CELL = (14, 14)
+END_CELL = (2, 0)
 START_POSITION = ((START_CELL[0] + 0.5) * CELL_SIZE_M, (START_CELL[1] + 0.5) * CELL_SIZE_M)
 START_HEADING = 0.0  # Facing right for horizontal movement
 
 # Line following configuration
 LINE_FOLLOW_SPEED = 50
+
+# Corner turning configuration
+CORNER_TURN_MODES = {
+    'SMOOTH': 'smooth',           # Normal wheel-like smooth cornering (current)
+    'SIDEWAYS': 'sideways',       # Strafe sideways through corners
+    'PIVOT': 'pivot',             # Turn in place like a tank
+    'FRONT_TURN': 'front_turn'    # Turn using front wheels primarily
+}
+CURRENT_CORNER_MODE = CORNER_TURN_MODES['SMOOTH']  # Default mode
+
+# Corner detection thresholds
+CORNER_DETECTION_THRESHOLD = 0.35    # Line offset to detect corner
+CORNER_TURN_DURATION = 30            # Frames to execute corner turn
+SHARP_CORNER_THRESHOLD = 0.6         # Threshold for sharp vs gentle corners
 
 # Vision configuration (placeholders, not used for line following)
 IMG_PATH_SRC_PTS = np.float32([[200, 300], [440, 300], [580, 480], [60, 480]])
@@ -409,12 +423,120 @@ class RobotController:
             self._recover_line()
             return
 
-        turn_correction = self.line_pid.update(line_err)
+        # Detect corners based on line error magnitude
+        abs_error = abs(line_err)
         
-        left_speed = int(LINE_FOLLOW_SPEED - turn_correction)
-        right_speed = int(LINE_FOLLOW_SPEED + turn_correction)
+        if abs_error > CORNER_DETECTION_THRESHOLD * 1000:  # ESP32 sends error in range -1000 to +1000
+            # Corner detected - determine direction
+            corner_direction = "left" if line_err > 0 else "right"
+            
+            # Check if it's a sharp corner
+            is_sharp_corner = abs_error > SHARP_CORNER_THRESHOLD * 1000
+            
+            print(f"Corner detected: {corner_direction} ({'sharp' if is_sharp_corner else 'gentle'})")
+            
+            # Execute corner turn using the selected mode
+            self._execute_corner_turn(corner_direction, line_err)
+        else:
+            # Normal line following
+            turn_correction = self.line_pid.update(line_err)
+            
+            left_speed = int(LINE_FOLLOW_SPEED - turn_correction)
+            right_speed = int(LINE_FOLLOW_SPEED + turn_correction)
 
+            self.esp32.send_motor_speeds(left_speed, right_speed, left_speed, right_speed)
+
+    def _execute_corner_turn(self, corner_direction: str, line_error: int):
+        """Execute different types of corner turns based on the current mode."""
+        global CURRENT_CORNER_MODE
+        
+        if CURRENT_CORNER_MODE == CORNER_TURN_MODES['SMOOTH']:
+            # Normal wheel-like smooth cornering (current behavior)
+            return self._smooth_corner_turn(corner_direction, line_error)
+        
+        elif CURRENT_CORNER_MODE == CORNER_TURN_MODES['SIDEWAYS']:
+            # Strafe sideways through the corner
+            return self._sideways_corner_turn(corner_direction, line_error)
+        
+        elif CURRENT_CORNER_MODE == CORNER_TURN_MODES['PIVOT']:
+            # Turn in place like a tank
+            return self._pivot_corner_turn(corner_direction, line_error)
+        
+        elif CURRENT_CORNER_MODE == CORNER_TURN_MODES['FRONT_TURN']:
+            # Turn using front wheels primarily
+            return self._front_turn_corner(corner_direction, line_error)
+        
+        else:
+            # Default to smooth cornering
+            return self._smooth_corner_turn(corner_direction, line_error)
+
+    def _smooth_corner_turn(self, corner_direction: str, line_error: int):
+        """Normal wheel-like smooth cornering (current behavior)."""
+        turn_correction = self.line_pid.update(line_error)
+        
+        # Gradual turn like normal wheels
+        left_speed = int(CORNER_SPEED - turn_correction)
+        right_speed = int(CORNER_SPEED + turn_correction)
+        
         self.esp32.send_motor_speeds(left_speed, right_speed, left_speed, right_speed)
+        return True
+
+    def _sideways_corner_turn(self, corner_direction: str, line_error: int):
+        """Strafe sideways through corners using omni-wheel capabilities."""
+        # Determine strafe direction based on corner direction
+        if corner_direction == "left":
+            # Strafe left while maintaining forward motion
+            fl_speed = CORNER_SPEED // 2      # Front left: reduced forward
+            fr_speed = CORNER_SPEED           # Front right: full forward  
+            bl_speed = CORNER_SPEED           # Back left: full forward
+            br_speed = CORNER_SPEED // 2      # Back right: reduced forward
+        else:  # right turn
+            # Strafe right while maintaining forward motion
+            fl_speed = CORNER_SPEED           # Front left: full forward
+            fr_speed = CORNER_SPEED // 2      # Front right: reduced forward
+            bl_speed = CORNER_SPEED // 2      # Back left: reduced forward
+            br_speed = CORNER_SPEED           # Back right: full forward
+        
+        self.esp32.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+        return True
+
+    def _pivot_corner_turn(self, corner_direction: str, line_error: int):
+        """Turn in place like a tank - pure rotation."""
+        if corner_direction == "left":
+            # Rotate counter-clockwise (left turn)
+            fl_speed = -TURN_SPEED    # Front left: reverse
+            fr_speed = TURN_SPEED     # Front right: forward
+            bl_speed = -TURN_SPEED    # Back left: reverse  
+            br_speed = TURN_SPEED     # Back right: forward
+        else:  # right turn
+            # Rotate clockwise (right turn)
+            fl_speed = TURN_SPEED     # Front left: forward
+            fr_speed = -TURN_SPEED    # Front right: reverse
+            bl_speed = TURN_SPEED     # Back left: forward
+            br_speed = -TURN_SPEED    # Back right: reverse
+        
+        self.esp32.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+        return True
+
+    def _front_turn_corner(self, corner_direction: str, line_error: int):
+        """Turn primarily using front wheels like a front-wheel-drive car."""
+        base_speed = CORNER_SPEED
+        
+        if corner_direction == "left":
+            # Front wheels turn left, back wheels follow
+            fl_speed = base_speed // 2        # Front left: slower
+            fr_speed = base_speed             # Front right: normal
+            bl_speed = base_speed * 3 // 4    # Back left: moderate
+            br_speed = base_speed             # Back right: normal
+        else:  # right turn
+            # Front wheels turn right, back wheels follow  
+            fl_speed = base_speed             # Front left: normal
+            fr_speed = base_speed // 2        # Front right: slower
+            bl_speed = base_speed             # Back left: normal
+            br_speed = base_speed * 3 // 4    # Back right: moderate
+        
+        self.esp32.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+        return True
 
     def _recover_line(self):
         """Basic line recovery: stop for now."""
@@ -522,6 +644,39 @@ def main():
             
                 time.sleep(0.5)
         return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+    @app.route('/set_corner_mode/<mode>')
+    def set_corner_mode(mode):
+        """Change the corner turning mode."""
+        global CURRENT_CORNER_MODE
+        
+        if mode.upper() in CORNER_TURN_MODES:
+            CURRENT_CORNER_MODE = CORNER_TURN_MODES[mode.upper()]
+            return jsonify({
+                'status': 'success',
+                'message': f'Corner mode set to {mode.upper()}',
+                'current_mode': CURRENT_CORNER_MODE
+            })
+        else:
+            return jsonify({
+                'status': 'error', 
+                'message': f'Invalid corner mode. Available: {list(CORNER_TURN_MODES.keys())}',
+                'current_mode': CURRENT_CORNER_MODE
+            })
+
+    @app.route('/get_corner_mode')
+    def get_corner_mode():
+        """Get the current corner turning mode."""
+        return jsonify({
+            'current_mode': CURRENT_CORNER_MODE,
+            'available_modes': list(CORNER_TURN_MODES.keys()),
+            'mode_descriptions': {
+                'SMOOTH': 'Normal wheel-like smooth cornering',
+                'SIDEWAYS': 'Strafe sideways through corners',
+                'PIVOT': 'Turn in place like a tank',
+                'FRONT_TURN': 'Turn using front wheels primarily'
+            }
+        })
 
     def generate_grid_image(pathfinder, robot_cell, path, start_cell, end_cell):
         """Generates the grid image for the web UI."""

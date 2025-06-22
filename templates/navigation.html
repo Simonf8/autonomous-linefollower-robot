@@ -128,6 +128,38 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- Corner Turning Mode Control -->
+                <div class="panel corner-panel">
+                    <div class="panel-header">
+                        <h2>CORNER TURNING MODE</h2>
+                        <div class="panel-indicator"></div>
+                    </div>
+                    <div class="corner-mode-display">
+                        <div class="current-mode">
+                            <div class="mode-label">CURRENT MODE:</div>
+                            <div class="mode-value cyber-text" id="current-corner-mode">SMOOTH</div>
+                        </div>
+                        <div class="mode-buttons">
+                            <button class="mode-btn" onclick="setCornerMode('SMOOTH')" data-mode="SMOOTH">
+                                <span class="mode-btn-label">SMOOTH</span>
+                                <span class="mode-btn-desc">Normal wheels</span>
+                            </button>
+                            <button class="mode-btn" onclick="setCornerMode('SIDEWAYS')" data-mode="SIDEWAYS">
+                                <span class="mode-btn-label">SIDEWAYS</span>
+                                <span class="mode-btn-desc">Strafe turn</span>
+                            </button>
+                            <button class="mode-btn" onclick="setCornerMode('PIVOT')" data-mode="PIVOT">
+                                <span class="mode-btn-label">PIVOT</span>
+                                <span class="mode-btn-desc">Turn in place</span>
+                            </button>
+                            <button class="mode-btn" onclick="setCornerMode('FRONT_TURN')" data-mode="FRONT_TURN">
+                                <span class="mode-btn-label">FRONT</span>
+                                <span class="mode-btn-desc">Front wheels</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -228,9 +260,53 @@
         // Initial setup and periodic updates
         document.addEventListener("DOMContentLoaded", function() {
             updateData();
+            fetchCornerMode(); // Fetch initial corner mode
             setInterval(updateData, 1000); // Update every second
             setInterval(updateTimestamp, 1000);
         });
+
+        // Corner mode control functions
+        function setCornerMode(mode) {
+            fetch(`/set_corner_mode/${mode}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        document.getElementById('current-corner-mode').textContent = mode;
+                        updateModeButtons(mode);
+                        console.log(`Corner mode set to: ${mode}`);
+                    } else {
+                        console.error('Failed to set corner mode:', data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error setting corner mode:', error);
+                });
+        }
+
+        function updateModeButtons(activeMode) {
+            const buttons = document.querySelectorAll('.mode-btn');
+            buttons.forEach(btn => {
+                const mode = btn.getAttribute('data-mode');
+                if (mode === activeMode) {
+                    btn.classList.add('active');
+                } else {
+                    btn.classList.remove('active');
+                }
+            });
+        }
+
+        function fetchCornerMode() {
+            fetch('/get_corner_mode')
+                .then(response => response.json())
+                .then(data => {
+                    const currentMode = data.current_mode.toUpperCase();
+                    document.getElementById('current-corner-mode').textContent = currentMode;
+                    updateModeButtons(currentMode);
+                })
+                .catch(error => {
+                    console.error('Error fetching corner mode:', error);
+                });
+        }
 
     </script>
 </body>
