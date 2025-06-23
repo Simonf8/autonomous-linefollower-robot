@@ -458,13 +458,12 @@ class CameraLineFollower:
     
     def get_motor_speeds(self, line_result: Dict, base_speed: int = 50) -> Tuple[int, int, int, int]:
         """
-        Convert line detection to motor speeds with sideways correction for position adjustments
-        and normal wheel turning for corners/intersections.
-        
+        Convert line detection to motor speeds with a primary focus on sideways (strafe) correction.
+        This is optimized for omni-directional wheels.
+
         Movement Strategy:
-        - Small position corrections: Strafe sideways while moving forward
-        - Large corrections/corners: Turn like normal wheels (differential steering)
-        - Intersections: Turn like normal wheels
+        - Small to medium corrections: Strafe sideways to correct position while moving forward.
+        - Large corrections/corners: Perform a pivot turn for sharp re-alignment.
         
         Args:
             line_result: Result from detect_line()
@@ -483,72 +482,44 @@ class CameraLineFollower:
             # No line detected - stop
             return (0, 0, 0, 0)
         
-        # Smaller dead zone for better centering
-        if abs_steering < 0.01:  # Reduced from 0.03 to 0.01 for more precise centering
+        # Dead zone when robot is centered on the line
+        if abs_steering < 0.03:
             return (base_speed, base_speed, base_speed, base_speed)
         
-        # INTERSECTION OR LARGE CORRECTION: Use normal wheel turning (differential steering)
-        elif is_intersection or abs_steering > 0.35:  # Reduced from 0.4 to 0.35
-            # At intersection or sharp corner - turn like normal wheels
-            turn_speed = int(base_speed * 0.8)  # Reduce speed for turns
+        # INTERSECTION OR LARGE CORRECTION: Use pivot turning for sharp corners
+        # This is for actual turns, not for correcting small deviations from the line.
+        elif is_intersection or abs_steering > 0.6:  # Increased threshold from 0.35
+            turn_speed = 45  # A moderate, stable speed for pivoting
             
             if steering > 0:  # Turn right
-                return (turn_speed, int(turn_speed * 0.2), turn_speed, int(turn_speed * 0.2))
+                # Use pivot turn for omni-wheels: (speed, -speed, speed, -speed)
+                return (turn_speed, -turn_speed, turn_speed, -turn_speed)
             else:  # Turn left
-                return (int(turn_speed * 0.2), turn_speed, int(turn_speed * 0.2), turn_speed)
+                # Use pivot turn for omni-wheels: (-speed, speed, -speed, speed)
+                return (-turn_speed, turn_speed, -turn_speed, turn_speed)
         
-        # MEDIUM CORRECTION: Combined forward + sideways movement
-        elif abs_steering > 0.10:  # Reduced from 0.15 to 0.10 for earlier intervention
-            # Move forward while strafing sideways to correct position
-            forward_speed = int(base_speed * 0.8)  # Slightly slower while correcting
-            
-            # Calculate sideways strafe component
-            strafe_power = int(abs_steering * base_speed * 0.6)
-            
-            if steering > 0:  # Need to move right
-                # Forward + right strafe: FL and BR faster, FR and BL slower
-                fl = forward_speed + strafe_power
-                fr = forward_speed - strafe_power  
-                bl = forward_speed - strafe_power
-                br = forward_speed + strafe_power
-            else:  # Need to move left
-                # Forward + left strafe: FR and BL faster, FL and BR slower
-                fl = forward_speed - strafe_power
-                fr = forward_speed + strafe_power
-                bl = forward_speed + strafe_power
-                br = forward_speed - strafe_power
-            
-            # Clamp all speeds to valid range
-            fl = max(0, min(100, fl))
-            fr = max(0, min(100, fr))
-            bl = max(0, min(100, bl))
-            br = max(0, min(100, br))
-            
-            return (fl, fr, bl, br)
-        
-        # SMALL CORRECTION: Pure sideways strafe while maintaining forward speed
+        # LINE CORRECTION: Use strafing to move sideways and re-center on the line
         else:
-            # Small correction - pure sideways movement while going forward
-            strafe_power = int(abs_steering * base_speed * 0.4)
+            # For all other deviations, we strafe.
+            forward_speed = int(base_speed * 0.9) # Slightly reduce speed while correcting
             
-            if steering > 0:  # Need to move right
-                # Pure right strafe while moving forward
-                fl = base_speed + strafe_power
-                fr = base_speed - strafe_power
-                bl = base_speed - strafe_power  
-                br = base_speed + strafe_power
-            else:  # Need to move left
-                # Pure left strafe while moving forward
-                fl = base_speed - strafe_power
-                fr = base_speed + strafe_power
-                bl = base_speed + strafe_power
-                br = base_speed - strafe_power
+            # Strafe power is proportional to the steering error, with a higher
+            # multiplier to ensure the correction is effective.
+            strafe_power = int(steering * 100) # Increased multiplier for more responsive strafing
             
-            # Clamp all speeds to valid range
-            fl = max(int(base_speed * 0.5), min(100, fl))
-            fr = max(int(base_speed * 0.5), min(100, fr))
-            bl = max(int(base_speed * 0.5), min(100, bl))
-            br = max(int(base_speed * 0.5), min(100, br))
+            # Combine forward motion with sideways strafing.
+            # To strafe right (steering > 0), the command is a mix of forward and pure right strafe.
+            # Pure right strafe: (speed, -speed, -speed, speed)
+            fl = forward_speed + strafe_power
+            fr = forward_speed - strafe_power
+            bl = forward_speed - strafe_power
+            br = forward_speed + strafe_power
+            
+            # Clamp all speeds to the valid motor range (-100 to 100)
+            fl = max(-100, min(100, fl))
+            fr = max(-100, min(100, fr))
+            bl = max(-100, min(100, bl))
+            br = max(-100, min(100, br))
             
             return (fl, fr, bl, br)
     
@@ -607,14 +578,14 @@ class CameraLineFollower:
             abs_offset = abs(offset)
             is_intersection = line_result.get('intersection_detected', False)
             
-            # Determine movement mode
-            if is_intersection or abs_offset > 0.4:
+            # Determine movement mode (updated to match new thresholds)
+            if is_intersection or abs_offset > 0.35:
                 movement_mode = "TURNING"
                 mode_color = (0, 0, 255)  # Red
-            elif abs_offset > 0.15:
+            elif abs_offset > 0.10:
                 movement_mode = "STRAFE+FWD"
                 mode_color = (0, 165, 255)  # Orange
-            elif abs_offset > 0.03:
+            elif abs_offset > 0.01:
                 movement_mode = "SIDEWAYS"
                 mode_color = (0, 255, 255)  # Yellow
             else:
