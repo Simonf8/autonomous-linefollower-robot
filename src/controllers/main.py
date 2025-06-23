@@ -624,6 +624,7 @@ def main():
         motor_speeds = robot.esp32.latest_encoder_data
         
         data = {
+            'esp32_connected': robot.esp32.connected,
             'state': robot.state,
             'x': x,
             'y': y,
