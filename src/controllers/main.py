@@ -317,6 +317,8 @@ class RobotController:
         
         self.line_pid = PIDController(kp=0.5, ki=0.01, kd=0.1, output_limits=(-100, 100))
         self.state = "idle"
+        self.recovery_state = "idle"  # "idle", "start", "swing_left", "swing_right", "reverse"
+        self.recovery_start_time = 0
         
         if FEATURES['VISION_SYSTEM_ENABLED']:
             self._setup_vision()
@@ -471,6 +473,8 @@ class RobotController:
             print("State: Replanning due to obstacle.")
             self._stop_motors()
             self._plan_path_to_target() # Re-run planning with the updated grid
+        elif self.state == "recovering_line":
+            self._execute_line_recovery()
         elif self.state == "mission_complete":
             self._stop_motors()
         elif self.state == "error":
@@ -481,9 +485,13 @@ class RobotController:
         """Follow the line using ESP32 line sensor data."""
         line_pos, line_err, sensor_vals = self.esp32.get_line_sensor_data()
         
+        # First, check if the line is visible.
         if line_pos == -1:
-            print("Line lost!")
-            self._recover_line()
+            # If the line is lost, stop and initiate the recovery sequence.
+            print("Line lost! Initiating recovery sequence.")
+            self.state = "recovering_line"
+            self.recovery_state = "start"  # Reset to the beginning of the recovery sequence
+            self._stop_motors()
             return
 
         # Detect corners based on line error magnitude
@@ -599,6 +607,59 @@ class RobotController:
         
         self.esp32.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
         return True
+
+    def _execute_line_recovery(self):
+        """Executes a sequence of maneuvers to find a lost line."""
+        # If the line is found at any point during recovery, resume the mission.
+        if self.esp32.is_line_detected():
+            print("Line re-acquired! Resuming path following.")
+            self.state = "path_following"
+            self.recovery_state = "idle"
+            return
+
+        # Initialize the recovery timer on the first attempt.
+        if self.recovery_state == "start":
+            self.recovery_start_time = time.time()
+            self.recovery_state = "swing_left"
+            print("Recovery state: Swinging left...")
+
+        # If recovery takes too long, give up and enter an error state.
+        if time.time() - self.recovery_start_time > 5.0:  # 5-second timeout
+            print("Line recovery failed. Could not find the line.")
+            self.state = "error"
+            self.recovery_state = "idle"
+            self._stop_motors()
+            return
+
+        duration = time.time() - self.recovery_start_time
+
+        # --- Recovery Maneuver Sequence ---
+        # 1. Swing left for 0.75 seconds.
+        if self.recovery_state == "swing_left":
+            if duration < 0.75:
+                self.esp32.send_motor_speeds(-TURN_SPEED, TURN_SPEED, -TURN_SPEED, TURN_SPEED)
+            else:
+                self.recovery_state = "swing_right"
+                print("Recovery state: Swinging right...")
+
+        # 2. Swing right for 1.5 seconds (to pass the center).
+        elif self.recovery_state == "swing_right":
+            if duration < 2.25:  # 0.75s left + 1.5s right
+                self.esp32.send_motor_speeds(TURN_SPEED, -TURN_SPEED, TURN_SPEED, -TURN_SPEED)
+            else:
+                self.recovery_state = "reverse"
+                print("Recovery state: Reversing...")
+        
+        # 3. Return to center and reverse for 1 second.
+        elif self.recovery_state == "reverse":
+            if duration < 3.0: # bring it back to center
+                self.esp32.send_motor_speeds(-TURN_SPEED, TURN_SPEED, -TURN_SPEED, TURN_SPEED)
+            elif duration < 4.0:
+                speed = -LINE_FOLLOW_SPEED // 2
+                self.esp32.send_motor_speeds(speed, speed, speed, speed)
+            else:
+                # If the line is still not found, repeat the search cycle.
+                self.recovery_state = "swing_left"
 
     def _recover_line(self):
         """Basic line recovery: stop for now."""
