@@ -8,10 +8,11 @@ from pathfinder import Pathfinder
 class Navigator:
     """Handles path planning, path following, and navigation logic."""
 
-    def __init__(self, cell_size_m, start_cell, end_cell):
+    def __init__(self, cell_size_m, start_cell, end_cell, camera_offset):
         self.cell_size_m = cell_size_m
         self.start_cell = start_cell
         self.end_cell = end_cell
+        self.camera_offset = camera_offset
 
         self.path = []
         self.smoothed_path = None
@@ -80,15 +81,19 @@ class Navigator:
 
     def pure_pursuit_controller(self, pose):
         """Calculates wheel speeds to follow the path using Pure Pursuit."""
-        robot_x, robot_y, robot_heading = pose
+        cam_x, cam_y, robot_heading = pose
         
-        lookahead_point = self.get_lookahead_point(pose)
+        # Calculate the robot's actual center of rotation
+        robot_center_x = cam_x - self.camera_offset * math.cos(robot_heading)
+        robot_center_y = cam_y - self.camera_offset * math.sin(robot_heading)
+        
+        lookahead_point = self.get_lookahead_point((robot_center_x, robot_center_y))
         if lookahead_point is None:
             return 0, 0, 0, 0 # Stop if no path
 
         # Transform lookahead point to robot's coordinate frame
-        dx = lookahead_point[0] - robot_x
-        dy = lookahead_point[1] - robot_y
+        dx = lookahead_point[0] - robot_center_x
+        dy = lookahead_point[1] - robot_center_y
         
         # Angle to the lookahead point
         angle_to_point = math.atan2(dy, dx)

@@ -20,7 +20,8 @@ class Robot:
         self.navigator = Navigator(
             cell_size_m=config['CELL_SIZE_M'],
             start_cell=config['START_CELL'],
-            end_cell=config['END_CELL']
+            end_cell=config['END_CELL'],
+            camera_offset=config['CAMERA_FORWARD_OFFSET_M']
         )
         
         # Robot State - now using a precise pose
