@@ -12,7 +12,7 @@ from typing import List, Tuple, Optional
 from flask import Flask, jsonify, render_template, request, Response
 
 # Import our clean modules
-from object_detection import ObjectDetector, PathShapeDetector
+from object_detection import ObjectDetector, PathShapeDetector, LineObstacleDetector
 from pathfinder import Pathfinder
 from box import BoxHandler
 from position_tracker import OmniWheelOdometry, PositionTracker
@@ -26,7 +26,7 @@ from intersection_detector import IntersectionDetector
 FEATURES = {
     'OBJECT_DETECTION_ENABLED': False,      # Enable YOLO object detection - DISABLED for performance
     'PATH_SHAPE_DETECTION_ENABLED': False,   # Enable path shape analysis
-    'OBSTACLE_AVOIDANCE_ENABLED': False,     # Enable obstacle avoidance behavior
+    'OBSTACLE_AVOIDANCE_ENABLED': True,     # Enable obstacle avoidance behavior
     'VISION_SYSTEM_ENABLED': True,          # Enable camera and vision processing
     'INTERSECTION_CORRECTION_ENABLED': True,# Enable intersection-based position correction
     'USE_ESP32_LINE_SENSOR': True,          # Use ESP32 hardware sensor for line following
@@ -288,6 +288,7 @@ class RobotController:
         self.object_detector = None
         self.path_shape_detector = None
         self.intersection_detector = None
+        self.line_obstacle_detector = None
         self.frame = None
         self.processed_frame = None
         self.frame_lock = threading.Lock()
@@ -333,6 +334,8 @@ class RobotController:
         print("Initializing vision system...")
         if FEATURES['INTERSECTION_CORRECTION_ENABLED']:
             self.intersection_detector = IntersectionDetector(debug=FEATURES['DEBUG_VISUALIZATION_ENABLED'])
+        if FEATURES['OBSTACLE_AVOIDANCE_ENABLED']:
+            self.line_obstacle_detector = LineObstacleDetector(debug=FEATURES['DEBUG_VISUALIZATION_ENABLED'])
         if FEATURES['OBJECT_DETECTION_ENABLED']:
             self.object_detector = ObjectDetector()
         if FEATURES['PATH_SHAPE_DETECTION_ENABLED']:
@@ -389,6 +392,24 @@ class RobotController:
 
         processed_frame = frame_copy
         
+        # --- Obstacle Detection ---
+        if FEATURES['OBSTACLE_AVOIDANCE_ENABLED'] and self.line_obstacle_detector and self.state == "path_following":
+            obstacle = self.line_obstacle_detector.detect(frame_copy)
+            if obstacle:
+                print("Line is blocked! Initiating avoidance maneuver.")
+                # Estimate obstacle's world position (simplified: assume it's a bit in front of the robot)
+                robot_x, robot_y, robot_h = self.position_tracker.get_pose()
+                obstacle_x = robot_x + 0.20 * math.cos(robot_h) # 20cm in front
+                obstacle_y = robot_y + 0.20 * math.sin(robot_h)
+                
+                obstacle_cell = self.pathfinder.world_to_cell(obstacle_x, obstacle_y)
+                
+                # Update the grid and trigger replanning
+                self.pathfinder.update_obstacle(obstacle_cell[0], obstacle_cell[1], is_obstacle=True)
+                self.state = "replanning"
+                return # Stop further vision processing this frame
+
+        # --- Intersection Detection ---
         if FEATURES['INTERSECTION_CORRECTION_ENABLED'] and self.intersection_detector:
             # Only check for intersection every so often to avoid multiple triggers
             if time.time() - self.last_intersection_time > 3.0: # 3 second cooldown
@@ -446,6 +467,10 @@ class RobotController:
             self._plan_path_to_target()
         elif self.state == "path_following":
             self._follow_path()
+        elif self.state == "replanning":
+            print("State: Replanning due to obstacle.")
+            self._stop_motors()
+            self._plan_path_to_target() # Re-run planning with the updated grid
         elif self.state == "mission_complete":
             self._stop_motors()
         elif self.state == "error":

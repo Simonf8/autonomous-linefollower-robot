@@ -199,6 +199,81 @@ class ObjectDetector:
         
         return distance <= tolerance
 
+class LineObstacleDetector:
+    """
+    Detects obstacles directly on the line path using color and contour analysis.
+    This is a simpler, faster alternative to YOLO for on-line obstacles.
+    """
+    def __init__(self, debug=False):
+        self.debug = debug
+        # Line detection parameters
+        self.black_threshold = 80
+        self.blur_size = (5, 5)
+        self.min_line_contour_area = 100
+        # Obstacle detection parameters
+        self.obstacle_color_threshold = 100  # How bright an object is to be an obstacle
+        self.min_obstacle_area = 500         # Min area to be considered a blocking obstacle
+
+    def detect(self, frame: np.ndarray) -> Optional[Dict]:
+        """
+        Detects an obstacle if it is physically blocking the detected line path.
+
+        Args:
+            frame: The input camera frame (BGR).
+
+        Returns:
+            A dictionary with obstacle info if detected, otherwise None.
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, self.blur_size, 0)
+        
+        # 1. Find the main line
+        _, line_mask = cv2.threshold(blurred, self.black_threshold, 255, cv2.THRESH_BINARY_INV)
+        line_contours, _ = cv2.findContours(line_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not line_contours:
+            return None # No line found, so can't detect obstacle on it
+
+        main_line_contour = max(line_contours, key=cv2.contourArea)
+        if cv2.contourArea(main_line_contour) < self.min_line_contour_area:
+            return None # Line is too small to be reliable
+
+        # 2. Identify potential obstacles (bright areas)
+        _, obstacle_mask = cv2.threshold(blurred, self.obstacle_color_threshold, 255, cv2.THRESH_BINARY)
+
+        # 3. Find where obstacles intersect with the line path
+        line_area_mask = np.zeros_like(gray)
+        cv2.drawContours(line_area_mask, [main_line_contour], -1, 255, -1)
+        
+        blocking_mask = cv2.bitwise_and(obstacle_mask, line_area_mask)
+        
+        # 4. Find the contours of the blocking objects
+        blocking_contours, _ = cv2.findContours(blocking_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not blocking_contours:
+            return None # No obstacles are blocking the line
+
+        # Find the largest blocking object
+        largest_blocker = max(blocking_contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest_blocker)
+
+        if area > self.min_obstacle_area:
+            M = cv2.moments(largest_blocker)
+            if M["m00"] > 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                
+                if self.debug:
+                    print(f"Blocking obstacle detected at ({cx}, {cy}) with area {area}")
+
+                return {
+                    "area": area,
+                    "center": (cx, cy),
+                    "contour": largest_blocker
+                }
+
+        return None
+
 class PathShapeDetector:
     """Detects path shapes and upcoming turns using computer vision."""
     
