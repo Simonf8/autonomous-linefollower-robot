@@ -154,10 +154,10 @@ class OmniwheelRobot:
     def __init__(self):
         # Motor pin setup
         self.motors = {
-            'fl': {'p1': PWM(Pin(5), freq=500), 'p2': PWM(Pin(4), freq=500)},
-            'fr': {'p1': PWM(Pin(6), freq=500), 'p2': PWM(Pin(7), freq=500)},
-            'bl': {'p1': PWM(Pin(16), freq=500), 'p2': PWM(Pin(15), freq=500)},
-            'br': {'p1': PWM(Pin(17), freq=500), 'p2': PWM(Pin(18), freq=500)}
+            'fl': {'p1': PWM(Pin(5), freq=50), 'p2': PWM(Pin(4), freq=50)},
+            'fr': {'p1': PWM(Pin(6), freq=50), 'p2': PWM(Pin(7), freq=50)},
+            'bl': {'p1': PWM(Pin(16), freq=50), 'p2': PWM(Pin(15), freq=50)},
+            'br': {'p1': PWM(Pin(17), freq=50), 'p2': PWM(Pin(18), freq=50)}
         }
         
         # Encoder pin setup

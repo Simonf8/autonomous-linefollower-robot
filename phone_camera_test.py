@@ -555,32 +555,7 @@ def api_status():
     })
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("Phone Camera Detection System - FAST & SIMPLE")
-    print("=" * 60)
-    print("Features:")
-    print("- Line Following Detection")
-    print("- Smart Obstacle Detection (non-black objects on line path)")
-    print("- No YOLO needed - much faster!")
-    print("- Real-time Processing")
-    print("- Web Interface")
-    print("=" * 60)
-    print("Detection Method:")
-    print("- Black line detection using contours")
-    print("- Obstacle detection: ONLY objects that BLOCK the black line")
-    print("- Analyzes line continuity in horizontal strips")
-    print("- Only triggers when line is 30%+ blocked")
-    print(f"- Line path width: {LINE_PATH_WIDTH} pixels")
-    print(f"- Obstacle threshold: {OBSTACLE_COLOR_THRESHOLD} (brightness)")
-    print("=" * 60)
-    print("Setup Instructions:")
-    print("1. Install IP Webcam app on your phone")
-    print("2. Start the IP Webcam app")
-    print("3. Note your phone's IP address from the app")
-    print(f"4. Update PHONE_IP variable if needed (currently: {PHONE_IP})")
-    print("5. Go to http://localhost:5000 in your browser")
-    print("   Or from another device: http://192.168.2.20:5000")
-    print("=" * 60)
+
     
     try:
         app.run(host='0.0.0.0', port=5000, debug=False)

@@ -17,6 +17,7 @@ from pathfinder import Pathfinder
 from box import BoxHandler
 from position_tracker import OmniWheelOdometry, PositionTracker
 from pid import PIDController
+from intersection_detector import IntersectionDetector
 
 # ================================
 # FEATURE CONFIGURATION
@@ -26,7 +27,8 @@ FEATURES = {
     'OBJECT_DETECTION_ENABLED': False,      # Enable YOLO object detection - DISABLED for performance
     'PATH_SHAPE_DETECTION_ENABLED': False,   # Enable path shape analysis
     'OBSTACLE_AVOIDANCE_ENABLED': False,     # Enable obstacle avoidance behavior
-    'VISION_SYSTEM_ENABLED': False,          # Enable camera and vision processing - DISABLED for ESP32 line following
+    'VISION_SYSTEM_ENABLED': True,          # Enable camera and vision processing
+    'INTERSECTION_CORRECTION_ENABLED': True,# Enable intersection-based position correction
     'USE_ESP32_LINE_SENSOR': True,          # Use ESP32 hardware sensor for line following
     'POSITION_CORRECTION_ENABLED': True,    # Enable waypoint position corrections
     'PERFORMANCE_LOGGING_ENABLED': True,    # Enable detailed performance logging
@@ -66,7 +68,6 @@ CORNER_TURN_MODES = {
     'PIVOT': 'pivot',             # Turn in place like a tank
     'FRONT_TURN': 'front_turn'    # Turn using front wheels primarily
 }
-CURRENT_CORNER_MODE = CORNER_TURN_MODES['SMOOTH']  # Default mode
 
 # Corner detection thresholds
 CORNER_DETECTION_THRESHOLD = 0.35    # Line offset to detect corner
@@ -76,6 +77,10 @@ SHARP_CORNER_THRESHOLD = 0.6         # Threshold for sharp vs gentle corners
 # Vision configuration (placeholders, not used for line following)
 IMG_PATH_SRC_PTS = np.float32([[200, 300], [440, 300], [580, 480], [60, 480]])
 IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
+
+# Camera configuration
+PHONE_IP = "192.168.2.6" # CHANGE THIS to your phone's camera stream IP
+CAMERA_WIDTH, CAMERA_HEIGHT = 416, 320
 
 class ESP32Bridge:
     """ESP32 communication bridge for motors, encoders, and line sensors."""
@@ -282,9 +287,14 @@ class RobotController:
         
         self.object_detector = None
         self.path_shape_detector = None
+        self.intersection_detector = None
         self.frame = None
+        self.processed_frame = None
+        self.frame_lock = threading.Lock()
+        
         self.detections = {}
         self.path_shape = "straight"
+        self.last_intersection_time = 0
         
         # Odometry and position tracking setup
         initial_pose = (START_POSITION[0], START_POSITION[1], START_HEADING)
@@ -321,6 +331,8 @@ class RobotController:
             return
 
         print("Initializing vision system...")
+        if FEATURES['INTERSECTION_CORRECTION_ENABLED']:
+            self.intersection_detector = IntersectionDetector(debug=FEATURES['DEBUG_VISUALIZATION_ENABLED'])
         if FEATURES['OBJECT_DETECTION_ENABLED']:
             self.object_detector = ObjectDetector()
         if FEATURES['PATH_SHAPE_DETECTION_ENABLED']:
@@ -366,6 +378,32 @@ class RobotController:
         print("Starting mission...")
         self.position_tracker.odometry.set_pose(START_POSITION[0], START_POSITION[1], START_HEADING)
         self.state = "planning"
+
+    def _process_vision(self):
+        """Process the latest camera frame for events."""
+        if not FEATURES['VISION_SYSTEM_ENABLED'] or self.frame is None:
+            return
+
+        with self.frame_lock:
+            frame_copy = self.frame.copy()
+
+        processed_frame = frame_copy
+        
+        if FEATURES['INTERSECTION_CORRECTION_ENABLED'] and self.intersection_detector:
+            # Only check for intersection every so often to avoid multiple triggers
+            if time.time() - self.last_intersection_time > 3.0: # 3 second cooldown
+                intersection_type = self.intersection_detector.detect(frame_copy)
+                if intersection_type:
+                    print(f"Intersection detected! Type: {intersection_type}. Recalibrating position.")
+                    self.position_tracker.recalibrate_position_to_nearest_cell()
+                    self.last_intersection_time = time.time()
+                
+                if FEATURES['DEBUG_VISUALIZATION_ENABLED']:
+                    processed_frame = self.intersection_detector.draw_debug_info(processed_frame, intersection_type)
+
+        # Store the processed frame for the video feed
+        with self.frame_lock:
+            self.processed_frame = processed_frame
 
     def _plan_path_to_target(self):
         """Plan the path to the target cell."""
@@ -428,7 +466,7 @@ class RobotController:
         
         if abs_error > CORNER_DETECTION_THRESHOLD * 1000:  # ESP32 sends error in range -1000 to +1000
             # Corner detected - determine direction
-            corner_direction = "left" if line_err > 0 else "right"
+            corner_direction = "left" if line_err < 0 else "right"
             
             # Check if it's a sharp corner
             is_sharp_corner = abs_error > SHARP_CORNER_THRESHOLD * 1000
@@ -447,27 +485,26 @@ class RobotController:
             self.esp32.send_motor_speeds(left_speed, right_speed, left_speed, right_speed)
 
     def _execute_corner_turn(self, corner_direction: str, line_error: int):
-        """Execute different types of corner turns based on the current mode."""
-        global CURRENT_CORNER_MODE
+        """Execute different types of corner turns based on the robot's location."""
         
-        if CURRENT_CORNER_MODE == CORNER_TURN_MODES['SMOOTH']:
-            # Normal wheel-like smooth cornering (current behavior)
-            return self._smooth_corner_turn(corner_direction, line_error)
-        
-        elif CURRENT_CORNER_MODE == CORNER_TURN_MODES['SIDEWAYS']:
-            # Strafe sideways through the corner
-            return self._sideways_corner_turn(corner_direction, line_error)
-        
-        elif CURRENT_CORNER_MODE == CORNER_TURN_MODES['PIVOT']:
-            # Turn in place like a tank
+        # Determine if the robot is in a special zone (pickup/dropoff area)
+        # We assume these are at the beginning and end of the planned path.
+        is_special_zone = False
+        if self.path:
+            # Check if near the start of the path (e.g., first waypoint)
+            if self.current_target_index <= 0:
+                is_special_zone = True
+            
+            # Check if near the end of the path (e.g., last two waypoints)
+            if self.current_target_index >= len(self.path) - 2:
+                is_special_zone = True
+
+        if is_special_zone:
+            # Use a precise turn (e.g., pivot) in special zones for maneuvering
+            print("Executing PIVOT turn for precision maneuver.")
             return self._pivot_corner_turn(corner_direction, line_error)
-        
-        elif CURRENT_CORNER_MODE == CORNER_TURN_MODES['FRONT_TURN']:
-            # Turn using front wheels primarily
-            return self._front_turn_corner(corner_direction, line_error)
-        
         else:
-            # Default to smooth cornering
+            # Use a smooth turn for general navigation
             return self._smooth_corner_turn(corner_direction, line_error)
 
     def _smooth_corner_turn(self, corner_direction: str, line_error: int):
@@ -607,7 +644,23 @@ def main():
     @app.route('/video_feed')
     def video_feed():
         """Video streaming route. Returns a placeholder since camera is disabled."""
-        return Response(status=204) # No content
+        if not FEATURES['VISION_SYSTEM_ENABLED']:
+            return Response(status=204) # No content
+
+        def generate_frames():
+            while robot.running:
+                with robot.frame_lock:
+                    if robot.processed_frame is None:
+                        time.sleep(0.1)
+                        continue
+                    frame = robot.processed_frame.copy()
+                
+                _, buffer = cv2.imencode('.jpg', frame)
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                time.sleep(0.05) # Limit frame rate
+
+        return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
     
     @app.route('/start_mission')
     def start_mission():
@@ -642,41 +695,8 @@ def main():
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
             
-                time.sleep(0.5)
+                time.sleep(0.1)
         return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-    @app.route('/set_corner_mode/<mode>')
-    def set_corner_mode(mode):
-        """Change the corner turning mode."""
-        global CURRENT_CORNER_MODE
-        
-        if mode.upper() in CORNER_TURN_MODES:
-            CURRENT_CORNER_MODE = CORNER_TURN_MODES[mode.upper()]
-            return jsonify({
-                'status': 'success',
-                'message': f'Corner mode set to {mode.upper()}',
-                'current_mode': CURRENT_CORNER_MODE
-            })
-        else:
-            return jsonify({
-                'status': 'error', 
-                'message': f'Invalid corner mode. Available: {list(CORNER_TURN_MODES.keys())}',
-                'current_mode': CURRENT_CORNER_MODE
-            })
-
-    @app.route('/get_corner_mode')
-    def get_corner_mode():
-        """Get the current corner turning mode."""
-        return jsonify({
-            'current_mode': CURRENT_CORNER_MODE,
-            'available_modes': list(CORNER_TURN_MODES.keys()),
-            'mode_descriptions': {
-                'SMOOTH': 'Normal wheel-like smooth cornering',
-                'SIDEWAYS': 'Strafe sideways through corners',
-                'PIVOT': 'Turn in place like a tank',
-                'FRONT_TURN': 'Turn using front wheels primarily'
-            }
-        })
 
     def generate_grid_image(pathfinder, robot_cell, path, start_cell, end_cell):
         """Generates the grid image for the web UI."""
@@ -732,6 +752,39 @@ def main():
         
         return grid_img
     
+    # Start the camera capture thread if vision is enabled
+    if FEATURES['VISION_SYSTEM_ENABLED']:
+        def camera_capture_thread(robot_controller):
+            cap = cv2.VideoCapture(f"http://{PHONE_IP}:8080/video")
+            if not cap.isOpened():
+                print(f"ERROR: Could not connect to camera at {PHONE_IP}")
+                return
+
+            print("Camera connected successfully.")
+            while robot_controller.running:
+                ret, frame = cap.read()
+                if ret:
+                    resized_frame = cv2.resize(frame, (CAMERA_WIDTH, CAMERA_HEIGHT))
+                    with robot_controller.frame_lock:
+                        robot_controller.frame = resized_frame
+                else:
+                    print("Warning: Failed to read frame from camera. Retrying...")
+                    time.sleep(1)
+            cap.release()
+
+        camera_thread = threading.Thread(target=camera_capture_thread, args=(robot,), daemon=True)
+        camera_thread.start()
+
+    # Start the vision processing thread
+    if FEATURES['VISION_SYSTEM_ENABLED']:
+        def vision_processing_thread(robot_controller):
+            while robot_controller.running:
+                robot_controller._process_vision()
+                time.sleep(0.1) # Process at 10Hz
+
+        vision_thread = threading.Thread(target=vision_processing_thread, args=(robot,), daemon=True)
+        vision_thread.start()
+
     # Start the robot controller in a separate thread
     robot_thread = threading.Thread(target=robot.run, daemon=True)
     robot_thread.start()

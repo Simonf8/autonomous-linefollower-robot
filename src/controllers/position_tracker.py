@@ -354,36 +354,28 @@ class PositionTracker:
     def update(self, encoder_ticks: List[int]) -> Tuple[float, float, float]:
         """Update tracking with movement pattern analysis."""
         # Update odometry
-        pose = self.odometry.update(encoder_ticks)
-        x, y, heading = pose
+        self.odometry.update(encoder_ticks)
         
-        # Update path and velocity history
-        current_time = time.time()
-        self.path_history.append((x, y, heading, current_time))
+        # Update internal state from odometry
+        self.x, self.y, self.heading = self.odometry.get_pose()
         
-        velocities = self.odometry.get_velocities()
-        self.velocity_history.append((*velocities, current_time))
-        
-        # Update distance tracking
-        self._update_distance_tracking(x, y)
-        
-        # Analyze movement patterns
+        # Update performance and distance tracking
+        self._update_performance_metrics()
+        self._update_distance_tracking(self.x, self.y)
         self._analyze_movement_patterns()
         
-        # Update performance metrics
-        self._update_performance_metrics()
-        
-        return pose
+        return self.x, self.y, self.heading
     
     def _analyze_movement_patterns(self):
-        """Analyze robot movement patterns for omni-wheel diagnostics."""
+        """Analyze recent movement patterns for high-level state estimation."""
+        # Get latest velocities
+        vx, vy, omega = self.odometry.get_velocities()
+        
         current_time = time.time()
         dt = current_time - self.last_movement_analysis
         
         if dt < 0.1:  # Update every 100ms
             return
-        
-        vx, vy, omega = self.odometry.get_velocities()
         
         # Classify current movement
         if self.odometry.is_moving(0.02):
@@ -588,4 +580,27 @@ class PositionTracker:
     
     def get_pose(self) -> Tuple[float, float, float]:
         """Get current robot pose (x, y, heading) - delegates to odometry."""
-        return self.odometry.get_pose() 
+        return self.odometry.get_pose()
+    
+    def recalibrate_position_to_nearest_cell(self):
+        """
+        Recalibrates the robot's position to the center of the nearest grid cell.
+        This is useful when a reliable landmark, like an intersection, is detected.
+        """
+        current_cell_x, current_cell_y = self.get_current_cell()
+        
+        # Calculate the precise center of the current cell
+        recalibrated_x = (current_cell_x + 0.5) * self.cell_size_m
+        recalibrated_y = (current_cell_y + 0.5) * self.cell_size_m
+        
+        # Get the current heading, which we assume is still reliable
+        current_heading = self.odometry.get_heading()
+        
+        # Set the odometry pose to this new, corrected position
+        self.odometry.set_pose(recalibrated_x, recalibrated_y, current_heading)
+        
+        # Reset position uncertainty after recalibration
+        self.odometry.reset_uncertainty()
+        
+        print(f"Position recalibrated to cell ({current_cell_x}, {current_cell_y}) -> "
+              f"({recalibrated_x:.2f}, {recalibrated_y:.2f})") 
