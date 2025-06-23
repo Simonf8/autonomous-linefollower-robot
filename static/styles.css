@@ -281,6 +281,75 @@ body {
     grid-column: span 2;
 }
 
+.camera-controls {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.camera-btn {
+    padding: 8px 16px;
+    background: rgba(0, 255, 255, 0.1);
+    border: 1px solid var(--cyber-blue);
+    color: var(--cyber-blue);
+    font-family: 'Orbitron', monospace;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    border-radius: 4px;
+}
+
+.camera-btn:hover {
+    background: rgba(0, 255, 255, 0.2);
+    box-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+}
+
+.camera-btn.active {
+    background: var(--cyber-blue);
+    color: var(--dark-bg);
+    box-shadow: 0 0 15px var(--cyber-blue);
+}
+
+/* Camera Debug Panel */
+.camera-debug-panel {
+    margin-top: 20px;
+}
+
+.camera-debug-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto auto;
+    gap: 15px;
+}
+
+.camera-debug-grid .debug-item:last-child {
+    grid-column: 1 / -1;  /* Span across both columns for movement mode */
+}
+
+.debug-item {
+    background: rgba(0, 255, 255, 0.05);
+    border: 1px solid rgba(0, 255, 255, 0.2);
+    border-radius: 5px;
+    padding: 15px;
+    text-align: center;
+}
+
+.debug-label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-bottom: 5px;
+    letter-spacing: 1px;
+}
+
+.debug-value {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--cyber-green);
+}
+
 .camera-container {
     position: relative;
     border-radius: 8px;

@@ -15,6 +15,10 @@ class CameraLineFollower:
     def __init__(self, debug=False):
         self.debug = debug
         
+        # Debug frame optimization
+        self.debug_frame_counter = 0
+        self.debug_frame_skip = 2  # Only generate debug frame every 3rd detection
+        
         # Line detection parameters
         self.black_threshold = 80
         self.blur_size = (5, 5)
@@ -36,10 +40,10 @@ class CameraLineFollower:
         self.intersection_cooldown = 2.0   # Seconds between intersection detections
         self.last_intersection_time = 0
         
-        # Enhanced PID parameters like simple_robot.py
-        self.kp = 0.30  # Proportional gain (reduced for less aggressive response)
-        self.ki = 0.005  # Integral gain
-        self.kd = 0.20  # Derivative gain
+        # Enhanced PID parameters for better centering
+        self.kp = 0.45  # Proportional gain (increased for more active centering)
+        self.ki = 0.008  # Integral gain (slightly increased for steady-state accuracy)
+        self.kd = 0.15  # Derivative gain (reduced to prevent oscillation)
         self.max_turn_correction = 0.8  # Maximum turn correction
         
         # PID state
@@ -170,11 +174,17 @@ class CameraLineFollower:
         intersection_detected = self._detect_intersection(binary, width)
         line_result['intersection_detected'] = intersection_detected
         
-        # Create debug visualization if requested
+        # Create debug visualization if requested (optimized)
         if self.debug:
-            line_result['processed_frame'] = self._create_debug_frame_multi_zone(
-                frame, binary, bottom_roi, middle_roi, bottom_features, middle_features, line_result, intersection_detected
-            )
+            self.debug_frame_counter += 1
+            # Only generate debug frame every few detections to improve performance
+            if self.debug_frame_counter % (self.debug_frame_skip + 1) == 0:
+                line_result['processed_frame'] = self._create_debug_frame_multi_zone(
+                    frame, binary, bottom_roi, middle_roi, bottom_features, middle_features, line_result, intersection_detected
+                )
+            else:
+                # Use raw frame when skipping debug processing
+                line_result['processed_frame'] = frame
         else:
             line_result['processed_frame'] = frame
         
@@ -448,7 +458,13 @@ class CameraLineFollower:
     
     def get_motor_speeds(self, line_result: Dict, base_speed: int = 50) -> Tuple[int, int, int, int]:
         """
-        Convert line detection to motor speeds using enhanced steering like simple_robot.py
+        Convert line detection to motor speeds with sideways correction for position adjustments
+        and normal wheel turning for corners/intersections.
+        
+        Movement Strategy:
+        - Small position corrections: Strafe sideways while moving forward
+        - Large corrections/corners: Turn like normal wheels (differential steering)
+        - Intersections: Turn like normal wheels
         
         Args:
             line_result: Result from detect_line()
@@ -458,54 +474,90 @@ class CameraLineFollower:
             Tuple of motor speeds (fl, fr, bl, br)
         """
         steering = self.calculate_steering(line_result)
-        
-        # Variable turn rates based on steering magnitude (like simple_robot.py)
         abs_steering = abs(steering)
         
-        # Determine turn type and speeds
-        if abs_steering < 0.03:  # Dead zone - go straight
+        # Check if we're at an intersection - always use normal wheel turning
+        is_intersection = line_result.get('intersection_detected', False)
+        
+        if not line_result['line_detected']:
+            # No line detected - stop
+            return (0, 0, 0, 0)
+        
+        # Smaller dead zone for better centering
+        if abs_steering < 0.01:  # Reduced from 0.03 to 0.01 for more precise centering
             return (base_speed, base_speed, base_speed, base_speed)
         
-        elif abs_steering > 0.5:  # Sharp turn
-            if not line_result['line_detected']:
-                # If no line, stop
-                return (0, 0, 0, 0)
-            # Sharp turn - differential steering
-            turn_speed = int(base_speed * 0.8)  # Reduce speed for sharp turns
+        # INTERSECTION OR LARGE CORRECTION: Use normal wheel turning (differential steering)
+        elif is_intersection or abs_steering > 0.35:  # Reduced from 0.4 to 0.35
+            # At intersection or sharp corner - turn like normal wheels
+            turn_speed = int(base_speed * 0.8)  # Reduce speed for turns
+            
             if steering > 0:  # Turn right
-                return (turn_speed, int(turn_speed * 0.3), turn_speed, int(turn_speed * 0.3))
+                return (turn_speed, int(turn_speed * 0.2), turn_speed, int(turn_speed * 0.2))
             else:  # Turn left
-                return (int(turn_speed * 0.3), turn_speed, int(turn_speed * 0.3), turn_speed)
+                return (int(turn_speed * 0.2), turn_speed, int(turn_speed * 0.2), turn_speed)
         
-        elif abs_steering > 0.25:  # Medium turn
-            # Medium turn - gentle differential
-            turn_correction = steering * base_speed * 0.6
-            left_speed = int(base_speed - turn_correction)
-            right_speed = int(base_speed + turn_correction)
+        # MEDIUM CORRECTION: Combined forward + sideways movement
+        elif abs_steering > 0.10:  # Reduced from 0.15 to 0.10 for earlier intervention
+            # Move forward while strafing sideways to correct position
+            forward_speed = int(base_speed * 0.8)  # Slightly slower while correcting
             
-            # Clamp speeds
-            left_speed = max(0, min(100, left_speed))
-            right_speed = max(0, min(100, right_speed))
+            # Calculate sideways strafe component
+            strafe_power = int(abs_steering * base_speed * 0.6)
             
-            return (left_speed, right_speed, left_speed, right_speed)
+            if steering > 0:  # Need to move right
+                # Forward + right strafe: FL and BR faster, FR and BL slower
+                fl = forward_speed + strafe_power
+                fr = forward_speed - strafe_power  
+                bl = forward_speed - strafe_power
+                br = forward_speed + strafe_power
+            else:  # Need to move left
+                # Forward + left strafe: FR and BL faster, FL and BR slower
+                fl = forward_speed - strafe_power
+                fr = forward_speed + strafe_power
+                bl = forward_speed + strafe_power
+                br = forward_speed - strafe_power
+            
+            # Clamp all speeds to valid range
+            fl = max(0, min(100, fl))
+            fr = max(0, min(100, fr))
+            bl = max(0, min(100, bl))
+            br = max(0, min(100, br))
+            
+            return (fl, fr, bl, br)
         
-        else:  # Gentle turn
-            # Gentle turn - small correction
-            turn_correction = steering * base_speed * 0.3
-            left_speed = int(base_speed - turn_correction)
-            right_speed = int(base_speed + turn_correction)
+        # SMALL CORRECTION: Pure sideways strafe while maintaining forward speed
+        else:
+            # Small correction - pure sideways movement while going forward
+            strafe_power = int(abs_steering * base_speed * 0.4)
             
-            # Clamp speeds
-            left_speed = max(int(base_speed * 0.7), min(100, left_speed))
-            right_speed = max(int(base_speed * 0.7), min(100, right_speed))
+            if steering > 0:  # Need to move right
+                # Pure right strafe while moving forward
+                fl = base_speed + strafe_power
+                fr = base_speed - strafe_power
+                bl = base_speed - strafe_power  
+                br = base_speed + strafe_power
+            else:  # Need to move left
+                # Pure left strafe while moving forward
+                fl = base_speed - strafe_power
+                fr = base_speed + strafe_power
+                bl = base_speed + strafe_power
+                br = base_speed - strafe_power
             
-            return (left_speed, right_speed, left_speed, right_speed)
+            # Clamp all speeds to valid range
+            fl = max(int(base_speed * 0.5), min(100, fl))
+            fr = max(int(base_speed * 0.5), min(100, fr))
+            bl = max(int(base_speed * 0.5), min(100, bl))
+            br = max(int(base_speed * 0.5), min(100, br))
+            
+            return (fl, fr, bl, br)
     
     def _create_debug_frame_multi_zone(self, frame: np.ndarray, binary: np.ndarray, 
                                      bottom_roi: np.ndarray, middle_roi: np.ndarray,
                                      bottom_features: Optional[Dict], middle_features: Optional[Dict],
                                      line_result: Dict, intersection_detected: bool) -> np.ndarray:
-        """Create debug visualization for multi-zone detection"""
+        """Create optimized debug visualization for multi-zone detection"""
+        # Create a lightweight copy for debug visualization
         debug_frame = frame.copy()
         height, width = frame.shape[:2]
         
@@ -552,10 +604,27 @@ class CameraLineFollower:
             zone = line_result.get('zone_used', 'unknown')
             offset = line_result['line_offset']
             conf = line_result['confidence']
+            abs_offset = abs(offset)
+            is_intersection = line_result.get('intersection_detected', False)
+            
+            # Determine movement mode
+            if is_intersection or abs_offset > 0.4:
+                movement_mode = "TURNING"
+                mode_color = (0, 0, 255)  # Red
+            elif abs_offset > 0.15:
+                movement_mode = "STRAFE+FWD"
+                mode_color = (0, 165, 255)  # Orange
+            elif abs_offset > 0.03:
+                movement_mode = "SIDEWAYS"
+                mode_color = (0, 255, 255)  # Yellow
+            else:
+                movement_mode = "STRAIGHT"
+                mode_color = (0, 255, 0)  # Green
             
             cv2.putText(debug_frame, f"Zone: {zone}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             cv2.putText(debug_frame, f"Offset: {offset:.3f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             cv2.putText(debug_frame, f"Conf: {conf:.3f}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.putText(debug_frame, f"Mode: {movement_mode}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, mode_color, 2)
         else:
             cv2.putText(debug_frame, "NO LINE DETECTED", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         

@@ -33,7 +33,7 @@ FEATURES = {
     'USE_ESP32_LINE_SENSOR': True,          # Use ESP32 hardware sensor for line following
     'POSITION_CORRECTION_ENABLED': True,    # Enable waypoint position corrections
     'PERFORMANCE_LOGGING_ENABLED': True,    # Enable detailed performance logging
-    'DEBUG_VISUALIZATION_ENABLED': False,   # Enable debug visualization windows - DISABLED for headless operation
+    'DEBUG_VISUALIZATION_ENABLED': True,    # Enable debug visualization for web interface
     'SMOOTH_CORNERING_ENABLED': True,       # Enable smooth cornering like normal wheels
     'ADAPTIVE_SPEED_ENABLED': True,         # Enable speed adaptation based on conditions
 }
@@ -240,6 +240,7 @@ class RobotController:
         # Camera-based line following
         self.camera_line_follower = CameraLineFollower(debug=FEATURES['DEBUG_VISUALIZATION_ENABLED'])
         self.latest_line_result = None
+        self.debug_frame = None  # Store debug frames from camera line follower
         
         self.detections = {}
         self.path_shape = "straight"
@@ -478,6 +479,10 @@ class RobotController:
         line_result = self.camera_line_follower.detect_line(frame_copy)
         self.latest_line_result = line_result
         
+        # Store debug frame for web interface
+        with self.frame_lock:
+            self.debug_frame = line_result.get('processed_frame', frame_copy)
+        
         # Check if line is detected
         if not line_result['line_detected']:
             print("Camera: Line lost! Initiating recovery sequence.")
@@ -618,6 +623,7 @@ def main():
         sensor_vals = [0, 0, 0]
         
         # Get camera-based line data if available
+        camera_status = "No Data"
         if robot.latest_line_result:
             if robot.latest_line_result['line_detected']:
                 # Convert camera offset to position-like value
@@ -625,8 +631,31 @@ def main():
                 line_pos = int(1000 + offset * 1000)  # Convert -1,1 to 0,2000 range
                 line_err = int(offset * 1000)         # Convert to -1000,1000 range
                 confidence = robot.latest_line_result['confidence']
-                # Simulate sensor values based on line position
-                sensor_vals = [int(confidence * 800), int(confidence * 900), int(confidence * 800)]
+                # Simulate sensor values based on line position and confidence
+                base_val = int(confidence * 1000)
+                left_val = max(0, base_val - abs(int(offset * 500)))
+                center_val = int(confidence * 1000)
+                right_val = max(0, base_val - abs(int(offset * 500)))
+                sensor_vals = [left_val, center_val, right_val]
+                
+                zone = robot.latest_line_result.get('zone_used', 'unknown')
+                camera_status = f"Line Detected ({zone})"
+                
+                # Determine movement mode for display
+                abs_offset = abs(offset)
+                is_intersection = robot.latest_line_result.get('intersection_detected', False)
+                
+                if is_intersection or abs_offset > 0.4:
+                    movement_mode = "TURNING"
+                elif abs_offset > 0.15:
+                    movement_mode = "STRAFE+FWD" 
+                elif abs_offset > 0.03:
+                    movement_mode = "SIDEWAYS"
+                else:
+                    movement_mode = "STRAIGHT"
+            else:
+                camera_status = "No Line Detected"
+                movement_mode = "STOPPED"
         
         # Convert current cell to world coordinates for display
         x = robot.current_cell[0] * CELL_SIZE_M
@@ -653,7 +682,12 @@ def main():
             'current_target_index': robot.current_target_index,
             'camera_image': None, # Camera disabled
             'position_source': 'camera_based',  # Indicate camera-based positioning
-            'line_source': 'camera_vision'      # Indicate camera-based line detection
+            'line_source': 'camera_vision',     # Indicate camera-based line detection
+            'camera_status': camera_status,
+            'camera_confidence': robot.latest_line_result.get('confidence', 0.0) if robot.latest_line_result else 0.0,
+            'camera_offset': robot.latest_line_result.get('line_offset', 0.0) if robot.latest_line_result else 0.0,
+            'intersection_detected': robot.latest_line_result.get('intersection_detected', False) if robot.latest_line_result else False,
+            'movement_mode': movement_mode if 'movement_mode' in locals() else 'UNKNOWN'
         }
         return jsonify(data)
 
@@ -677,6 +711,43 @@ def main():
                 time.sleep(0.05) # Limit frame rate
 
         return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+    @app.route('/camera_debug_feed')
+    def camera_debug_feed():
+        """Camera debug feed showing line detection visualization - optimized for speed."""
+        if not FEATURES['VISION_SYSTEM_ENABLED']:
+            return Response(status=204) # No content
+
+        def generate_debug_frames():
+            last_frame_time = 0
+            frame_skip_count = 0
+            target_fps = 15  # Reduce from ~20fps to 15fps for debug feed
+            frame_interval = 1.0 / target_fps
+            
+            while robot.running:
+                current_time = time.time()
+                
+                # Skip frame if not enough time has passed
+                if current_time - last_frame_time < frame_interval:
+                    time.sleep(0.01)
+                    continue
+                
+                with robot.frame_lock:
+                    if robot.debug_frame is None:
+                        time.sleep(0.1)
+                        continue
+                    frame = robot.debug_frame.copy()
+                
+                # Use faster JPEG encoding with lower quality for speed
+                encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]  # Reduce quality for speed
+                _, buffer = cv2.imencode('.jpg', frame, encode_params)
+                
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                
+                last_frame_time = current_time
+
+        return Response(generate_debug_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
     
     @app.route('/start_mission')
     def start_mission():
@@ -695,7 +766,11 @@ def main():
         def generate():
             while True:
                 robot_cell = robot.current_cell  # SIMPLIFIED: Use camera-based position
-                grid_image = generate_grid_image(robot.pathfinder, robot_cell, robot.path, START_CELL, END_CELL)
+                grid_array = generate_grid_image(robot.pathfinder, robot_cell, robot.path, START_CELL, END_CELL)
+                
+                # Convert numpy array to PIL Image
+                from PIL import Image
+                grid_image = Image.fromarray(cv2.cvtColor(grid_array, cv2.COLOR_BGR2RGB))
                 
                 # Convert PIL image to bytes
                 img_io = io.BytesIO()
@@ -710,11 +785,7 @@ def main():
 
     def generate_grid_image(pathfinder, robot_cell, path, start_cell, end_cell):
         """Generates the grid image for the web UI."""
-        # Debug: Print path info
-        if path and len(path) > 0:
-            print(f"DEBUG: Rendering path with {len(path)} waypoints")
-        else:
-            print("DEBUG: No path to render")
+        # Removed debug prints for performance
             
         grid = np.array(pathfinder.get_grid())
         cell_size = 20
@@ -856,7 +927,11 @@ def main():
         def vision_processing_thread(robot_controller):
             while robot_controller.running:
                 robot_controller._process_vision()
-                time.sleep(0.1) # Process at 10Hz
+                # Adaptive processing rate - slower when ESP32 disconnected
+                if robot_controller.esp32.connected:
+                    time.sleep(0.1)  # 10Hz when connected
+                else:
+                    time.sleep(0.2)  # 5Hz when disconnected to save CPU
 
         vision_thread = threading.Thread(target=vision_processing_thread, args=(robot,), daemon=True)
         vision_thread.start()

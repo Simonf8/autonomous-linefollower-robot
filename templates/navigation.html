@@ -56,6 +56,10 @@
                     <div class="panel-header">
                         <h2>LIVE CAMERA FEED</h2>
                         <div class="panel-indicator"></div>
+                        <div class="camera-controls">
+                            <button id="normal-feed-btn" class="camera-btn active" onclick="switchFeed('normal')">NORMAL</button>
+                            <button id="debug-feed-btn" class="camera-btn" onclick="switchFeed('debug')">LINE DEBUG</button>
+                        </div>
                     </div>
                     <div class="camera-container">
                         <img id="camera-feed" class="camera-image" src="{{ url_for('video_feed') }}" alt="Live Camera Feed">
@@ -140,6 +144,36 @@
                     </div>
                 </div>
 
+                <!-- Camera Debug Info -->
+                <div class="panel camera-debug-panel">
+                    <div class="panel-header">
+                        <h2>CAMERA LINE DETECTION</h2>
+                        <div class="panel-indicator"></div>
+                    </div>
+                    <div class="camera-debug-grid">
+                        <div class="debug-item">
+                            <div class="debug-label">STATUS</div>
+                            <div class="debug-value cyber-text" id="camera-status">No Data</div>
+                        </div>
+                        <div class="debug-item">
+                            <div class="debug-label">CONFIDENCE</div>
+                            <div class="debug-value cyber-text" id="camera-confidence">0.00</div>
+                        </div>
+                        <div class="debug-item">
+                            <div class="debug-label">LINE OFFSET</div>
+                            <div class="debug-value cyber-text" id="camera-offset">0.000</div>
+                        </div>
+                        <div class="debug-item">
+                            <div class="debug-label">INTERSECTION</div>
+                            <div class="debug-value cyber-text" id="intersection-status">NO</div>
+                        </div>
+                        <div class="debug-item">
+                            <div class="debug-label">MOVEMENT MODE</div>
+                            <div class="debug-value cyber-text" id="movement-mode">UNKNOWN</div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Corner Turning Mode Control -->
                 <!-- REMOVED as per user request for autonomous cornering -->
             </div>
@@ -157,6 +191,22 @@
     <script>
         function updateTimestamp() {
             document.getElementById('timestamp').textContent = new Date().toTimeString().substring(0, 8);
+        }
+
+        function switchFeed(feedType) {
+            const cameraFeed = document.getElementById('camera-feed');
+            const normalBtn = document.getElementById('normal-feed-btn');
+            const debugBtn = document.getElementById('debug-feed-btn');
+            
+            if (feedType === 'normal') {
+                cameraFeed.src = "{{ url_for('video_feed') }}";
+                normalBtn.classList.add('active');
+                debugBtn.classList.remove('active');
+            } else if (feedType === 'debug') {
+                cameraFeed.src = "{{ url_for('camera_debug_feed') }}";
+                debugBtn.classList.add('active');
+                normalBtn.classList.remove('active');
+            }
         }
 
         function updateData() {
@@ -179,6 +229,31 @@
                     // Update box progress
                     document.getElementById('boxes-collected').textContent = `${data.collected_boxes || 0}/${data.total_tasks || 4}`;
                     document.getElementById('boxes-delivered').textContent = `${data.delivered_boxes || 0}/${data.total_tasks || 4}`;
+
+                    // Update camera debug info
+                    document.getElementById('camera-status').textContent = data.camera_status || 'No Data';
+                    document.getElementById('camera-confidence').textContent = (data.camera_confidence || 0).toFixed(2);
+                    document.getElementById('camera-offset').textContent = (data.camera_offset || 0).toFixed(3);
+                    document.getElementById('intersection-status').textContent = data.intersection_detected ? 'YES' : 'NO';
+                    
+                    // Update movement mode with color coding
+                    const movementModeElement = document.getElementById('movement-mode');
+                    const movementMode = data.movement_mode || 'UNKNOWN';
+                    movementModeElement.textContent = movementMode;
+                    
+                    // Color code movement modes
+                    movementModeElement.className = 'debug-value cyber-text';
+                    if (movementMode === 'TURNING') {
+                        movementModeElement.style.color = '#ff0040';  // Red
+                    } else if (movementMode === 'STRAFE+FWD') {
+                        movementModeElement.style.color = '#ff8c00';  // Orange
+                    } else if (movementMode === 'SIDEWAYS') {
+                        movementModeElement.style.color = '#ffff00';  // Yellow
+                    } else if (movementMode === 'STRAIGHT') {
+                        movementModeElement.style.color = '#00ff41';  // Green
+                    } else {
+                        movementModeElement.style.color = '#00ffff';  // Cyan (default)
+                    }
 
                     // Update line sensor display based on ESP32 connection
                     const sensorPanel = document.querySelector('.sensor-panel');
