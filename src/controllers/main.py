@@ -35,6 +35,8 @@ CONFIG = {
     'LINE_FOLLOW_SPEED': 50,
     'ROBOT_WIDTH_M': 0.225,
     'ROBOT_LENGTH_M': 0.075,
+    'WHEEL_RADIUS_M': 0.035, # Added for Mecanum kinematics
+    'MOTOR_MAX_RPM': 200,      # Added for wheel speed calculations
     'CAMERA_FORWARD_OFFSET_M': 0.05,
     'START_CELL': (14, 14),
     'END_CELL': (2, 0),

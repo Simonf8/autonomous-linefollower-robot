@@ -1,132 +1,157 @@
 import numpy as np
 from scipy.interpolate import splprep, splev
 import math
-from typing import List, Tuple
 
-from pathfinder import Pathfinder
+from .pathfinder import PathFinder
 
 class Navigator:
-    """Handles path planning, path following, and navigation logic."""
+    """
+    Handles path planning, path smoothing, and path-following navigation logic.
+    """
 
-    def __init__(self, cell_size_m, start_cell, end_cell, camera_offset):
-        self.cell_size_m = cell_size_m
-        self.start_cell = start_cell
-        self.end_cell = end_cell
-        self.camera_offset = camera_offset
-
-        self.path = []
+    def __init__(self, config: dict):
+        """
+        Initializes the Navigator.
+        :param config: The main robot configuration dictionary.
+        """
+        self.config = config
+        self.pathfinder = PathFinder(config['CELL_SIZE_M'])
+        self.path = None
         self.smoothed_path = None
         self.current_target_index = 0
-        self.lookahead_distance = 0.2 # Lookahead distance in meters for pure pursuit
-        
-        maze_grid = Pathfinder.create_maze_grid()
-        self.pathfinder = Pathfinder(grid=maze_grid, cell_size_m=self.cell_size_m)
 
-    def plan_path(self, current_cell) -> bool:
-        """Plans a path from the current cell to the end cell."""
-        print(f"Planning path from {current_cell} to {self.end_cell}...")
-        path_nodes = self.pathfinder.find_path(current_cell, self.end_cell)
+    def find_path(self, start_world: tuple, end_world: tuple, grid: np.ndarray):
+        """
+        Plans a path from a start to an end coordinate, avoiding obstacles in the grid.
+        :param start_world: The starting (x, y) coordinates in meters.
+        :param end_world: The ending (x, y) coordinates in meters.
+        :param grid: The occupancy grid.
+        """
+        self.pathfinder.set_grid(grid)
+        start_cell = self.pathfinder.world_to_grid(start_world)
+        end_cell = self.pathfinder.world_to_grid(end_world)
+        
+        path_nodes = self.pathfinder.find_path(start_cell, end_cell)
         
         if path_nodes:
             self.path = path_nodes
             if len(self.path) > 1:
-                self.smoothed_path = self._generate_smoothed_path(self.path)
+                # Convert path to world coordinates for smoothing
+                path_world = np.array([self.pathfinder.grid_to_world(p) for p in self.path])
+                self.smoothed_path = self._generate_smoothed_path(path_world)
             else:
-                self.smoothed_path = None
+                self.smoothed_path = np.array([self.pathfinder.grid_to_world(self.path[0])])
             self.current_target_index = 0
-            print(f"Path planned: {len(self.path)} waypoints. Smoothing enabled.")
+            print(f"Path planned: {len(self.path)} waypoints. Smoothing complete.")
             return True
         else:
-            print(f"Failed to plan path from {current_cell} to {self.end_cell}")
+            print(f"Failed to plan path from {start_world} to {end_world}")
+            self.path = None
+            self.smoothed_path = None
             return False
 
-    def _generate_smoothed_path(self, path_nodes: List[Tuple[int, int]]):
-        """Generates a smooth B-spline path from waypoints."""
-        if len(path_nodes) < 2:
-            return None
+    def _generate_smoothed_path(self, path_world: np.ndarray):
+        """Generates a smooth B-spline path from world coordinate waypoints."""
+        if path_world.shape[0] < 2:
+            return path_world
 
-        path_m = np.array([(p[0] * self.cell_size_m, p[1] * self.cell_size_m) for p in path_nodes])
-        x, y = path_m[:, 0], path_m[:, 1]
+        # Ensure there are no duplicate points, which can cause issues with splprep
+        unique_path, indices = np.unique(path_world, axis=0, return_index=True)
+        unique_path = unique_path[np.argsort(indices)]
+
+        if unique_path.shape[0] < 2:
+            return unique_path
+            
+        x, y = unique_path[:, 0], unique_path[:, 1]
         
+        # k is the degree of the spline. Must be <= number of points - 1.
         k = min(len(x) - 1, 3)
-        if k < 1: return None
+        if k < 1: 
+            return unique_path
         
-        tck, u = splprep([x, y], s=0, k=k)
+        tck, u = splprep([x, y], s=0.1, k=k) # s is a smoothing factor
         u_new = np.linspace(u.min(), u.max(), 100)
         x_new, y_new = splev(u_new, tck)
         
         return np.column_stack((x_new, y_new))
 
-    def get_lookahead_point(self, pose):
-        """Finds the lookahead point on the smoothed path for pure pursuit."""
-        if self.smoothed_path is None:
-            return None
+    def pure_pursuit_controller(self, robot_pose: tuple) -> tuple:
+        """
+        Calculates the required robot velocity (vx, vy, v_theta) to follow the smoothed path.
+        :param robot_pose: The current pose of the robot (x, y, heading) in world coordinates.
+        :return: A tuple of (vx, vy, v_theta) for the robot velocity.
+        """
+        if self.smoothed_path is None or self.is_mission_complete(robot_pose):
+            return 0.0, 0.0, 0.0 # Stop
 
-        robot_pos = np.array([pose[0], pose[1]])
+        base_lookahead = 0.3 # meters
         
-        # Find the closest point on the path to the robot
-        distances = np.linalg.norm(self.smoothed_path - robot_pos, axis=1)
-        closest_index = np.argmin(distances)
-        
-        # Search forward from the closest point to find the lookahead point
-        lookahead_index = closest_index
-        while lookahead_index < len(self.smoothed_path) - 1:
-            dist_from_robot = np.linalg.norm(self.smoothed_path[lookahead_index] - robot_pos)
-            if dist_from_robot > self.lookahead_distance:
-                return self.smoothed_path[lookahead_index]
-            lookahead_index += 1
-            
-        # If no point is far enough, return the last point
-        return self.smoothed_path[-1]
+        # Find the best lookahead point on the path
+        lookahead_point, self.current_target_index = self._find_lookahead_point(robot_pose, base_lookahead)
 
-    def pure_pursuit_controller(self, pose):
-        """Calculates wheel speeds to follow the path using Pure Pursuit."""
-        cam_x, cam_y, robot_heading = pose
-        
-        # Calculate the robot's actual center of rotation
-        robot_center_x = cam_x - self.camera_offset * math.cos(robot_heading)
-        robot_center_y = cam_y - self.camera_offset * math.sin(robot_heading)
-        
-        lookahead_point = self.get_lookahead_point((robot_center_x, robot_center_y))
         if lookahead_point is None:
-            return 0, 0, 0, 0 # Stop if no path
+            return 0.0, 0.0, 0.0 # Stop if no lookahead point found
 
-        # Transform lookahead point to robot's coordinate frame
-        dx = lookahead_point[0] - robot_center_x
-        dy = lookahead_point[1] - robot_center_y
+        # Calculate the steering angle to the lookahead point
+        world_x, world_y, robot_heading = robot_pose
         
-        # Angle to the lookahead point
-        angle_to_point = math.atan2(dy, dx)
-        alpha = angle_to_point - robot_heading
-        alpha = (alpha + math.pi) % (2 * math.pi) - math.pi # Normalize
+        angle_to_target = np.arctan2(lookahead_point[1] - world_y, lookahead_point[0] - world_x)
+        steering_angle = self._normalize_angle(angle_to_target - robot_heading)
 
-        # High-level control outputs: forward speed and rotational speed
-        # The curvature of the path to the lookahead point determines the turn rate
-        curvature = (2 * math.sin(alpha)) / self.lookahead_distance
-        
-        # Convert curvature to a turn command (this is simplified)
-        # A more advanced model would use robot kinematics
-        turn_command = curvature * 100 # Scaling factor to be tuned
-        
-        return turn_command, alpha # Return turn command and heading error
+        target_speed = self._get_adaptive_speed(steering_angle)
 
-    def is_mission_complete(self):
-        """Check if the end of the path has been reached."""
-        return not self.path or self.current_target_index >= len(self.path)
+        v_theta = (2 * target_speed * np.sin(steering_angle)) / base_lookahead
+        
+        vx = target_speed
+        vy = 0.0
+        
+        return vx, vy, v_theta
 
-    def advance_waypoint(self, current_cell):
-        """Advance to the next waypoint and return the new heading."""
-        target_cell = self.path[self.current_target_index]
-        print(f"Waypoint detected! Advancing from {current_cell} to {target_cell}")
-        self.current_target_index += 1
+    def _find_lookahead_point(self, robot_pose: tuple, lookahead_distance: float):
+        """Finds the lookahead point on the smoothed path for pure pursuit."""
+        robot_pos = np.array([robot_pose[0], robot_pose[1]])
         
-        if self.current_target_index < len(self.path):
-            next_target = self.path[self.current_target_index]
-            dx = next_target[0] - target_cell[0]
-            dy = next_target[1] - target_cell[1]
-            return math.atan2(dy, dx)
+        path_segment = self.smoothed_path[self.current_target_index:]
+        if len(path_segment) == 0:
+            return None, self.current_target_index
+
+        distances = np.linalg.norm(path_segment - robot_pos, axis=1)
         
-        return None # No new heading if it's the last waypoint
-    
-    def update_obstacle(self, obstacle_cell):
-        self.pathfinder.update_obstacle(obstacle_cell[0], obstacle_cell[1], is_obstacle=True) 
+        possible_points_indices = np.where(distances >= lookahead_distance)[0]
+        
+        if len(possible_points_indices) > 0:
+            best_i = self.current_target_index + possible_points_indices[0]
+            return self.smoothed_path[best_i], best_i
+        else:
+            # Return the last point if we are close to the end and no points are far enough
+            return self.smoothed_path[-1], len(self.smoothed_path) - 1
+
+    def _get_adaptive_speed(self, steering_angle: float) -> float:
+        """Calculates an appropriate speed based on the required turn angle."""
+        if not self.config['FEATURES'].get('ADAPTIVE_SPEED_ENABLED', False):
+            return self.config.get('BASE_SPEED', 50) / 100.0 * 0.7 # Scale to m/s
+
+        turn_factor = 1.0 - (abs(steering_angle) / (np.pi / 2))**0.8
+        
+        base_speed_ms = self.config.get('BASE_SPEED', 50) / 100.0 * 0.7
+        corner_speed_ms = self.config.get('CORNER_SPEED', 30) / 100.0 * 0.7
+
+        adaptive_speed = corner_speed_ms + (base_speed_ms - corner_speed_ms) * turn_factor
+        return max(corner_speed_ms, adaptive_speed)
+
+    def _normalize_angle(self, angle: float) -> float:
+        """Normalize an angle to the range [-pi, pi]."""
+        return (angle + np.pi) % (2 * np.pi) - np.pi
+
+    def is_mission_complete(self, robot_pose: tuple, threshold: float = 0.1) -> bool:
+        """
+        Check if the robot has reached the end of the path.
+        """
+        if self.smoothed_path is None:
+            return True
+        
+        end_point = self.smoothed_path[-1]
+        robot_pos = np.array([robot_pose[0], robot_pose[1]])
+        distance_to_end = np.linalg.norm(robot_pos - end_point)
+        
+        return distance_to_end < threshold 

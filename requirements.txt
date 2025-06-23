@@ -1,4 +1,7 @@
-Flask
 numpy
+scipy
 opencv-python
-scipy 
+Flask
+Pillow
+filterpy
+requests 
