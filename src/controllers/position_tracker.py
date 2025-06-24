@@ -316,7 +316,7 @@ class OmniWheelOdometry:
 class PositionTracker:
     """Enhanced position tracker with omni-wheel specific features and movement analysis."""
     
-    def __init__(self, odometry: OmniWheelOdometry, cell_size_m: float = 0.025):
+    def __init__(self, odometry: OmniWheelOdometry, cell_size_m: float = 0.12):
         """
         Initialize enhanced position tracker.
         
