@@ -24,7 +24,7 @@ from intersection_detector import IntersectionDetector
 # ================================
 # Enable/disable features for easy testing and debugging
 FEATURES = {
-    'OBJECT_DETECTION_ENABLED': False,      # Enable YOLO object detection - DISABLED for performance
+    'OBJECT_DETECTION_ENABLED': False,      # Enable YOLO object detection 
     'PATH_SHAPE_DETECTION_ENABLED': False,   # Enable path shape analysis
     'OBSTACLE_AVOIDANCE_ENABLED': False,     # Enable obstacle avoidance behavior
     'VISION_SYSTEM_ENABLED': True,          # Enable camera and vision processing
@@ -47,7 +47,7 @@ TURN_SPEED = 50
 CORNER_SPEED = 55  
 
 # Robot physical constants
-PULSES_PER_REV = 960
+PULSES_PER_REV = 920
 WHEEL_DIAMETER_M = 0.025
 ROBOT_WIDTH_M = 0.225
 ROBOT_LENGTH_M = 0.075
@@ -94,9 +94,9 @@ class ESP32Bridge:
         
         # Latest sensor data from ESP32
         self.latest_encoder_data = [0, 0, 0, 0]
-        self.latest_line_position = -1  # -1 means no line detected
+        self.latest_line_position = -1  
         self.latest_line_error = 0
-        self.latest_sensor_values = [0, 0, 0] # Using 3 middle sensors
+        self.latest_sensor_values = [0, 0, 0] 
         
         # Command tracking
         self.last_command = None
