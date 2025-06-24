@@ -13,20 +13,20 @@ sys.path.insert(0, project_root)
 sys.path.insert(0, controllers_path)
 
 from main import ESP32Bridge
-from camera_line_follower import CameraLineFollower
+from camera_obstacle_avoidance import CameraObstacleAvoidance
 
 # Configuration
 ESP32_IP = "192.168.83.245"  # Update this to match your ESP32's IP
 PHONE_IP = "192.168.83.169"  # Update this to match your phone's IP
 
-def test_camera_line_following():
-    """Test complete camera-based line following system"""
-    print("📹 Testing Complete Camera-Based Line Following")
+def test_camera_obstacle_avoidance():
+    """Test complete camera-based obstacle avoidance and corner detection system"""
+    print("📹 Testing Camera-Based Obstacle Avoidance & Corner Detection")
     print("=" * 60)
     
     # Create components
     esp32 = ESP32Bridge(ESP32_IP)
-    camera_line_follower = CameraLineFollower(debug=True)
+    camera_system = CameraObstacleAvoidance(debug=True)
     
     print(f"🔌 Connecting to ESP32 at {ESP32_IP}...")
     print(f"📷 Connecting to camera at {PHONE_IP}...")
@@ -55,12 +55,12 @@ def test_camera_line_following():
         return
     
     try:
-        print("\n🧪 Test 1: Camera Line Detection")
-        print("Point camera at a black line to test detection...")
+        print("\n🧪 Test 1: Obstacle Detection")
+        print("Point camera at obstacles to test detection...")
         
-        # Test line detection for 10 seconds
+        # Test obstacle detection for 10 seconds
         start_time = time.time()
-        detection_count = 0
+        obstacle_count = 0
         total_frames = 0
         
         while time.time() - start_time < 10:
@@ -74,36 +74,43 @@ def test_camera_line_following():
             # Resize frame to match robot's camera processing
             resized_frame = cv2.resize(frame, (416, 320))
             
-            # Detect line
-            line_result = camera_line_follower.detect_line(resized_frame)
+            # Detect obstacles and corners
+            detection_result = camera_system.detect_obstacles_and_corners(resized_frame)
             
-            if line_result['line_detected']:
-                detection_count += 1
-                offset = line_result['line_offset']
-                confidence = line_result['confidence']
-                intersection = line_result.get('intersection_detected', False)
+            if detection_result['obstacle_detected']:
+                obstacle_count += 1
+                direction = detection_result['obstacle_direction']
+                distance = detection_result['obstacle_distance']
+                action = detection_result['avoidance_action']
                 
-                print(f"   ✅ Line detected: offset={offset:+.3f}, confidence={confidence:.3f}, intersection={intersection}")
+                print(f"   🚨 OBSTACLE: {direction}, distance={distance:.3f}, action={action}")
+            elif detection_result['corner_detected']:
+                corner_dir = detection_result['corner_direction']
+                angle = detection_result['corner_angle']
+                action = detection_result['avoidance_action']
+                
+                print(f"   🔄 CORNER: {corner_dir}, angle={angle:.1f}°, action={action}")
             else:
-                print(f"   ❌ No line detected")
+                print(f"   ✅ Path clear - continue forward")
             
             # Show debug frame if available
-            if line_result.get('processed_frame') is not None:
-                cv2.imshow('Camera Line Detection', line_result['processed_frame'])
+            if detection_result.get('processed_frame') is not None:
+                cv2.imshow('Obstacle Avoidance & Corner Detection', detection_result['processed_frame'])
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
             
             time.sleep(0.2)  # 5 FPS for testing
         
-        detection_rate = (detection_count / total_frames) * 100 if total_frames > 0 else 0
-        print(f"   Detection rate: {detection_rate:.1f}% ({detection_count}/{total_frames} frames)")
+        detection_rate = (obstacle_count / total_frames) * 100 if total_frames > 0 else 0
+        print(f"   Obstacle detection rate: {detection_rate:.1f}% ({obstacle_count}/{total_frames} frames)")
         
-        print(f"\n🚗 Test 2: Line Following with Motor Commands")
-        print("Robot will follow line for 15 seconds...")
+        print(f"\n🚗 Test 2: Autonomous Navigation with Obstacle Avoidance")
+        print("Robot will navigate autonomously for 15 seconds, avoiding obstacles...")
         
-        # Test line following with motor commands
+        # Test autonomous navigation with obstacle avoidance
         start_time = time.time()
-        follow_commands = 0
+        avoidance_actions = 0
+        forward_actions = 0
         
         while time.time() - start_time < 15:
             ret, frame = cap.read()
@@ -111,48 +118,46 @@ def test_camera_line_following():
                 continue
             
             resized_frame = cv2.resize(frame, (416, 320))
-            line_result = camera_line_follower.detect_line(resized_frame)
+            detection_result = camera_system.detect_obstacles_and_corners(resized_frame)
             
-            if line_result['line_detected']:
-                # Get motor speeds
-                fl, fr, bl, br = camera_line_follower.get_motor_speeds(line_result, base_speed=30)
-                
-                # Send to ESP32 if connected
-                if esp32_connected:
-                    esp32.send_motor_speeds(fl, fr, bl, br)
-                
-                follow_commands += 1
-                offset = line_result['line_offset']
-                confidence = line_result['confidence']
-                
-                print(f"   Following: offset={offset:+.3f}, conf={confidence:.2f}, motors=({fl:+3d},{fr:+3d},{bl:+3d},{br:+3d})")
+            # Get motor speeds based on detection
+            fl, fr, bl, br = camera_system.get_motor_speeds(detection_result, base_speed=35)
+            
+            # Send to ESP32 if connected
+            if esp32_connected:
+                esp32.send_motor_speeds(fl, fr, bl, br)
+            
+            action = detection_result['avoidance_action']
+            
+            if action != 'continue_forward':
+                avoidance_actions += 1
+                print(f"   🚨 Action: {action}, motors=({fl:+3d},{fr:+3d},{bl:+3d},{br:+3d})")
             else:
-                # Stop motors if no line
-                if esp32_connected:
-                    esp32.send_motor_speeds(0, 0, 0, 0)
-                print(f"   No line - stopping motors")
+                forward_actions += 1
+                if forward_actions % 20 == 0:  # Print every 2 seconds at 10 FPS
+                    print(f"   ➡️  Moving forward, motors=({fl:+3d},{fr:+3d},{bl:+3d},{br:+3d})")
             
             # Show debug frame
-            if line_result.get('processed_frame') is not None:
-                cv2.imshow('Camera Line Following', line_result['processed_frame'])
+            if detection_result.get('processed_frame') is not None:
+                cv2.imshow('Autonomous Navigation', detection_result['processed_frame'])
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
             
-            time.sleep(0.1)  # 10 FPS for following
+            time.sleep(0.1)  # 10 FPS for navigation
         
         # Stop motors
         if esp32_connected:
             esp32.send_motor_speeds(0, 0, 0, 0)
             print("   Motors stopped")
         
-        print(f"   Executed {follow_commands} line following commands")
+        print(f"   Avoidance actions: {avoidance_actions}, Forward actions: {forward_actions}")
         
-        print(f"\n🎯 Test 3: Intersection Detection")
-        print("Show camera intersections/T-junctions to test detection...")
+        print(f"\n🎯 Test 3: Corner Detection")
+        print("Show camera corners/intersections to test detection...")
         
-        # Test intersection detection
+        # Test corner detection
         start_time = time.time()
-        intersection_count = 0
+        corner_count = 0
         
         while time.time() - start_time < 8:
             ret, frame = cap.read()
@@ -160,29 +165,31 @@ def test_camera_line_following():
                 continue
             
             resized_frame = cv2.resize(frame, (416, 320))
-            line_result = camera_line_follower.detect_line(resized_frame)
+            detection_result = camera_system.detect_obstacles_and_corners(resized_frame)
             
-            if line_result.get('intersection_detected', False):
-                intersection_count += 1
-                print(f"   🎯 INTERSECTION DETECTED!")
+            if detection_result['corner_detected']:
+                corner_count += 1
+                direction = detection_result['corner_direction']
+                angle = detection_result['corner_angle']
+                print(f"   🎯 CORNER DETECTED: {direction}, angle={angle:.1f}°")
                 time.sleep(1)  # Brief pause to avoid multiple triggers
             
             # Show debug frame
-            if line_result.get('processed_frame') is not None:
-                cv2.imshow('Intersection Detection', line_result['processed_frame'])
+            if detection_result.get('processed_frame') is not None:
+                cv2.imshow('Corner Detection', detection_result['processed_frame'])
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
             
             time.sleep(0.1)
         
-        print(f"   Detected {intersection_count} intersections")
+        print(f"   Detected {corner_count} corners")
         
-        print("\n✅ Camera-based line following test completed!")
+        print("\n✅ Camera-based obstacle avoidance test completed!")
         print("Summary:")
-        print(f"  - Line detection rate: {detection_rate:.1f}%")
-        print(f"  - Line following commands: {follow_commands}")
-        print(f"  - Intersection detections: {intersection_count}")
-        print("  - System ready for autonomous navigation!")
+        print(f"  - Obstacle detection rate: {detection_rate:.1f}%")
+        print(f"  - Avoidance actions executed: {avoidance_actions}")
+        print(f"  - Corner detections: {corner_count}")
+        print("  - System ready for autonomous obstacle avoidance!")
         
     except KeyboardInterrupt:
         print("\n\n⏹️ Test stopped by user")
@@ -198,11 +205,11 @@ def test_camera_line_following():
         print("Cleanup completed")
 
 def test_camera_only():
-    """Test just camera connection and line detection without ESP32"""
-    print("📷 Testing Camera-Only Line Detection")
+    """Test just camera connection and obstacle/corner detection without ESP32"""
+    print("📷 Testing Camera-Only Obstacle & Corner Detection")
     print("=" * 50)
     
-    camera_line_follower = CameraLineFollower(debug=True)
+    camera_system = CameraObstacleAvoidance(debug=True)
     cap = cv2.VideoCapture(f"http://{PHONE_IP}:8080/video")
     
     if not cap.isOpened():
@@ -210,7 +217,7 @@ def test_camera_only():
         return
     
     print("✅ Camera connected! Press 'q' to quit")
-    print("Point camera at black lines to see detection in action")
+    print("Point camera at obstacles and corners to see detection in action")
     
     try:
         while True:
@@ -219,19 +226,23 @@ def test_camera_only():
                 continue
             
             resized_frame = cv2.resize(frame, (416, 320))
-            line_result = camera_line_follower.detect_line(resized_frame)
+            detection_result = camera_system.detect_obstacles_and_corners(resized_frame)
             
             # Show results
-            if line_result['line_detected']:
-                offset = line_result['line_offset']
-                confidence = line_result['confidence']
-                intersection = line_result.get('intersection_detected', False)
-                
-                print(f"Line: offset={offset:+.3f}, confidence={confidence:.3f}, intersection={intersection}")
+            if detection_result['obstacle_detected']:
+                direction = detection_result['obstacle_direction']
+                distance = detection_result['obstacle_distance']
+                action = detection_result['avoidance_action']
+                print(f"OBSTACLE: {direction}, dist={distance:.3f}, action={action}")
+            
+            if detection_result['corner_detected']:
+                direction = detection_result['corner_direction']
+                angle = detection_result['corner_angle']
+                print(f"CORNER: {direction}, angle={angle:.1f}°")
             
             # Display debug frame
-            if line_result.get('processed_frame') is not None:
-                cv2.imshow('Camera Line Detection', line_result['processed_frame'])
+            if detection_result.get('processed_frame') is not None:
+                cv2.imshow('Camera Obstacle & Corner Detection', detection_result['processed_frame'])
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
                     
@@ -245,4 +256,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--camera-only":
         test_camera_only()
     else:
-        test_camera_line_following() 
+        test_camera_obstacle_avoidance() 
