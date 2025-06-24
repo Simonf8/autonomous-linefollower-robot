@@ -30,7 +30,7 @@ class TrackerSensor:
         # Calibration data
         self.min_values = [0] * self.num_sensors
         self.max_values = [4095] * self.num_sensors  # 12-bit ADC max
-        self.calibrated = True  # Assuming pre-calibrated with threshold
+        self.calibrated = True  
         
         # Sensor weights for weighted average (0, 1000, 2000 for 3 sensors)
         self.weights = [i * 1000 for i in range(self.num_sensors)]
