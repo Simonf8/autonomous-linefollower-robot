@@ -31,10 +31,7 @@ class Pathfinder:
     @staticmethod
     def create_maze_grid() -> List[List[int]]:
         """Creates the default maze grid layout."""
-        # The maze is defined with 0=path, 1=obstacle.
-        # Some paths were defined with alternating 0s and 1s (e.g., [0,1,0,1,...])
-        # which is not navigable by an algorithm that checks immediate neighbors.
-        # The paths have been changed to be solid (all 0s).
+     
         maze = [
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 0 - 
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 1 - 
@@ -49,8 +46,8 @@ class Pathfinder:
             [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 10
             [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 11
             [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], # Row 12
-            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1], # Row 13 - Solid path
-            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1]  # Row 14 - Solid path
+            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1], # Row 13 
+            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1]  # Row 14
         ]
         # Flip horizontally to match coordinate system
         return [row[::-1] for row in maze]
