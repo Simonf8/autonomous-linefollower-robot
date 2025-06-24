@@ -21,7 +21,7 @@ class StateEstimator:
         self.kf = KalmanFilter(dim_x=3, dim_z=3, dim_u=3)
         
         # Initial State
-        self.kf.x = np.array([initial_pose]).T # [x, y, heading]
+        self.kf.x = np.array(initial_pose).reshape(3, 1) # [x, y, heading]
 
         # State Transition Matrix
         # Updated dynamically in predict step, but initialized here.

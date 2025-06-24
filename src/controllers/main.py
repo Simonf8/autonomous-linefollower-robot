@@ -25,8 +25,9 @@ CONFIG = {
         'INTERSECTION_CORRECTION_ENABLED': True,
         'DEBUG_VISUALIZATION_ENABLED': True,
         'ADAPTIVE_SPEED_ENABLED': True,
+        'SIMULATION_MODE': False,  # Disable simulation mode to use real ESP32
     },
-    'ESP32_IP': "192.168.2.38",
+    'ESP32_IP': "192.168.2.38:1234",
     'CELL_SIZE_M': 0.11,
     'MAX_SPEED': 80,
     'BASE_SPEED': 75,
@@ -90,12 +91,12 @@ def main():
         data = {
             'esp32_connected': robot.esp32.connected,
             'state': robot.state,
-            'x': robot.pose[0],
-            'y': robot.pose[1],
-            'heading': math.degrees(robot.pose[2]),
+            'x': float(robot.pose[0]),
+            'y': float(robot.pose[1]),
+            'heading': float(math.degrees(robot.pose[2])),
             'path': robot.navigator.path,
             'smoothed_path': robot.navigator.smoothed_path.tolist() if robot.navigator.smoothed_path is not None else [],
-            'current_target_index': robot.navigator.current_target_index,
+            'current_target_index': int(robot.navigator.current_target_index),
             'movement_mode': movement_mode
         }
         return jsonify(data)

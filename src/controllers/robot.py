@@ -21,9 +21,12 @@ class Robot:
         self.loop_rate = 50 # Hz
         self.dt = 1.0 / self.loop_rate
         self.is_stopped = True  # Track if robot is already stopped
+        
+        # Auto-start mission after initialization
+        self.auto_start = False  # Disabled for debugging
 
         # Core components
-        self.esp32 = ESP32Bridge(ip=config['ESP32_IP'])
+        self.esp32 = ESP32Bridge(config['ESP32_IP'])
         self.perception = Perception(config['FEATURES'])
         self.navigator = Navigator(config)
         self.kinematics = MecanumKinematics(
@@ -48,12 +51,20 @@ class Robot:
         
     def start_mission(self):
         """Starts the autonomous mission."""
-        print("Attempting to connect to ESP32...")
-        self.esp32.connect()
-        if not self.esp32.connected:
-            print("CRITICAL: ESP32 connection failed. Mission aborted.")
-            self.state = 'ERROR'
-            return
+        # Check if simulation mode is enabled
+        simulation_mode = self.config['FEATURES'].get('SIMULATION_MODE', False)
+        
+        if not simulation_mode:
+            print("Attempting to connect to ESP32...")
+            self.esp32.connect()
+            if not self.esp32.connected:
+                print("CRITICAL: ESP32 connection failed. Mission aborted.")
+                self.state = 'ERROR'
+                return
+        else:
+            print("SIMULATION MODE: Skipping ESP32 connection")
+            # Mark ESP32 as connected for simulation
+            self.esp32.connected = True
 
         print("Planning initial path...")
         start_world = (self.pose[0], self.pose[1])
@@ -75,6 +86,13 @@ class Robot:
 
     def run_main_loop(self):
         """The main execution loop for the robot."""
+        # Auto-start mission if enabled
+        if self.auto_start:
+            print("Auto-starting mission in 3 seconds...")
+            time.sleep(3)
+            self.start_mission()
+            self.auto_start = False
+        
         while self.running:
             start_time = time.time()
             
@@ -94,22 +112,23 @@ class Robot:
         # 1. Predict new state based on last control input
         self.estimator.predict(self.last_control_input)
         
-        # 2. Get new measurement from vision
+        # 2. Get new measurement from vision (DISABLED FOR NOW)
         vision_pose = None
-        if self.frame is not None:
-            with self.frame_lock:
-                frame_copy = self.frame.copy()
-            # Calculate current cell from pose
-            current_cell = (
-                int(self.pose[0] / self.config['CELL_SIZE_M']),
-                int(self.pose[1] / self.config['CELL_SIZE_M'])
-            )
-            # In the future, the grid could also be updated here
-            vision_pose = self.perception.estimate_pose_from_grid(frame_copy, current_cell, self.config['CELL_SIZE_M'])
+        # VISUAL ODOMETRY DISABLED - causing issues
+        # if self.frame is not None:
+        #     with self.frame_lock:
+        #         frame_copy = self.frame.copy()
+        #     # Calculate current cell from pose
+        #     current_cell = (
+        #         int(self.pose[0] / self.config['CELL_SIZE_M']),
+        #         int(self.pose[1] / self.config['CELL_SIZE_M'])
+        #     )
+        #     # In the future, the grid could also be updated here
+        #     vision_pose = self.perception.estimate_pose_from_grid(frame_copy, current_cell, self.config['CELL_SIZE_M'])
 
-        # 3. Update state estimate with the new measurement
-        if vision_pose:
-            self.estimator.update(vision_pose)
+        # 3. Update state estimate with the new measurement (DISABLED)
+        # if vision_pose:
+        #     self.estimator.update(vision_pose)
 
         # 4. Update the robot's official pose from the estimator
         self.pose = self.estimator.pose
@@ -117,7 +136,7 @@ class Robot:
         # 5. Execute controller based on current state
         if self.state == 'FOLLOW_PATH':
             self._follow_path_controller()
-            if self.navigator.is_mission_complete(self.pose):
+            if self.navigator.is_mission_complete((self.pose[0], self.pose[1], self.pose[2])):
                 print("Mission Complete!")
                 self.stop_robot()
                 self.state = 'IDLE'
@@ -136,7 +155,8 @@ class Robot:
             return
             
         # Get target velocity from the pure pursuit controller
-        vx, vy, v_theta = self.navigator.pure_pursuit_controller(self.pose)
+        pose_tuple = (self.pose[0], self.pose[1], self.pose[2])
+        vx, vy, v_theta = self.navigator.pure_pursuit_controller(pose_tuple)
         
         # Store this control input for the next prediction cycle
         self.last_control_input = np.array([vx, vy, v_theta])
@@ -148,7 +168,14 @@ class Robot:
         motor_commands = self._scale_wheel_speeds_to_motor_commands(wheel_rad_velocities)
         fl, fr, bl, br = motor_commands
 
-        self.esp32.send_motor_commands(fl, fr, bl, br)
+        # Check if simulation mode
+        simulation_mode = self.config['FEATURES'].get('SIMULATION_MODE', False)
+        if simulation_mode:
+            print(f"SIMULATION: Motor commands: FL={fl}, FR={fr}, BL={bl}, BR={br}")
+            print(f"SIMULATION: Velocities: vx={vx:.3f}, vy={vy:.3f}, v_theta={v_theta:.3f}")
+        else:
+            self.esp32.send_motor_commands(fl, fr, bl, br)
+        
         self.is_stopped = False  # Robot is now moving
 
     def _scale_wheel_speeds_to_motor_commands(self, wheel_rads: np.ndarray) -> tuple:
@@ -167,7 +194,10 @@ class Robot:
         """Stops the robot's movement."""
         print("Stopping robot.")
         self.is_stopped = True
-        if self.esp32.connected:
+        simulation_mode = self.config['FEATURES'].get('SIMULATION_MODE', False)
+        if simulation_mode:
+            print("SIMULATION: Robot stopped")
+        elif self.esp32.connected:
             self.esp32.stop()
 
     def shutdown(self):

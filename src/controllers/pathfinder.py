@@ -32,7 +32,7 @@ class Pathfinder:
         self.original_grid = [row[:] for row in grid]
         self.grid = [row[:] for row in grid]
         self.height = len(grid)
-        self.width = len(grid[0]) if grid else 0
+        self.width = len(grid[0]) if len(grid) > 0 else 0
         self._distance_cache.clear()
     
     @staticmethod

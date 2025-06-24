@@ -136,4 +136,12 @@ class Perception:
         """Get motor speeds for line following from the latest frame result."""
         if self.latest_line_result:
             return self.camera_line_follower.get_motor_speeds(self.latest_line_result, speed)
-        return 0, 0, 0, 0 
+        return 0, 0, 0, 0
+    
+    def get_occupancy_grid(self):
+        """
+        Returns a simple empty grid for path planning.
+        """
+        # Create a simple 20x20 grid (all free space)
+        grid = [[0 for _ in range(20)] for _ in range(20)]
+        return grid 
