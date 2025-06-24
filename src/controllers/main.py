@@ -11,7 +11,7 @@ from flask import Flask, jsonify, render_template, Response
 from PIL import Image
 
 # Import the new Robot class
-from robot import Robot
+from .robot import Robot
 
 # ================================
 # CONFIGURATION
@@ -36,7 +36,7 @@ CONFIG = {
     'ROBOT_WIDTH_M': 0.225,
     'ROBOT_LENGTH_M': 0.075,
     'WHEEL_RADIUS_M': 0.035, # Added for Mecanum kinematics
-    'MOTOR_MAX_RPM': 200,      # Added for wheel speed calculations
+    'MOTOR_MAX_RPM': 600,      # Added for wheel speed calculations
     'CAMERA_FORWARD_OFFSET_M': 0.05,
     'START_CELL': (14, 14),
     'END_CELL': (2, 0),
@@ -99,6 +99,25 @@ def main():
             'movement_mode': movement_mode
         }
         return jsonify(data)
+
+    @app.route('/video_feed')
+    def video_feed():
+        if not CONFIG['FEATURES']['VISION_SYSTEM_ENABLED']:
+            return Response(status=204)
+
+        def generate_frames():
+            while robot.running:
+                time.sleep(1.0 / 15) # 15 FPS
+                with robot.frame_lock:
+                    if robot.frame is None:
+                        continue
+                    frame = robot.frame.copy()
+                
+                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+
+        return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
     @app.route('/camera_debug_feed')
     def camera_debug_feed():

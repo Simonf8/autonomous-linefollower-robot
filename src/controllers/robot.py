@@ -20,10 +20,11 @@ class Robot:
         self.frame_lock = threading.Lock()
         self.loop_rate = 50 # Hz
         self.dt = 1.0 / self.loop_rate
+        self.is_stopped = True  # Track if robot is already stopped
 
         # Core components
         self.esp32 = ESP32Bridge(ip=config['ESP32_IP'])
-        self.perception = Perception(config)
+        self.perception = Perception(config['FEATURES'])
         self.navigator = Navigator(config)
         self.kinematics = MecanumKinematics(
             wheel_radius_m=config['WHEEL_RADIUS_M'],
@@ -98,8 +99,13 @@ class Robot:
         if self.frame is not None:
             with self.frame_lock:
                 frame_copy = self.frame.copy()
+            # Calculate current cell from pose
+            current_cell = (
+                int(self.pose[0] / self.config['CELL_SIZE_M']),
+                int(self.pose[1] / self.config['CELL_SIZE_M'])
+            )
             # In the future, the grid could also be updated here
-            vision_pose, _ = self.perception.estimate_pose_from_grid(frame_copy)
+            vision_pose = self.perception.estimate_pose_from_grid(frame_copy, current_cell, self.config['CELL_SIZE_M'])
 
         # 3. Update state estimate with the new measurement
         if vision_pose:
@@ -117,8 +123,9 @@ class Robot:
                 self.state = 'IDLE'
         
         elif self.state == 'IDLE' or self.state == 'ERROR':
-            # Ensure motors are stopped and reset control input
-            self.stop_robot()
+            # Ensure motors are stopped and reset control input (only if not already stopped)
+            if not self.is_stopped:
+                self.stop_robot()
             self.last_control_input = np.zeros(3)
 
     def _follow_path_controller(self):
@@ -142,6 +149,7 @@ class Robot:
         fl, fr, bl, br = motor_commands
 
         self.esp32.send_motor_commands(fl, fr, bl, br)
+        self.is_stopped = False  # Robot is now moving
 
     def _scale_wheel_speeds_to_motor_commands(self, wheel_rads: np.ndarray) -> tuple:
         """
@@ -158,6 +166,7 @@ class Robot:
     def stop_robot(self):
         """Stops the robot's movement."""
         print("Stopping robot.")
+        self.is_stopped = True
         if self.esp32.connected:
             self.esp32.stop()
 

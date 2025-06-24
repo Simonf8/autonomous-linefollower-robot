@@ -2,7 +2,7 @@ import numpy as np
 from scipy.interpolate import splprep, splev
 import math
 
-from .pathfinder import PathFinder
+from .pathfinder import Pathfinder
 
 class Navigator:
     """
@@ -15,7 +15,7 @@ class Navigator:
         :param config: The main robot configuration dictionary.
         """
         self.config = config
-        self.pathfinder = PathFinder(config['CELL_SIZE_M'])
+        self.pathfinder = Pathfinder(config['CELL_SIZE_M'])
         self.path = None
         self.smoothed_path = None
         self.current_target_index = 0

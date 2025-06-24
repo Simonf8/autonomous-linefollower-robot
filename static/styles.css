@@ -313,6 +313,62 @@ body {
     box-shadow: 0 0 15px var(--cyber-blue);
 }
 
+/* Mission Control Panel */
+.mission-control-panel {
+    margin-bottom: 20px;
+}
+
+.mission-controls {
+    display: flex;
+    gap: 15px;
+    justify-content: center;
+    padding: 20px;
+}
+
+.mission-btn {
+    padding: 12px 24px;
+    border: 2px solid;
+    background: transparent;
+    color: var(--text-primary);
+    font-family: 'Orbitron', monospace;
+    font-weight: 700;
+    font-size: 0.9rem;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+    border-radius: 5px;
+}
+
+.mission-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.start-btn {
+    border-color: var(--cyber-green);
+    color: var(--cyber-green);
+}
+
+.start-btn:hover:not(:disabled) {
+    background: var(--cyber-green);
+    color: #000;
+    box-shadow: 0 0 20px var(--cyber-green);
+}
+
+.stop-btn {
+    border-color: var(--cyber-pink);
+    color: var(--cyber-pink);
+}
+
+.stop-btn:hover:not(:disabled) {
+    background: var(--cyber-pink);
+    color: #000;
+    box-shadow: 0 0 20px var(--cyber-pink);
+}
+
 /* Camera Debug Panel */
 .camera-debug-panel {
     margin-top: 20px;

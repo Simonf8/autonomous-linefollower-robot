@@ -144,6 +144,18 @@
                     </div>
                 </div>
 
+                <!-- Mission Control -->
+                <div class="panel mission-control-panel">
+                    <div class="panel-header">
+                        <h2>MISSION CONTROL</h2>
+                        <div class="panel-indicator"></div>
+                    </div>
+                    <div class="mission-controls">
+                        <button id="start-mission-btn" class="mission-btn start-btn" onclick="startMission()">START MISSION</button>
+                        <button id="stop-mission-btn" class="mission-btn stop-btn" onclick="stopMission()" disabled>STOP MISSION</button>
+                    </div>
+                </div>
+
                 <!-- Camera Debug Info -->
                 <div class="panel camera-debug-panel">
                     <div class="panel-header">
@@ -207,6 +219,26 @@
                 debugBtn.classList.add('active');
                 normalBtn.classList.remove('active');
             }
+        }
+
+        function startMission() {
+            fetch('/start_mission')
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Mission started:', data);
+                    document.getElementById('start-mission-btn').disabled = true;
+                    document.getElementById('stop-mission-btn').disabled = false;
+                })
+                .catch(error => {
+                    console.error('Error starting mission:', error);
+                    alert('Failed to start mission');
+                });
+        }
+
+        function stopMission() {
+            // For now, we'll just reset the robot state by reloading
+            // In the future, you could add a specific stop mission endpoint
+            location.reload();
         }
 
         function updateData() {
@@ -291,6 +323,17 @@
                         sensorPanel.classList.add('offline');
                         sensorContainer.innerHTML = `<div class="sensor-offline">SENSORS OFFLINE</div>`;
                         sensorDetails.style.display = 'none'; // Hide details
+                    }
+
+                    // Update mission control buttons based on robot state
+                    const startBtn = document.getElementById('start-mission-btn');
+                    const stopBtn = document.getElementById('stop-mission-btn');
+                    if (data.state === 'IDLE' || data.state === 'ERROR') {
+                        startBtn.disabled = false;
+                        stopBtn.disabled = true;
+                    } else {
+                        startBtn.disabled = true;
+                        stopBtn.disabled = false;
                     }
 
                     const statusIndicator = document.getElementById('status-indicator');

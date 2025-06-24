@@ -3,9 +3,9 @@ import time
 import numpy as np
 import math
 
-from intersection_detector import IntersectionDetector
-from line_obstacle_detector import LineObstacleDetector
-from camera_line_follower import CameraLineFollower
+from .intersection_detector import IntersectionDetector
+from .object_detection import LineObstacleDetector
+from .camera_line_follower import CameraLineFollower
 
 # Constants for perspective transform - this should be tuned for the specific camera setup
 # These points define a trapezoid in the source image that will be mapped to a rectangle

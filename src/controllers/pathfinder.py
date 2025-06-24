@@ -9,24 +9,31 @@ class Pathfinder:
     Dijkstra-based pathfinding for grid-based navigation with dynamic replanning.
     """
     
-    def __init__(self, grid: List[List[int]], cell_size_m: float = 0.025):
+    def __init__(self, cell_size_m: float):
         """
         Initialize pathfinder.
         
         Args:
-            grid: 2D grid where 0 = path, 1 = obstacle
             cell_size_m: Width of each grid cell in meters
         """
-        self.original_grid = [row[:] for row in grid]  # Keep original for reset
-        self.grid = [row[:] for row in grid]  # Working copy
         self.cell_size_m = cell_size_m
+        self.original_grid = self.create_maze_grid()
+        self.grid = [row[:] for row in self.original_grid]
         
-        self.height = len(grid)
-        self.width = len(grid[0]) if grid else 0
+        self.height = len(self.grid)
+        self.width = len(self.grid[0]) if self.grid else 0
         
         # Cache for computed distances
         self._distance_cache = {}
         self._last_goal = None
+    
+    def set_grid(self, grid: List[List[int]]):
+        """Sets a new grid for the pathfinder."""
+        self.original_grid = [row[:] for row in grid]
+        self.grid = [row[:] for row in grid]
+        self.height = len(grid)
+        self.width = len(grid[0]) if grid else 0
+        self._distance_cache.clear()
     
     @staticmethod
     def create_maze_grid() -> List[List[int]]:
@@ -149,6 +156,20 @@ class Pathfinder:
         logging.warning(f"No path found from {start} to {goal}")
         return None
     
+    def world_to_grid(self, world_coords):
+        """Converts world coordinates to grid cell coordinates."""
+        x, y = world_coords
+        grid_x = int(x / self.cell_size_m)
+        grid_y = int(y / self.cell_size_m)
+        return (grid_x, grid_y)
+
+    def grid_to_world(self, grid_coords):
+        """Converts grid cell coordinates to world coordinates."""
+        x, y = grid_coords
+        world_x = (x + 0.5) * self.cell_size_m
+        world_y = (y + 0.5) * self.cell_size_m
+        return (world_x, world_y)
+
     def world_to_cell(self, world_x: float, world_y: float) -> Tuple[int, int]:
         """Convert world coordinates to grid cell coordinates."""
         cell_x = int(world_x / self.cell_size_m)
