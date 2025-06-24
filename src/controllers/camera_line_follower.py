@@ -17,10 +17,10 @@ class CameraObstacleAvoidance:
         
         # Debug frame optimization
         self.debug_frame_counter = 0
-        self.debug_frame_skip = 2  # Only generate debug frame every 3rd detection
+        self.debug_frame_skip = 2  
         
         # Obstacle detection parameters
-        self.depth_threshold = 50  # Depth map threshold for obstacles
+        self.depth_threshold = 50  
         self.min_obstacle_area = 300  # Minimum contour area to consider as obstacle
         self.obstacle_distance_threshold = 0.3  # Distance threshold (normalized)
         
