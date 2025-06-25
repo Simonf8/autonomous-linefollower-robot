@@ -13,7 +13,7 @@ import time
 
 class HybridRobotVision:
     def __init__(self):
-        # Your current line detection parameters
+       
         self.BLACK_THRESHOLD = 80
         self.BLUR_SIZE = 5
         self.MIN_CONTOUR_AREA = 50
@@ -22,7 +22,7 @@ class HybridRobotVision:
         # YOLOv11 for object detection
         self.yolo = YOLO('yolo11n.pt')
         self.last_yolo_detection = time.time()
-        self.yolo_interval = 0.2  # Run YOLO every 200ms
+        self.yolo_interval = 0.2  # every 200ms
         self.current_objects = []
         
         # Danger zones for different objects
@@ -32,7 +32,7 @@ class HybridRobotVision:
             'bicycle': 80,     
             'dog': 60,
             'neck tie': 0, #just ignore it
-            'tie': 0,      #it can confuse a line with a tie lol
+            'tie': 0,      #it can confuse a line with a tie lol....
             'stop sign': 200   # Must stop
         }
     
