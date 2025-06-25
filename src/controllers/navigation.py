@@ -84,7 +84,7 @@ class Navigator:
         if self.smoothed_path is None or self.is_mission_complete(robot_pose):
             return 0.0, 0.0, 0.0 # Stop
 
-        base_lookahead = 0.3 # meters
+        base_lookahead = 0.17 # meters
         
         # Find the best lookahead point on the path
         lookahead_point, self.current_target_index = self._find_lookahead_point(robot_pose, base_lookahead)

@@ -17,8 +17,8 @@ class Pathfinder:
             grid: 2D grid where 0 = path, 1 = obstacle
             cell_size_m: Width of each grid cell in meters
         """
-        self.original_grid = [row[:] for row in grid]  # Keep original for reset
-        self.grid = [row[:] for row in grid]  # Working copy
+        self.original_grid = [row[:] for row in grid]  
+        self.grid = [row[:] for row in grid]
         self.cell_size_m = cell_size_m
         
         self.height = len(grid)
@@ -61,6 +61,8 @@ class Pathfinder:
         return (0 <= x < self.width and 
                 0 <= y < self.height and 
                 self.grid[y][x] == 0)
+        
+                
     
     def get_neighbors(self, cell: Tuple[int, int]) -> List[Tuple[Tuple[int, int], int]]:
         """

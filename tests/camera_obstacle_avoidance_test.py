@@ -17,7 +17,7 @@ from camera_line_follower import CameraLineFollower
 
 # Configuration
 ESP32_IP = "192.168.83.245"  # Update this to match your ESP32's IP
-PHONE_IP = "192.168.83.169"  # Update this to match your phone's IP
+WEBCAM_INDEX = 0  # Usually 0 for built-in camera, 1 for external USB webcam
 
 def test_camera_line_following():
     """Test complete camera-based line following system"""
@@ -29,7 +29,7 @@ def test_camera_line_following():
     camera_line_follower = CameraLineFollower(debug=True)
     
     print(f"🔌 Connecting to ESP32 at {ESP32_IP}...")
-    print(f"📷 Connecting to camera at {PHONE_IP}...")
+    print(f"📷 Connecting to USB webcam...")
     
     # Connect to ESP32
     esp32_connected = esp32.start()
@@ -38,18 +38,23 @@ def test_camera_line_following():
     else:
         print("⚠️  ESP32 not connected - motor commands will be simulated")
     
-    # Connect to camera
-    cap = cv2.VideoCapture(f"http://{PHONE_IP}:8080/video")
-    camera_connected = cap.isOpened()
+    # Connect to camera - try multiple indices
+    cap = None
+    for cam_index in [WEBCAM_INDEX, 0, 1, 2]:
+        print(f"Trying camera index {cam_index}...")
+        cap = cv2.VideoCapture(cam_index)
+        if cap.isOpened():
+            print(f"✅ Camera connected successfully at index {cam_index}!")
+            break
+        cap.release()
+        cap = None
     
-    if camera_connected:
-        print("✅ Camera connected successfully!")
-    else:
-        print("❌ ERROR: Could not connect to camera")
+    if cap is None:
+        print("❌ ERROR: Could not connect to any camera")
         print("Please check:")
-        print("1. Phone camera app is running")
-        print("2. Phone IP address is correct")
-        print("3. Phone and Pi are on same network")
+        print("1. USB webcam is properly connected")
+        print("2. Camera permissions are granted")
+        print("3. No other applications are using the camera")
         if esp32_connected:
             esp32.stop()
         return
@@ -147,9 +152,11 @@ def test_camera_line_following():
         
         print(f"   Executed {follow_commands} line following commands")
         
-        print(f"\n🎯 Test 3: Intersection Detection")
+       
         print("Show camera intersections/T-junctions to test detection...")
         
+        
+
         # Test intersection detection
         start_time = time.time()
         intersection_count = 0
@@ -203,10 +210,20 @@ def test_camera_only():
     print("=" * 50)
     
     camera_line_follower = CameraLineFollower(debug=True)
-    cap = cv2.VideoCapture(f"http://{PHONE_IP}:8080/video")
     
-    if not cap.isOpened():
-        print("❌ ERROR: Could not connect to camera")
+    # Connect to camera - try multiple indices
+    cap = None
+    for cam_index in [WEBCAM_INDEX, 0, 1, 2]:
+        print(f"Trying camera index {cam_index}...")
+        cap = cv2.VideoCapture(cam_index)
+        if cap.isOpened():
+            print(f"✅ Camera connected at index {cam_index}!")
+            break
+        cap.release()
+        cap = None
+    
+    if cap is None:
+        print("❌ ERROR: Could not connect to any camera")
         return
     
     print("✅ Camera connected! Press 'q' to quit")

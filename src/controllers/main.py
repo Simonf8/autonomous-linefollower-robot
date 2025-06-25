@@ -63,10 +63,10 @@ LINE_FOLLOW_SPEED = 50
 
 # Corner turning configuration
 CORNER_TURN_MODES = {
-    'SMOOTH': 'smooth',           # Normal wheel-like smooth cornering (current)
-    'SIDEWAYS': 'sideways',       # Strafe sideways through corners
-    'PIVOT': 'pivot',             # Turn in place like a tank
-    'FRONT_TURN': 'front_turn'    # Turn using front wheels primarily
+    'SMOOTH': 'smooth',     
+    'SIDEWAYS': 'sideways',       
+    'PIVOT': 'pivot',             
+    'FRONT_TURN': 'front_turn'    
 }
 
 # Corner detection thresholds
@@ -74,13 +74,18 @@ CORNER_DETECTION_THRESHOLD = 0.35    # Line offset to detect corner
 CORNER_TURN_DURATION = 30            # Frames to execute corner turn
 SHARP_CORNER_THRESHOLD = 0.6         # Threshold for sharp vs gentle corners
 
-# Vision configuration (placeholders, not used for line following)
-IMG_PATH_SRC_PTS = np.float32([[200, 300], [440, 300], [580, 480], [60, 480]])
+# Vision configuration (adjusted for webcam processing resolution)
+# These points define the perspective transformation for path detection
+# Adjusted for 640x480 processing resolution
+IMG_PATH_SRC_PTS = np.float32([[160, 240], [480, 240], [640, 480], [0, 480]])
 IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
 
-# Camera configuration
-PHONE_IP = "192.168.2.6" # CHANGE THIS to your phone's camera stream IP
-CAMERA_WIDTH, CAMERA_HEIGHT = 416, 320
+# Camera configuration - USB Webcam
+# Webcam specs: 1920x1080 @ 30 FPS with integrated microphone
+WEBCAM_INDEX = 0  # Usually 0 for built-in camera, 1 for external USB webcam
+CAMERA_WIDTH, CAMERA_HEIGHT = 1920, 1080  # Full HD resolution as per webcam specs
+CAMERA_FPS = 30  # 30 FPS as specified in webcam specs
+# Note: For processing efficiency, frames are resized to 640x480 for vision algorithms
 
 class ESP32Bridge:
     """ESP32 communication bridge for motors, encoders, and line sensors."""
@@ -755,16 +760,41 @@ def main():
     # Start the camera capture thread if vision is enabled
     if FEATURES['VISION_SYSTEM_ENABLED']:
         def camera_capture_thread(robot_controller):
-            cap = cv2.VideoCapture(f"http://{PHONE_IP}:8080/video")
-            if not cap.isOpened():
-                print(f"ERROR: Could not connect to camera at {PHONE_IP}")
+            # Try different camera indices in case the webcam is not at index 0
+            cap = None
+            for cam_index in [WEBCAM_INDEX, 0, 1, 2]:
+                print(f"Trying to connect to camera at index {cam_index}...")
+                cap = cv2.VideoCapture(cam_index)
+                if cap.isOpened():
+                    print(f"Successfully connected to camera at index {cam_index}")
+                    break
+                cap.release()
+                cap = None
+            
+            if cap is None:
+                print("ERROR: Could not connect to any camera")
                 return
+
+            # Configure camera settings for optimal performance
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+            cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer for lower latency
+            
+            # Verify actual camera settings
+            actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual_fps = cap.get(cv2.CAP_PROP_FPS)
+            print(f"Camera configured: {actual_width}x{actual_height} @ {actual_fps} FPS")
 
             print("Camera connected successfully.")
             while robot_controller.running:
                 ret, frame = cap.read()
                 if ret:
-                    resized_frame = cv2.resize(frame, (CAMERA_WIDTH, CAMERA_HEIGHT))
+                    # For processing, we might want to use a smaller resolution to improve performance
+                    # You can adjust this based on your processing needs
+                    processing_width, processing_height = 640, 480
+                    resized_frame = cv2.resize(frame, (processing_width, processing_height))
                     with robot_controller.frame_lock:
                         robot_controller.frame = resized_frame
                 else:
