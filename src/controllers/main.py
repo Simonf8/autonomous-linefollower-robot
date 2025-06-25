@@ -80,12 +80,10 @@ SHARP_CORNER_THRESHOLD = 0.6         # Threshold for sharp vs gentle corners
 IMG_PATH_SRC_PTS = np.float32([[160, 240], [480, 240], [640, 480], [0, 480]])
 IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
 
-# Camera configuration - USB Webcam
-# Webcam specs: 1920x1080 @ 30 FPS with integrated microphone
-WEBCAM_INDEX = 0  # Usually 0 for built-in camera, 1 for external USB webcam
-CAMERA_WIDTH, CAMERA_HEIGHT = 1920, 1080  # Full HD resolution as per webcam specs
-CAMERA_FPS = 30  # 30 FPS as specified in webcam specs
-# Note: For processing efficiency, frames are resized to 640x480 for vision algorithms
+
+WEBCAM_INDEX = 0  
+CAMERA_WIDTH, CAMERA_HEIGHT = 400, 300
+CAMERA_FPS = 30 
 
 class ESP32Bridge:
     """ESP32 communication bridge for motors, encoders, and line sensors."""
