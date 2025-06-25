@@ -27,10 +27,12 @@ class HybridRobotVision:
         
         # Danger zones for different objects
         self.danger_distances = {
-            'person': 100,     # Stay far from people
-            'car': 150,        # Very dangerous
-            'bicycle': 80,     # Give space
-            'dog': 60,         # Unpredictable
+            'person': 100,     
+            'car': 150,        
+            'bicycle': 80,     
+            'dog': 60,
+            'neck tie': 0, #just ignore it
+            'tie': 0,      #it can confuse a line with a tie lol
             'stop sign': 200   # Must stop
         }
     
