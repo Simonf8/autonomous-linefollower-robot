@@ -78,7 +78,8 @@ SHARP_CORNER_THRESHOLD = 0.6         # Threshold for sharp vs gentle corners
 IMG_PATH_SRC_PTS = np.float32([[160, 240], [480, 240], [640, 480], [0, 480]])
 IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
 
-
+# Camera configuration - USB Webcam
+# Webcam specs: 1920x1080 @ 30 FPS with integrated microphone
 WEBCAM_INDEX = 0  # Usually 0 for built-in camera, 1 for external USB webcam
 CAMERA_WIDTH, CAMERA_HEIGHT = 1920, 1080  # Full HD resolution as per webcam specs
 CAMERA_FPS = 30  # 30 FPS as specified in webcam specs
@@ -393,16 +394,47 @@ class RobotController:
         processed_frame = frame_copy
         
         if FEATURES['INTERSECTION_CORRECTION_ENABLED'] and self.intersection_detector:
-            # Only check for intersection every so often to avoid multiple triggers
+            # Update intersection detector with current encoder data and grid position
+            encoder_ticks = self.esp32.get_encoder_ticks()
+            if encoder_ticks:
+                self.intersection_detector.update_encoder_data(encoder_ticks)
+            
+            current_cell = self.position_tracker.get_current_cell()
+            if current_cell:
+                self.intersection_detector.update_grid_position(current_cell[0], current_cell[1])
+            
+            # Only check for intersection/corners every so often to avoid multiple triggers
             if time.time() - self.last_intersection_time > 3.0: # 3 second cooldown
-                intersection_type = self.intersection_detector.detect(frame_copy)
-                if intersection_type:
-                    print(f"Intersection detected! Type: {intersection_type}. Recalibrating position.")
-                    self.position_tracker.recalibrate_position_to_nearest_cell()
-                    self.last_intersection_time = time.time()
+                detected_event = self.intersection_detector.detect(frame_copy)
+                if detected_event:
+                    # Validate detection with grid if pathfinder is available
+                    is_valid = True
+                    if hasattr(self.pathfinder, 'grid'):
+                        grid_array = np.array(self.pathfinder.get_grid())
+                        is_valid = self.intersection_detector.compare_with_grid(
+                            grid_array, detected_event
+                        )
+                    
+                    if is_valid:
+                        print(f"Vision event detected and validated: {detected_event}")
+                        
+                        # Handle different types of detected events
+                        if detected_event == "intersection":
+                            print("Intersection detected! Recalibrating position.")
+                            self.position_tracker.recalibrate_position_to_nearest_cell()
+                                                 elif detected_event in ["left_corner", "right_corner"]:
+                             print(f"Corner detected: {detected_event}. Fine-tuning position.")
+                             # For corners, we apply a minor position correction
+                             # This is less aggressive than a full recalibration
+                             current_cell = self.position_tracker.get_current_cell()
+                             self.position_tracker.correct_at_waypoint(current_cell)
+                        
+                        self.last_intersection_time = time.time()
+                    else:
+                        print(f"Vision event {detected_event} detected but failed grid validation")
                 
                 if FEATURES['DEBUG_VISUALIZATION_ENABLED']:
-                    processed_frame = self.intersection_detector.draw_debug_info(processed_frame, intersection_type)
+                    processed_frame = self.intersection_detector.draw_debug_info(processed_frame, detected_event)
 
         # Store the processed frame for the video feed
         with self.frame_lock:
