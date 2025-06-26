@@ -74,14 +74,11 @@ CORNER_DETECTION_THRESHOLD = 0.35    # Line offset to detect corner
 CORNER_TURN_DURATION = 30            # Frames to execute corner turn
 SHARP_CORNER_THRESHOLD = 0.6         # Threshold for sharp vs gentle corners
 
-# Vision configuration (adjusted for webcam processing resolution)
-# These points define the perspective transformation for path detection
-# Adjusted for 640x480 processing resolution
+
 IMG_PATH_SRC_PTS = np.float32([[160, 240], [480, 240], [640, 480], [0, 480]])
 IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
 
-# Camera configuration - USB Webcam
-# Webcam specs: 1920x1080 @ 30 FPS with integrated microphone
+
 WEBCAM_INDEX = 0  # Usually 0 for built-in camera, 1 for external USB webcam
 CAMERA_WIDTH, CAMERA_HEIGHT = 1920, 1080  # Full HD resolution as per webcam specs
 CAMERA_FPS = 30  # 30 FPS as specified in webcam specs
@@ -183,6 +180,7 @@ class ESP32Bridge:
             print(f"Error sending calibrate command: {e}")
             self.connected = False
             return False
+        
     
     def _send_command(self, command: str):
         """Internal method to send command to ESP32."""

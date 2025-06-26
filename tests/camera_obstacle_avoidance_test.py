@@ -34,9 +34,9 @@ def test_camera_line_following():
     # Connect to ESP32
     esp32_connected = esp32.start()
     if esp32_connected:
-        print("✅ ESP32 connected successfully!")
+        print("ESP32 connected successfully!")
     else:
-        print("⚠️  ESP32 not connected - motor commands will be simulated")
+        print("ESP32 not connected - motor commands will be simulated")
     
     # Connect to camera - try multiple indices
     cap = None
@@ -44,24 +44,20 @@ def test_camera_line_following():
         print(f"Trying camera index {cam_index}...")
         cap = cv2.VideoCapture(cam_index)
         if cap.isOpened():
-            print(f"✅ Camera connected successfully at index {cam_index}!")
+            print(f"Camera connected successfully at index {cam_index}!")
             break
         cap.release()
         cap = None
     
     if cap is None:
-        print("❌ ERROR: Could not connect to any camera")
-        print("Please check:")
-        print("1. USB webcam is properly connected")
-        print("2. Camera permissions are granted")
-        print("3. No other applications are using the camera")
+        print("ERROR: Could not connect to any camera")
+       
         if esp32_connected:
             esp32.stop()
         return
     
     try:
-        print("\n🧪 Test 1: Camera Line Detection")
-        print("Point camera at a black line to test detection...")
+        
         
         # Test line detection for 10 seconds
         start_time = time.time()
@@ -88,9 +84,9 @@ def test_camera_line_following():
                 confidence = line_result['confidence']
                 intersection = line_result.get('intersection_detected', False)
                 
-                print(f"   ✅ Line detected: offset={offset:+.3f}, confidence={confidence:.3f}, intersection={intersection}")
+                print(f"Line detected: offset={offset:+.3f}, confidence={confidence:.3f}, intersection={intersection}")
             else:
-                print(f"   ❌ No line detected")
+                print(f"No line detected")
             
             # Show debug frame if available
             if line_result.get('processed_frame') is not None:
@@ -171,7 +167,7 @@ def test_camera_line_following():
             
             if line_result.get('intersection_detected', False):
                 intersection_count += 1
-                print(f"   🎯 INTERSECTION DETECTED!")
+                print(f"INTERSECTION DETECTED!")
                 time.sleep(1)  # Brief pause to avoid multiple triggers
             
             # Show debug frame
@@ -184,7 +180,7 @@ def test_camera_line_following():
         
         print(f"   Detected {intersection_count} intersections")
         
-        print("\n✅ Camera-based line following test completed!")
+        print("\nCamera-based line following test completed!")
         print("Summary:")
         print(f"  - Line detection rate: {detection_rate:.1f}%")
         print(f"  - Line following commands: {follow_commands}")
@@ -192,9 +188,9 @@ def test_camera_line_following():
         print("  - System ready for autonomous navigation!")
         
     except KeyboardInterrupt:
-        print("\n\n⏹️ Test stopped by user")
+        print("\n\nTest stopped by user")
     except Exception as e:
-        print(f"\n❌ Test error: {e}")
+        print(f"\nTest error: {e}")
     finally:
         # Cleanup
         if esp32_connected:
@@ -206,8 +202,7 @@ def test_camera_line_following():
 
 def test_camera_only():
     """Test just camera connection and line detection without ESP32"""
-    print("📷 Testing Camera-Only Line Detection")
-    print("=" * 50)
+   
     
     camera_line_follower = CameraLineFollower(debug=True)
     
@@ -217,18 +212,16 @@ def test_camera_only():
         print(f"Trying camera index {cam_index}...")
         cap = cv2.VideoCapture(cam_index)
         if cap.isOpened():
-            print(f"✅ Camera connected at index {cam_index}!")
+            print(f"Camera connected at index {cam_index}!")
             break
         cap.release()
         cap = None
     
     if cap is None:
-        print("❌ ERROR: Could not connect to any camera")
+        
         return
     
-    print("✅ Camera connected! Press 'q' to quit")
-    print("Point camera at black lines to see detection in action")
-    
+   
     try:
         while True:
             ret, frame = cap.read()
