@@ -71,7 +71,7 @@ def test_camera_line_following():
         while time.time() - start_time < 10:
             ret, frame = cap.read()
             if not ret:
-                print("⚠️ Failed to read camera frame")
+                print("Failed to read camera frame")
                 continue
             
             total_frames += 1
