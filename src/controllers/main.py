@@ -22,52 +22,6 @@ from camera_line_follower import CameraLineFollower, CameraLineFollowingMixin
 from visual_localizer import PreciseMazeLocalizer
 
 # ================================
-# GPIO MOTOR CONTROL (FALLBACK)
-# ================================
-# Global variables for GPIO pins and library, used if ESP32 is not available
-GPIO_LIBRARY = None
-FOUR_WHEEL_MODE = False
-FL_PIN1, FL_PIN2 = 17, 27
-FR_PIN1, FR_PIN2 = 23, 22
-def initialize_gpio():
-    """Initialize GPIO pins for motor control (fallback)."""
-    global GPIO_LIBRARY, fl_pin1, fl_pin2, fr_pin1, fr_pin2
-    
-    if GPIO_LIBRARY is not None:
-        return  # Already initialized
-    
-    # Try gpiozero first (better for Pi 5), then fall back to RPi.GPIO
-    try:
-        from gpiozero import OutputDevice
-        print("Using gpiozero library (Pi 5 compatible)")
-        GPIO_LIBRARY = "gpiozero"
-        fl_pin1 = OutputDevice(17)
-        fl_pin2 = OutputDevice(27)
-        fr_pin1 = OutputDevice(23)
-        fr_pin2 = OutputDevice(22)
-        FOUR_WHEEL_MODE = False
-        print("Using 2-wheel mode (Front wheels only) - FL(17,27), FR(22,23)")
-    except Exception as e:
-        print(f"GPIO initialization failed: {e}. Running in simulation mode.")
-        GPIO_LIBRARY = "simulation"
-    except ImportError:
-        try:
-            import RPi.GPIO as GPIO
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setwarnings(False)
-            for pin in [FL_PIN1, FL_PIN2, FR_PIN1, FR_PIN2]:
-                GPIO.setup(pin, GPIO.OUT)
-                GPIO.output(pin, GPIO.LOW)
-            FOUR_WHEEL_MODE = False
-            print("Using RPi.GPIO for 2-wheel mode (Front wheels only) - FL(17,27), FR(22,23)")
-        except ImportError:
-            print("No GPIO library available, running in simulation mode.")
-            GPIO_LIBRARY = "simulation"
-        except Exception as e:
-            print(f"GPIO initialization failed: {e}. Running in simulation mode.")
-            GPIO_LIBRARY = "simulation"
-
-# ================================
 # FEATURE CONFIGURATION
 # ================================
 # Enable/disable features for easy testing and debugging
@@ -119,8 +73,8 @@ MAZE_GRID = [
     [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1], # Row 13
     [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1]  # Row 14
 ]
-START_CELL = (14, 0) # Start position from visual odometry
-END_CELL = (2, 0)
+START_CELL = (0, 14) # Start position (col, row)
+END_CELL = (0, 2)   # End position (col, row)
 START_POSITION = ((START_CELL[0] + 0.5) * CELL_SIZE_M, (START_CELL[1] + 0.5) * CELL_SIZE_M)
 START_HEADING = 0.0  # Facing right for horizontal movement
 START_DIRECTION = 'E' # For visual localizer
@@ -143,7 +97,7 @@ IMG_PATH_SRC_PTS = np.float32([[160, 240], [480, 240], [640, 480], [0, 480]])
 IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
 
 # Camera configuration
-WEBCAM_INDEX = 0
+WEBCAM_INDEX = 1
 CAMERA_WIDTH, CAMERA_HEIGHT = 1920, 1080
 CAMERA_FPS = 30
 
@@ -322,6 +276,10 @@ class RobotController(CameraLineFollowingMixin):
             print("WARNING: Motor controller failed to connect. Running in simulation mode.")
         
         if isinstance(self.position_tracker, PreciseMazeLocalizer):
+            # Try to initialize camera with different indices
+            for i in range(4): # Try first 4 indices
+                if self.position_tracker.initialize_camera(i):
+                    break
             self.position_tracker.start_localization()
 
         self._start_mission()
@@ -517,7 +475,7 @@ class RobotController(CameraLineFollowingMixin):
             bl_speed = base_speed * 3 // 4    # Back left: moderate
             br_speed = base_speed             # Back right: normal
         else:  # right turn
-            # Front wheels turn right, back wheels follow  
+            #
             fl_speed = base_speed             # Front left: normal
             fr_speed = base_speed // 2        # Front right: slower
             bl_speed = base_speed             # Back left: normal
@@ -612,11 +570,14 @@ def main():
 
         def generate_frames():
             while robot.running:
-                with robot.frame_lock:
-                    if robot.processed_frame is None:
-                        time.sleep(0.1)
-                        continue
-                    frame = robot.processed_frame.copy()
+                frame = None
+                if isinstance(robot.position_tracker, PreciseMazeLocalizer):
+                    frame = robot.position_tracker.get_camera_frame()
+
+                if frame is None:
+                    # If no frame, send a placeholder or just wait
+                    time.sleep(0.1)
+                    continue
                 
                 # Add camera line following debug overlay if available
                 if (hasattr(robot, 'camera_line_result') and 
@@ -708,52 +669,11 @@ def main():
     
     # Start the camera capture thread if vision is enabled
     if FEATURES['VISION_SYSTEM_ENABLED']:
-        def camera_capture_thread(robot_controller):
-            # Try different camera indices in case the webcam is not at index 0
-            cap = None
-            for cam_index in [WEBCAM_INDEX, 0, 1, 2]:
-                print(f"Trying to connect to camera at index {cam_index}...")
-                cap = cv2.VideoCapture(cam_index)
-                if cap.isOpened():
-                    print(f"Successfully connected to camera at index {cam_index}")
-                    break
-                cap.release()
-                cap = None
-            
-            if cap is None:
-                print("ERROR: Could not connect to any camera")
-                return
+        print("Vision system enabled. Camera is managed by PreciseMazeLocalizer.")
 
-            # Configure camera settings for optimal performance
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-            cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer for lower latency
-            
-            # Verify actual camera settings
-            actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            actual_fps = cap.get(cv2.CAP_PROP_FPS)
-            print(f"Camera configured: {actual_width}x{actual_height} @ {actual_fps} FPS")
-
-            print("Camera connected successfully.")
-            while robot_controller.running:
-                ret, frame = cap.read()
-                if ret:
-                    processing_width, processing_height = 640, 480
-                    resized_frame = cv2.resize(frame, (processing_width, processing_height))
-                    with robot_controller.frame_lock:
-                        robot_controller.frame = resized_frame
-                        # Also pass the frame to the visual localizer if it needs it
-                        if isinstance(robot_controller.position_tracker, PreciseMazeLocalizer):
-                            robot_controller.position_tracker.prev_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
-                else:
-                    # print("Warning: Failed to read frame from camera. Retrying...")
-                    time.sleep(1)
-            cap.release()
-
-        camera_thread = threading.Thread(target=camera_capture_thread, args=(robot,), daemon=True)
-        camera_thread.start()
+    # Start the Flask web server in a separate thread
+    flask_thread = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False), daemon=True)
+    flask_thread.start()
 
     # Start the robot controller in a separate thread
     robot_thread = threading.Thread(target=robot.run, daemon=True)
@@ -771,4 +691,4 @@ if __name__ == '__main__':
         print("\nExiting program.")
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
-        logging.exception("Error details:") 
+        logging.exception("Error details:")

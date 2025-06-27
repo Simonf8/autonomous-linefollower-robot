@@ -18,6 +18,7 @@ class PreciseMazeLocalizer:
         if not self.cap.isOpened():
             print("Warning: Could not open camera")
             self.cap = None
+        self.latest_frame = None
         
         # Movement detection
         self.prev_frame = None
@@ -51,6 +52,18 @@ class PreciseMazeLocalizer:
         self.running = False
         self.localization_thread = None
         
+    def initialize_camera(self, camera_index=0):
+        """Initializes the camera with a given index."""
+        if self.cap is None:
+            self.cap = cv2.VideoCapture(camera_index)
+            if not self.cap.isOpened():
+                print(f"Warning: Could not open camera at index {camera_index}")
+                self.cap = None
+                return False
+            print(f"Successfully opened camera at index {camera_index}")
+            return True
+        return True
+
     def create_precise_signatures(self) -> Dict:
         """Create precise corner signatures for each valid position in YOUR maze"""
         signatures = {}
@@ -169,6 +182,9 @@ class PreciseMazeLocalizer:
                 'message': 'Failed to read camera frame'
             }
         
+        with self.frame_lock:
+            self.latest_frame = frame.copy()
+
         # Check if robot is moving
         is_moving = self.detect_movement(frame)
         
@@ -423,12 +439,9 @@ class PreciseMazeLocalizer:
     
     def get_camera_frame(self):
         """Get current camera frame for video feed"""
-        if not self.cap or not self.cap.isOpened():
-            return None
-        
-        ret, frame = self.cap.read()
-        if ret:
-            return frame
+        with self.frame_lock:
+            if self.latest_frame is not None:
+                return self.latest_frame.copy()
         return None
 
     def get_current_cell(self):
@@ -443,4 +456,4 @@ class PreciseMazeLocalizer:
         heading_deg = direction_to_heading.get(self.current_direction, 0)
         heading_rad = math.radians(heading_deg)
 
-        return (x, y, heading_rad) 
+        return (x, y, heading_rad)
