@@ -36,7 +36,7 @@ class PreciseMazeLocalizer:
         
         # Confidence tracking
         self.position_confidence = 1.0
-        self.min_confidence = 0.6
+        self.min_confidence = 0.85
         
         # Status tracking
         self.last_status = {
@@ -53,6 +53,7 @@ class PreciseMazeLocalizer:
         self.running = False
         self.localization_thread = None
         self.frame_lock = threading.Lock()
+        self.initialization_frames = camera_fps # Grace period before localizing
         
     def initialize_camera(self, camera_index=0):
         """Initializes the camera with a given index."""
@@ -370,7 +371,7 @@ class PreciseMazeLocalizer:
         best_matches = []
         for (x, y, direction), expected in self.corner_signatures.items():
             match_score = self.compare_scenes_precisely(observed_scene, expected)
-            if match_score > 0.7:
+            if match_score > 0.8:
                 best_matches.append(((x, y, direction), match_score))
         
         if best_matches:
@@ -441,33 +442,63 @@ class PreciseMazeLocalizer:
         self.running = False
         if self.localization_thread:
             self.localization_thread.join()
+        if self.cap:
+            self.cap.release()
     
     def _localization_loop(self):
-        """Main localization loop running in background thread"""
+        """Main loop for the localization thread."""
         while self.running:
-            try:
-                result = self.localize_with_confidence()
-                self.last_status = result
-                time.sleep(0.1)  # Update every 100ms for faster response
-            except Exception as e:
-                self.last_status = {
-                    'status': 'error',
-                    'confidence': 0.0,
-                    'message': f'Localization error: {str(e)}'
-                }
-                time.sleep(1.0)  # Wait longer on error
+            if self.initialization_frames > 0:
+                if self.cap and self.cap.isOpened():
+                    ret, frame = self.cap.read()
+                    if ret:
+                        with self.frame_lock:
+                            self.latest_frame = frame.copy()
+                self.initialization_frames -= 1
+                time.sleep(1 / self.camera_fps)
+                continue
+
+            result = self.localize_with_confidence()
+
+            # Update status based on result
+            if result and result.get('status') == 'success':
+                with self.frame_lock:
+                    self.current_pos = result['position']
+                    self.current_direction = result['direction']
+                    self.position_confidence = result['confidence']
+
+                self.last_status.update({
+                    'status': 'tracking',
+                    'position': self.current_pos,
+                    'direction': self.current_direction,
+                    'confidence': self.position_confidence,
+                    'scene_type': result.get('scene', {}).get('scene_type', 'unknown'),
+                    'message': 'Position updated'
+                })
+            elif result:
+                # Handle other statuses like 'stationary', 'error', 'blurry'
+                self.last_status.update({
+                    'status': result.get('status', 'unknown'),
+                    'position': self.current_pos,
+                    'direction': self.current_direction,
+                    'confidence': result.get('confidence', self.position_confidence),
+                    'message': result.get('message', 'No message')
+                })
+
+            time.sleep(1 / self.camera_fps) # Control loop rate
     
     def get_status(self) -> Dict:
-        """Get current localization status"""
-        status = self.last_status.copy()
-        status.update({
-            'current_position': self.current_pos,
-            'current_direction': self.current_direction,
-            'position_confidence': self.position_confidence,
-            'stationary_frames': self.stationary_frames,
-            'is_stationary': self.stationary_frames > self.max_stationary_frames
-        })
-        return status
+        """Get the current status of the localizer."""
+        with self.frame_lock:
+            status = self.last_status.copy()
+            status.update({
+                'current_position': self.current_pos,
+                'current_direction': self.current_direction,
+                'position_confidence': self.position_confidence,
+                'stationary_frames': self.stationary_frames,
+                'is_stationary': self.stationary_frames > self.max_stationary_frames
+            })
+            return status
     
     def get_camera_frame(self):
         """Get current camera frame for video feed"""
