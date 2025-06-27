@@ -47,24 +47,24 @@ CORNER_SPEED = 22
 
 # Maze and Mission Configuration
 MAZE_GRID = [
-    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 0
-    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 1
+    [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1], # Row 0
+    [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1], # Row 1
     [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], # Row 2
     [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 3
     [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 4
-    [0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0], # Row 5
+    [0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0], # Row 5
     [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 6
     [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], # Row 7
     [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 8
-    [0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0], # Row 9
+    [0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0], # Row 9
     [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 10
     [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 11
     [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], # Row 12
-    [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1], # Row 13
-    [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1]  # Row 14
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 13
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0]  # Row 14
 ]
-START_CELL = (0, 14) # Start position (col, row)
-END_CELL = (0, 2)   # End position (col, row)
+START_CELL = (20, 14) # Start position (col, row)
+END_CELL = (0, 0)   # End position (col, row)
 START_DIRECTION = 'F' # Use 'F'(North), 'B'(South), 'L'(West), 'R'(East)
 
 # Line following configuration
@@ -221,7 +221,8 @@ class RobotController(CameraLineFollowingMixin):
             start_pos=START_CELL,
             camera_width=CAMERA_WIDTH,
             camera_height=CAMERA_HEIGHT,
-            camera_fps=CAMERA_FPS
+            camera_fps=CAMERA_FPS,
+            start_direction='N' # Default, will be updated from main
         )
 
         # Pathfinder setup
@@ -256,9 +257,7 @@ class RobotController(CameraLineFollowingMixin):
             for i in range(4): # Try first 4 indices
                 if self.position_tracker.initialize_camera(i):
                     break
-            self.position_tracker.start_localization()
-
-        self._start_mission()
+            # Localization will be started by _start_mission()
 
         while self.running:
             self._run_state_machine()
@@ -273,6 +272,10 @@ class RobotController(CameraLineFollowingMixin):
             return
 
         print("Starting mission...")
+        # Start localizer only when mission begins
+        if isinstance(self.position_tracker, PreciseMazeLocalizer) and not self.position_tracker.running:
+            self.position_tracker.start_localization()
+            
         # Pose is now managed by the visual localizer
         self.state = "planning"
 
@@ -597,6 +600,12 @@ def main():
             'path_length': len(robot.path)
         })
 
+    @app.route('/stop_robot')
+    def stop_robot():
+        """Stop the robot's movement and all processes."""
+        robot.stop()
+        return jsonify({'status': 'Robot stopped'})
+
     @app.route('/grid_feed')
     def grid_feed():
         """Streams the grid map visualization."""
@@ -658,7 +667,7 @@ def main():
             robot_x, robot_y = robot_cell[0], robot_cell[1]
             cv2.circle(grid_img, 
                        (robot_x * cell_size + cell_size // 2, robot_y * cell_size + cell_size // 2), 
-                       cell_size // 3, (255, 165, 0), -1)
+                       cell_size // 3, (203, 102, 255), -1) # Use pink for robot
         
         return grid_img
     

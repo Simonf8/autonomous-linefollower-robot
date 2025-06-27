@@ -20,9 +20,15 @@
                 <h1 class="cyber-title glitch" data-text="ROBONOMOUS">ROBONOMOUS</h1>
                 <h1 class="cyber-title" style="font-size: 2rem; color: var(--cyber-pink);">ROBOT</h1>
             </div>
-            <div class="system-status">
-                <div class="status-indicator online" id="status-indicator"></div>
-                <span id="status-text">SYSTEM ONLINE</span>
+            <div class="header-controls">
+                <div class="system-status">
+                    <div class="status-indicator online" id="status-indicator"></div>
+                    <span id="status-text">SYSTEM ONLINE</span>
+                </div>
+                <div class="controls-grid">
+                    <button id="start-btn" class="control-btn start-btn">START MISSION</button>
+                    <button id="stop-btn" class="control-btn stop-btn">STOP</button>
+                </div>
             </div>
         </header>
 
@@ -176,6 +182,9 @@
 
                 <!-- Corner Turning Mode Control -->
                 <!-- REMOVED as per user request for autonomous cornering -->
+
+                <!-- Controls -->
+                
             </div>
         </div>
 
@@ -285,6 +294,27 @@
             setInterval(updateTimestamp, 1000);
             updateData();
             setInterval(updateData, 500); // Poll every 500ms
+
+            // Control button event listeners
+            document.getElementById('start-btn').addEventListener('click', () => {
+                fetch('/start_mission')
+                    .then(response => response.json())
+                    .then(data => console.log('Mission start response:', data))
+                    .catch(err => console.error('Error starting mission:', err));
+            });
+
+            document.getElementById('stop-btn').addEventListener('click', () => {
+                fetch('/stop_robot')
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log('Stop robot response:', data);
+                        // Visually indicate that the system is stopped
+                        document.getElementById('robot-state').textContent = 'STOPPED';
+                        document.getElementById('status-indicator').className = 'status-indicator error';
+                        document.getElementById('status-text').textContent = 'SYSTEM HALTED';
+                    })
+                    .catch(err => console.error('Error stopping robot:', err));
+            });
         }
 
         document.addEventListener('DOMContentLoaded', init);

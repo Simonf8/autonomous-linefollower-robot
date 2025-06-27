@@ -12,6 +12,11 @@
     --text-primary: #ffffff;
     --text-secondary: #b0b0b0;
     --shadow-glow: 0 0 20px rgba(0, 255, 255, 0.3);
+    --bg-color: #0a192f;
+    --cyber-cyan: #64ffda;
+    --cyber-red: #d33939;
+    --panel-bg: rgba(10, 25, 47, 0.85);
+    --panel-border: #0d2a4a;
 }
 
 * {
@@ -82,10 +87,15 @@ body {
 
 /* Header */
 .header {
-    text-align: center;
-    margin-bottom: 30px;
-    padding-bottom: 20px;
-    position: relative;
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    margin-bottom: 20px;
 }
 
 .cyber-title {
@@ -189,6 +199,7 @@ body {
     background: var(--cyber-green);
     box-shadow: 0 0 10px var(--cyber-green);
     animation: pulse 2s infinite;
+    margin-right: 10px;
 }
 
 @keyframes pulse {
@@ -279,6 +290,7 @@ body {
 /* Camera Panel */
 .camera-panel {
     grid-column: span 2;
+    margin-top: 20px;
 }
 
 .camera-container {
@@ -591,32 +603,30 @@ body {
 }
 
 .map-legend {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-    gap: 10px;
+    display: flex;
+    justify-content: space-around;
+    padding: 10px;
+    background: rgba(0, 0, 0, 0.3);
+    border-top: 1px solid var(--cyber-cyan);
 }
 
 .legend-item {
     display: flex;
     align-items: center;
-    gap: 8px;
     font-size: 0.8rem;
-    color: var(--text-secondary);
+    text-transform: uppercase;
 }
 
 .legend-color {
-    width: 12px;
-    height: 12px;
-    border-radius: 2px;
+    width: 15px;
+    height: 15px;
+    margin-right: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.5);
 }
 
-.line-color { background: #3c3c3c; }
-.current-color { background: var(--cyber-orange); }
-.robot-color { background: var(--cyber-pink); }
-.waypoint-color { background: var(--cyber-green); }
-.pickup-color { background: #00ffff; }
-.dropoff-color { background: #ffa500; }
-.robot-trail { background: #80ff80; }
+.robot-color {
+    background-color: var(--cyber-pink);
+}
 
 /* Mission Panel */
 .mission-info {
@@ -797,8 +807,9 @@ body {
 }
 
 .main-title-container {
-    text-align: center;
-    margin-bottom: 20px;
+    display: flex;
+    align-items: baseline;
+    gap: 15px;
 }
 
 /* Progress bar styles */
@@ -1138,4 +1149,60 @@ body {
         padding: 10px;
         margin-bottom: 15px;
     }
+}
+
+/* --- System Controls Panel --- */
+.controls-panel {
+    background: rgba(10, 25, 47, 0.8);
+    border: 1px solid var(--cyber-cyan);
+    border-radius: 8px;
+    padding: 20px;
+    margin-top: 20px;
+}
+
+.controls-grid {
+    display: flex;
+    gap: 15px;
+}
+
+.control-btn {
+    padding: 10px 20px;
+    font-family: 'Orbitron', sans-serif;
+    font-size: 0.9rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    border: 2px solid;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    background-size: 200% 100%;
+    color: #fff;
+}
+
+.start-btn {
+    border-color: var(--cyber-pink);
+    background-image: linear-gradient(to right, transparent 50%, var(--cyber-pink) 50%);
+}
+
+.start-btn:hover {
+    background-position: -100% 0;
+    color: #000;
+    font-weight: 900;
+}
+
+.stop-btn {
+    border-color: var(--cyber-red);
+    background-image: linear-gradient(to right, transparent 50%, var(--cyber-red) 50%);
+}
+
+.stop-btn:hover {
+    background-position: -100% 0;
+    color: #000;
+    font-weight: 900;
+}
+
+.header-controls {
+    display: flex;
+    align-items: center;
+    gap: 30px;
 } 

@@ -25,6 +25,7 @@ class PreciseMazeLocalizer:
         self.movement_threshold = 50
         self.stationary_frames = 0
         self.max_stationary_frames = 10
+        self.blur_threshold = 100.0 # New: tunable threshold for blur detection
         
         # Corner distance detection
         self.close_corner_threshold = 0.7
@@ -171,6 +172,20 @@ class PreciseMazeLocalizer:
         self.prev_frame = current_gray
         return is_moving
     
+    def detect_blur(self, image: np.ndarray) -> bool:
+        """Detects if an image is blurry using the variance of the Laplacian.
+        
+        Args:
+            image: The input image (should be grayscale).
+
+        Returns:
+            True if the image is blurry, False otherwise.
+        """
+        # Compute the Laplacian of the image and then return the focus
+        # measure, which is simply the variance of the Laplacian
+        laplacian_var = cv2.Laplacian(image, cv2.CV_64F).var()
+        return laplacian_var < self.blur_threshold
+
     def detect_scene_with_precision(self) -> Optional[Dict]:
         """Precisely detect current scene with movement and distance awareness"""
         if not self.cap or not self.cap.isOpened():
@@ -205,6 +220,15 @@ class PreciseMazeLocalizer:
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
+        # New: Blur detection
+        if self.detect_blur(gray):
+            return {
+                'status': 'error',
+                'confidence': 0.0,
+                'is_moving': is_moving,
+                'message': 'Frame is too blurry for localization'
+            }
+
         # Use FAST for faster corner detection
         fast = cv2.FastFeatureDetector_create(threshold=25, nonmaxSuppression=True)
         keypoints = fast.detect(gray, None)
