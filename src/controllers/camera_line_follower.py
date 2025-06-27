@@ -3,6 +3,7 @@
 import cv2
 import numpy as np
 import time
+import math
 from typing import Tuple, Optional, Dict, List
 from collections import deque
 
@@ -428,4 +429,482 @@ class CameraObstacleAvoidance:
             'avoidance_action': 'continue_forward',
             'processed_frame': None,
             'frame_number': self.frames_processed
+        } 
+
+class CameraLineFollower:
+    """
+    Camera-based line following system for autonomous robot navigation.
+    Detects black lines and provides steering corrections for line following.
+    """
+    
+    def __init__(self, debug=False):
+        self.debug = debug
+        
+        # Line detection parameters
+        self.BLACK_THRESHOLD = 80  # Threshold for detecting black lines
+        self.BLUR_SIZE = (5, 5)
+        self.MIN_CONTOUR_AREA = 500
+        self.MIN_LINE_WIDTH = 10
+        self.MAX_LINE_WIDTH = 200
+        
+        # Morphological operations kernel
+        self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        
+        # Region of Interest (ROI) settings
+        self.ROI_HEIGHT_RATIO = 0.4  # Use bottom 40% of frame for line detection
+        self.ROI_START_RATIO = 0.6   # Start ROI at 60% down from top
+        
+        # Line following parameters
+        self.center_offset_history = []
+        self.history_size = 5  # Smooth over last 5 measurements
+        
+        # Corner detection parameters
+        self.CORNER_THRESHOLD = 0.4  # Line offset ratio to detect corner
+        self.SHARP_CORNER_THRESHOLD = 0.6
+        self.corner_detected = False
+        self.corner_direction = None
+        self.corner_confidence = 0.0
+        
+        # Line loss recovery
+        self.line_lost_counter = 0
+        self.MAX_LINE_LOST_FRAMES = 10
+        self.search_direction = 0  # -1 for left, 1 for right, 0 for center
+        
+        # Performance tracking
+        self.last_detection_time = 0
+        self.detection_fps = 0
+        
+    def detect_line(self, frame: np.ndarray) -> Dict:
+        """
+        Detect line in the camera frame and return line following information.
+        
+        Args:
+            frame: Input camera frame (BGR)
+            
+        Returns:
+            Dictionary containing:
+            - line_detected: bool
+            - line_center_x: int (pixel position of line center)
+            - line_offset: float (-1.0 to 1.0, normalized offset from center)
+            - line_confidence: float (0.0 to 1.0)
+            - corner_detected: bool
+            - corner_direction: str ('left', 'right', None)
+            - corner_confidence: float
+            - turn_angle: float (suggested turn angle in degrees)
+            - processed_frame: frame with debug overlay (if debug=True)
+        """
+        start_time = time.time()
+        
+        if frame is None:
+            return self._empty_result()
+        
+        height, width = frame.shape[:2]
+        
+        # Define ROI for line detection (focus on lower portion of frame)
+        roi_start_y = int(height * self.ROI_START_RATIO)
+        roi = frame[roi_start_y:height, :]
+        
+        # Preprocess the ROI
+        processed_roi = self._preprocess_roi(roi)
+        
+        # Detect line in the ROI
+        line_info = self._find_line_in_roi(processed_roi)
+        
+        # Calculate line following parameters
+        result = self._calculate_line_following_params(line_info, width, roi_start_y)
+        
+        # Detect corners if line is found
+        if result['line_detected']:
+            corner_info = self._detect_corner(line_info, processed_roi, width)
+            result.update(corner_info)
+        
+        # Add debug visualization if enabled
+        if self.debug:
+            result['processed_frame'] = self._draw_debug_overlay(frame, result, roi_start_y, processed_roi)
+        
+        # Update performance metrics
+        self.last_detection_time = time.time() - start_time
+        self.detection_fps = 1.0 / max(self.last_detection_time, 0.001)
+        
+        return result
+    
+    def _preprocess_roi(self, roi: np.ndarray) -> np.ndarray:
+        """Preprocess the ROI for line detection."""
+        # Convert to grayscale
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(gray, self.BLUR_SIZE, 0)
+        
+        # Apply binary threshold to detect black lines
+        _, binary = cv2.threshold(blurred, self.BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+        
+        # Apply morphological operations to clean up the binary image
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self.morph_kernel)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, self.morph_kernel)
+        
+        return binary
+    
+    def _find_line_in_roi(self, binary_roi: np.ndarray) -> Optional[Dict]:
+        """Find the main line in the binary ROI."""
+        # Find contours
+        contours, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return None
+        
+        # Filter contours by area and shape
+        valid_contours = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < self.MIN_CONTOUR_AREA:
+                continue
+            
+            # Check if contour resembles a line
+            x, y, w, h = cv2.boundingRect(contour)
+            if w < self.MIN_LINE_WIDTH or w > self.MAX_LINE_WIDTH:
+                continue
+            
+            valid_contours.append((contour, area))
+        
+        if not valid_contours:
+            return None
+        
+        # Select the largest valid contour as the main line
+        main_contour, main_area = max(valid_contours, key=lambda x: x[1])
+        
+        # Calculate line properties
+        M = cv2.moments(main_contour)
+        if M["m00"] == 0:
+            return None
+        
+        # Line center
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+        
+        # Bounding rectangle
+        x, y, w, h = cv2.boundingRect(main_contour)
+        
+        # Calculate confidence based on contour properties
+        roi_height, roi_width = binary_roi.shape
+        area_ratio = main_area / (roi_width * roi_height)
+        aspect_ratio = w / max(h, 1)
+        
+        # Higher confidence for larger, more line-like contours
+        confidence = min(1.0, area_ratio * 10 + min(aspect_ratio / 3, 1.0) * 0.5)
+        
+        return {
+            'center': (cx, cy),
+            'contour': main_contour,
+            'bbox': (x, y, w, h),
+            'area': main_area,
+            'confidence': confidence
+        }
+    
+    def _calculate_line_following_params(self, line_info: Optional[Dict], 
+                                       frame_width: int, roi_start_y: int) -> Dict:
+        """Calculate line following parameters."""
+        if line_info is None:
+            self.line_lost_counter += 1
+            
+            # Try to recover line
+            if self.line_lost_counter <= self.MAX_LINE_LOST_FRAMES:
+                # Use last known good position for brief line loss
+                last_offset = self.center_offset_history[-1] if self.center_offset_history else 0.0
+                return {
+                    'line_detected': False,
+                    'line_center_x': int(frame_width // 2 + last_offset * frame_width // 2),
+                    'line_offset': last_offset,
+                    'line_confidence': 0.0,
+                    'turn_angle': last_offset * 30,  # Convert to angle
+                    'status': 'line_lost_recovering'
+                }
+            else:
+                # Line is truly lost
+                return {
+                    'line_detected': False,
+                    'line_center_x': frame_width // 2,
+                    'line_offset': 0.0,
+                    'line_confidence': 0.0,
+                    'turn_angle': 0.0,
+                    'status': 'line_lost'
+                }
+        
+        # Line found - reset lost counter
+        self.line_lost_counter = 0
+        
+        # Calculate line center in full frame coordinates
+        line_center_x = line_info['center'][0]
+        
+        # Calculate offset from frame center (-1.0 to 1.0)
+        frame_center = frame_width // 2
+        raw_offset = (line_center_x - frame_center) / (frame_width // 2)
+        raw_offset = max(-1.0, min(1.0, raw_offset))  # Clamp to valid range
+        
+        # Smooth the offset using history
+        self.center_offset_history.append(raw_offset)
+        if len(self.center_offset_history) > self.history_size:
+            self.center_offset_history.pop(0)
+        
+        smoothed_offset = sum(self.center_offset_history) / len(self.center_offset_history)
+        
+        # Calculate turn angle (simple proportional control)
+        turn_angle = smoothed_offset * 45  # Max 45 degrees turn
+        
+        return {
+            'line_detected': True,
+            'line_center_x': line_center_x,
+            'line_offset': smoothed_offset,
+            'line_confidence': line_info['confidence'],
+            'turn_angle': turn_angle,
+            'status': 'line_following'
+        }
+    
+    def _detect_corner(self, line_info: Dict, binary_roi: np.ndarray, frame_width: int) -> Dict:
+        """Detect if the robot is approaching a corner."""
+        line_offset = abs((line_info['center'][0] - frame_width // 2) / (frame_width // 2))
+        
+        corner_detected = False
+        corner_direction = None
+        corner_confidence = 0.0
+        
+        if line_offset > self.CORNER_THRESHOLD:
+            corner_detected = True
+            corner_direction = 'left' if line_info['center'][0] < frame_width // 2 else 'right'
+            
+            # Calculate corner confidence based on line offset
+            if line_offset > self.SHARP_CORNER_THRESHOLD:
+                corner_confidence = 1.0  # Sharp corner
+            else:
+                corner_confidence = (line_offset - self.CORNER_THRESHOLD) / (self.SHARP_CORNER_THRESHOLD - self.CORNER_THRESHOLD)
+        
+        return {
+            'corner_detected': corner_detected,
+            'corner_direction': corner_direction,
+            'corner_confidence': corner_confidence
+        }
+    
+    def _draw_debug_overlay(self, frame: np.ndarray, result: Dict, 
+                          roi_start_y: int, binary_roi: np.ndarray) -> np.ndarray:
+        """Draw debug overlay on the frame."""
+        debug_frame = frame.copy()
+        height, width = frame.shape[:2]
+        
+        # Draw ROI boundary
+        cv2.rectangle(debug_frame, (0, roi_start_y), (width, height), (255, 255, 0), 2)
+        cv2.putText(debug_frame, "LINE DETECTION ROI", (10, roi_start_y - 10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        
+        # Draw frame center line
+        center_x = width // 2
+        cv2.line(debug_frame, (center_x, 0), (center_x, height), (0, 255, 255), 1)
+        
+        if result['line_detected']:
+            # Draw detected line center
+            line_x = result['line_center_x']
+            cv2.line(debug_frame, (line_x, roi_start_y), (line_x, height), (0, 255, 0), 3)
+            cv2.circle(debug_frame, (line_x, roi_start_y + 50), 8, (0, 255, 0), -1)
+            
+            # Draw offset arrow
+            arrow_y = roi_start_y + 30
+            cv2.arrowedLine(debug_frame, (center_x, arrow_y), (line_x, arrow_y), (0, 0, 255), 3)
+            
+            # Corner detection overlay
+            if result.get('corner_detected', False):
+                corner_color = (0, 0, 255) if result['corner_confidence'] > 0.7 else (0, 165, 255)
+                cv2.putText(debug_frame, f"CORNER {result['corner_direction'].upper()}", 
+                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, corner_color, 2)
+        else:
+            # Line lost
+            cv2.putText(debug_frame, "LINE LOST", (10, 40), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+        
+        # Display detection info
+        info_lines = [
+            f"Offset: {result['line_offset']:.3f}",
+            f"Confidence: {result['line_confidence']:.3f}",
+            f"Turn Angle: {result['turn_angle']:.1f}°",
+            f"FPS: {self.detection_fps:.1f}",
+            f"Status: {result['status']}"
+        ]
+        
+        for i, line in enumerate(info_lines):
+            cv2.putText(debug_frame, line, (10, height - 120 + i * 25), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # Show binary ROI in corner
+        roi_display = cv2.resize(binary_roi, (200, 100))
+        roi_display_bgr = cv2.cvtColor(roi_display, cv2.COLOR_GRAY2BGR)
+        debug_frame[10:110, width-210:width-10] = roi_display_bgr
+        cv2.putText(debug_frame, "BINARY ROI", (width-200, 130), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        
+        return debug_frame
+    
+    def _empty_result(self) -> Dict:
+        """Return empty result when no frame is provided."""
+        return {
+            'line_detected': False,
+            'line_center_x': 0,
+            'line_offset': 0.0,
+            'line_confidence': 0.0,
+            'corner_detected': False,
+            'corner_direction': None,
+            'corner_confidence': 0.0,
+            'turn_angle': 0.0,
+            'status': 'no_frame'
+        }
+    
+    def get_motor_speeds(self, result: Dict, base_speed: int = 60) -> Tuple[int, int, int, int]:
+        """
+        Convert line detection result to motor speeds for differential drive.
+        
+        Args:
+            result: Line detection result from detect_line()
+            base_speed: Base forward speed
+            
+        Returns:
+            Tuple of (front_left, front_right, back_left, back_right) motor speeds
+        """
+        if not result['line_detected']:
+            # Line lost - stop or search
+            if result['status'] == 'line_lost_recovering':
+                # Brief stop while recovering
+                return (0, 0, 0, 0)
+            else:
+                # Search for line - reduced speed for slower, more controlled search
+                search_speed = base_speed // 3  # Reduced from base_speed // 2 for slower searching
+                if self.search_direction == 0:
+                    # Determine search direction from last known offset
+                    last_offset = self.center_offset_history[-1] if self.center_offset_history else 0.0
+                    self.search_direction = 1 if last_offset > 0 else -1
+                
+                if self.search_direction > 0:
+                    # Search right
+                    return (-search_speed, search_speed, -search_speed, search_speed)
+                else:
+                    # Search left
+                    return (search_speed, -search_speed, search_speed, -search_speed)
+        
+        # Reset search direction when line is found
+        self.search_direction = 0
+        
+        # Calculate turn correction - reduced for gentler steering
+        turn_correction = int(result['line_offset'] * base_speed * 0.5)  # Reduced from 0.8 to 0.5 for gentler turning
+        
+        # Apply corner-specific adjustments
+        if result.get('corner_detected', False):
+            corner_speed = int(base_speed * 0.6)  # Slower for corners (reduced from 0.7)
+            corner_turn = int(turn_correction * 1.2)  # Less aggressive turning (reduced from 1.5)
+            
+            left_speed = corner_speed - corner_turn
+            right_speed = corner_speed + corner_turn
+        else:
+            # Normal line following
+            left_speed = base_speed - turn_correction
+            right_speed = base_speed + turn_correction
+        
+        # Clamp speeds to valid range
+        left_speed = max(-100, min(100, left_speed))
+        right_speed = max(-100, min(100, right_speed))
+        
+        # For 2-wheel robot, back wheels follow front wheels
+        return (left_speed, right_speed, left_speed, right_speed)
+
+
+class CameraLineFollowingMixin:
+    """
+    Mixin class to add camera line following capabilities to the robot controller.
+    """
+    
+    def init_camera_line_following(self):
+        """Initialize camera line following system."""
+        # Get debug setting from the current object's FEATURES if available
+        debug_enabled = False
+        if hasattr(self, '__class__') and hasattr(self.__class__, '__module__'):
+            try:
+                import sys
+                main_module = sys.modules.get('__main__')
+                if main_module and hasattr(main_module, 'FEATURES'):
+                    debug_enabled = main_module.FEATURES.get('DEBUG_VISUALIZATION_ENABLED', False)
+            except:
+                debug_enabled = False
+            
+        self.camera_line_follower = CameraLineFollower(debug=debug_enabled)
+        self.camera_line_result = {}
+        self.using_camera_line_following = True
+        print("Camera line following system initialized")
+    
+    def follow_line_with_camera(self):
+        """Follow line using camera vision instead of hardware sensors."""
+        if not hasattr(self, 'camera_line_follower'):
+            print("Camera line follower not initialized!")
+            return
+        
+        # Get current camera frame
+        with self.frame_lock:
+            if self.frame is None:
+                print("No camera frame available for line following")
+                self._stop_motors()
+                return
+            current_frame = self.frame.copy()
+        
+        # Detect line in the frame
+        self.camera_line_result = self.camera_line_follower.detect_line(current_frame)
+        
+        # Get motor speeds based on line detection
+        base_speed = 25  # Default speed - reduced for slower movement
+        if hasattr(self, '__class__') and hasattr(self.__class__, '__module__'):
+            try:
+                import sys
+                main_module = sys.modules.get('__main__')
+                if main_module and hasattr(main_module, 'LINE_FOLLOW_SPEED'):
+                    base_speed = main_module.LINE_FOLLOW_SPEED
+            except:
+                pass
+            
+        motor_speeds = self.camera_line_follower.get_motor_speeds(
+            self.camera_line_result, 
+            base_speed=base_speed
+        )
+        
+        # Send motor commands
+        fl_speed, fr_speed, bl_speed, br_speed = motor_speeds
+        self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+        
+        # Log status if enabled
+        performance_logging = True  # Default to enabled
+        if hasattr(self, '__class__') and hasattr(self.__class__, '__module__'):
+            try:
+                import sys
+                main_module = sys.modules.get('__main__')
+                if main_module and hasattr(main_module, 'FEATURES'):
+                    performance_logging = main_module.FEATURES.get('PERFORMANCE_LOGGING_ENABLED', False)
+            except:
+                pass
+            
+        if performance_logging:
+            status = self.camera_line_result.get('status', 'unknown')
+            offset = self.camera_line_result.get('line_offset', 0.0)
+            confidence = self.camera_line_result.get('line_confidence', 0.0)
+            print(f"Camera Line Following - Status: {status}, Offset: {offset:.3f}, Confidence: {confidence:.3f}, Motors: FL={fl_speed}, FR={fr_speed}")
+    
+    def get_camera_line_status(self) -> Dict:
+        """Get current camera line following status for web interface."""
+        if not hasattr(self, 'camera_line_result'):
+            return {
+                'line_detected': False,
+                'line_offset': 0.0,
+                'confidence': 0.0,
+                'status': 'not_initialized'
+            }
+        
+        return {
+            'line_detected': self.camera_line_result.get('line_detected', False),
+            'line_offset': self.camera_line_result.get('line_offset', 0.0),
+            'confidence': self.camera_line_result.get('line_confidence', 0.0),
+            'corner_detected': self.camera_line_result.get('corner_detected', False),
+            'corner_direction': self.camera_line_result.get('corner_direction', None),
+            'turn_angle': self.camera_line_result.get('turn_angle', 0.0),
+            'status': self.camera_line_result.get('status', 'unknown')
         } 

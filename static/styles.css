@@ -1046,4 +1046,96 @@ body {
     display: block;
     font-size: 8px;
     opacity: 0.8;
+}
+
+/* Camera Line Following Styles */
+.camera-line-section,
+.hardware-sensor-section {
+    margin-bottom: 20px;
+    padding: 15px;
+    border: 1px solid rgba(0, 255, 255, 0.3);
+    border-radius: 8px;
+    background: rgba(26, 26, 46, 0.5);
+}
+
+.subsection-title {
+    font-size: 1rem;
+    color: var(--cyber-blue);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 10px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid rgba(0, 255, 255, 0.3);
+    text-shadow: 0 0 5px var(--cyber-blue);
+}
+
+.camera-line-info {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.camera-line-section .sensor-info-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 4px;
+    border-left: 3px solid var(--cyber-green);
+    transition: all 0.3s ease;
+}
+
+.camera-line-section .sensor-info-item:hover {
+    background: rgba(0, 255, 255, 0.1);
+    border-left-color: var(--cyber-blue);
+}
+
+.camera-line-section .sensor-info-label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.camera-line-section .sensor-info-value {
+    font-size: 0.9rem;
+    font-weight: bold;
+    text-shadow: 0 0 3px currentColor;
+}
+
+/* Status-specific colors for camera line following */
+#camera-line-status.line-detected {
+    color: var(--cyber-green) !important;
+}
+
+#camera-line-status.line-lost {
+    color: var(--cyber-red) !important;
+}
+
+#camera-corner-status {
+    color: var(--cyber-orange);
+    font-weight: bold;
+}
+
+/* Hardware sensor section styling */
+.hardware-sensor-section .subsection-title {
+    color: var(--cyber-pink);
+    text-shadow: 0 0 5px var(--cyber-pink);
+}
+
+.hardware-sensor-section {
+    border-color: rgba(255, 0, 128, 0.3);
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .camera-line-info {
+        grid-template-columns: 1fr;
+    }
+    
+    .camera-line-section,
+    .hardware-sensor-section {
+        padding: 10px;
+        margin-bottom: 15px;
+    }
 } 

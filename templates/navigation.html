@@ -99,42 +99,74 @@
                     </div>
                 </div>
 
-                <!-- Line Sensor Array -->
+                <!-- Line Following System -->
                 <div class="panel sensor-panel">
                     <div class="panel-header">
-                        <h2>LINE SENSOR ARRAY</h2>
+                        <h2>LINE FOLLOWING SYSTEM</h2>
                         <div class="panel-indicator"></div>
                     </div>
-                    <div class="sensor-display" id="sensor-array">
-                        <!-- Sensors will be dynamically added here -->
-                    </div>
-                    <div class="sensor-details">
-                        <div class="sensor-info">
+                    
+                    <!-- Camera Line Following -->
+                    <div class="camera-line-section">
+                        <h3 class="subsection-title">CAMERA VISION</h3>
+                        <div class="camera-line-info">
                             <div class="sensor-info-item">
-                                <span class="sensor-info-label">LINE POSITION:</span>
-                                <span class="sensor-info-value cyber-text" id="line-position">-1</span>
+                                <span class="sensor-info-label">STATUS:</span>
+                                <span class="sensor-info-value cyber-text" id="camera-line-status">INACTIVE</span>
                             </div>
                             <div class="sensor-info-item">
-                                <span class="sensor-info-label">LINE ERROR:</span>
-                                <span class="sensor-info-value cyber-text" id="line-error">0</span>
+                                <span class="sensor-info-label">LINE OFFSET:</span>
+                                <span class="sensor-info-value cyber-text" id="camera-line-offset">0.000</span>
                             </div>
                             <div class="sensor-info-item">
-                                <span class="sensor-info-label">PATTERN:</span>
-                                <span class="sensor-info-value cyber-text" id="sensor-pattern">000</span>
+                                <span class="sensor-info-label">CONFIDENCE:</span>
+                                <span class="sensor-info-value cyber-text" id="camera-line-confidence">0.000</span>
+                            </div>
+                            <div class="sensor-info-item">
+                                <span class="sensor-info-label">TURN ANGLE:</span>
+                                <span class="sensor-info-value cyber-text" id="camera-turn-angle">0.0°</span>
+                            </div>
+                            <div class="sensor-info-item">
+                                <span class="sensor-info-label">CORNER:</span>
+                                <span class="sensor-info-value cyber-text" id="camera-corner-status">NONE</span>
                             </div>
                         </div>
-                        <div class="sensor-values">
-                            <div class="sensor-value-item">
-                                <span class="sensor-label">LEFT</span>
-                                <span class="sensor-value cyber-text" id="sensor-left">0</span>
+                    </div>
+                    
+                    <!-- Hardware Sensor Array -->
+                    <div class="hardware-sensor-section">
+                        <h3 class="subsection-title">HARDWARE SENSORS</h3>
+                        <div class="sensor-display" id="sensor-array">
+                            <!-- Sensors will be dynamically added here -->
+                        </div>
+                        <div class="sensor-details">
+                            <div class="sensor-info">
+                                <div class="sensor-info-item">
+                                    <span class="sensor-info-label">LINE POSITION:</span>
+                                    <span class="sensor-info-value cyber-text" id="line-position">-1</span>
+                                </div>
+                                <div class="sensor-info-item">
+                                    <span class="sensor-info-label">LINE ERROR:</span>
+                                    <span class="sensor-info-value cyber-text" id="line-error">0</span>
+                                </div>
+                                <div class="sensor-info-item">
+                                    <span class="sensor-info-label">PATTERN:</span>
+                                    <span class="sensor-info-value cyber-text" id="sensor-pattern">000</span>
+                                </div>
                             </div>
-                            <div class="sensor-value-item">
-                                <span class="sensor-label">CENTER</span>
-                                <span class="sensor-value cyber-text" id="sensor-center">0</span>
-                            </div>
-                            <div class="sensor-value-item">
-                                <span class="sensor-label">RIGHT</span>
-                                <span class="sensor-value cyber-text" id="sensor-right">0</span>
+                            <div class="sensor-values">
+                                <div class="sensor-value-item">
+                                    <span class="sensor-label">LEFT</span>
+                                    <span class="sensor-value cyber-text" id="sensor-left">0</span>
+                                </div>
+                                <div class="sensor-value-item">
+                                    <span class="sensor-label">CENTER</span>
+                                    <span class="sensor-value cyber-text" id="sensor-center">0</span>
+                                </div>
+                                <div class="sensor-value-item">
+                                    <span class="sensor-label">RIGHT</span>
+                                    <span class="sensor-value cyber-text" id="sensor-right">0</span>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -185,6 +217,30 @@
                     const sensorLabels = ['L', 'C', 'R'];
                     let sensorPattern = "";
                     
+                    // Update camera line following data
+                    if (data.camera_line_following) {
+                        const cameraData = data.camera_line_following;
+                        document.getElementById('camera-line-status').textContent = cameraData.status ? cameraData.status.toUpperCase() : 'INACTIVE';
+                        document.getElementById('camera-line-offset').textContent = cameraData.line_offset ? cameraData.line_offset.toFixed(3) : '0.000';
+                        document.getElementById('camera-line-confidence').textContent = cameraData.confidence ? cameraData.confidence.toFixed(3) : '0.000';
+                        document.getElementById('camera-turn-angle').textContent = cameraData.turn_angle ? cameraData.turn_angle.toFixed(1) + '°' : '0.0°';
+                        
+                        // Corner detection status
+                        let cornerStatus = 'NONE';
+                        if (cameraData.corner_detected) {
+                            cornerStatus = cameraData.corner_direction ? cameraData.corner_direction.toUpperCase() : 'DETECTED';
+                        }
+                        document.getElementById('camera-corner-status').textContent = cornerStatus;
+                        
+                        // Change color based on line detection status
+                        const statusElement = document.getElementById('camera-line-status');
+                        if (cameraData.line_detected) {
+                            statusElement.style.color = 'var(--cyber-green)';
+                        } else {
+                            statusElement.style.color = 'var(--cyber-red)';
+                        }
+                    }
+
                     // Update line position and error
                     document.getElementById('line-position').textContent = data.line_position !== undefined ? data.line_position : -1;
                     document.getElementById('line-error').textContent = data.line_error !== undefined ? data.line_error : 0;

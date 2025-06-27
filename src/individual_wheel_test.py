@@ -11,24 +11,17 @@ try:
     print("Using gpiozero library (Pi 5 compatible)")
     
     # Motor pins using gpiozero
-    fl_pin1 = OutputDevice(22)  # Front Left motor pin 1
-    fl_pin2 = OutputDevice(23)  # Front Left motor pin 2
-    fr_pin1 = OutputDevice(27)  # Front Right motor pin 1  
-    fr_pin2 = OutputDevice(17)  # Front Right motor pin 2
-    bl_pin1 = OutputDevice(21)  # Back Left motor pin 1
-    bl_pin2 = OutputDevice(20)  # Back Left motor pin 2
-    br_pin1 = OutputDevice(26)   # Back Right motor pin 1
-    br_pin2 = OutputDevice(19)  # Back Right motor pin 2
+    fl_pin1 = OutputDevice(17)  # Front Left motor pin 1
+    fl_pin2 = OutputDevice(27)  # Front Left motor pin 2
+    fr_pin1 = OutputDevice(23)  # Front Right motor pin 1  
+    fr_pin2 = OutputDevice(22)  # Front Right motor pin 2
     
     def stop_all():
         fl_pin1.off()
         fl_pin2.off()
         fr_pin1.off()
         fr_pin2.off()
-        bl_pin1.off()
-        bl_pin2.off()
-        br_pin1.off()
-        br_pin2.off()
+
     
     def test_front_left_forward():
         print("  FL FORWARD")
@@ -49,26 +42,6 @@ try:
         print("  FR BACKWARD")
         fr_pin1.off()
         fr_pin2.on()
-    
-    def test_back_left_forward():
-        print("  BL FORWARD")
-        bl_pin1.on()
-        bl_pin2.off()
-    
-    def test_back_left_backward():
-        print("  BL BACKWARD")
-        bl_pin1.off()
-        bl_pin2.on()
-    
-    def test_back_right_forward():
-        print("  BR FORWARD")
-        br_pin1.on()
-        br_pin2.off()
-    
-    def test_back_right_backward():
-        print("  BR BACKWARD")
-        br_pin1.off()
-        br_pin2.on()
 
 except ImportError:
     print("gpiozero not available, running in simulation")
@@ -87,18 +60,6 @@ except ImportError:
     
     def test_front_right_backward():
         print("  FR BACKWARD")
-    
-    def test_back_left_forward():
-        print("  BL FORWARD")
-    
-    def test_back_left_backward():
-        print("  BL BACKWARD")
-    
-    def test_back_right_forward():
-        print("  BR FORWARD")
-    
-    def test_back_right_backward():
-        print("  BR BACKWARD")
 
 def main():
     try:
@@ -126,32 +87,6 @@ def main():
         
         print("Front Right Backward")
         test_front_right_backward()
-        time.sleep(2)
-        stop_all()
-        time.sleep(1)
-        
-        # Test Back Left
-        print("Back Left Forward")
-        test_back_left_forward()
-        time.sleep(2)
-        stop_all()
-        time.sleep(1)
-        
-        print("Back Left Backward")
-        test_back_left_backward()
-        time.sleep(2)
-        stop_all()
-        time.sleep(1)
-        
-        # Test Back Right
-        print("Back Right Forward")
-        test_back_right_forward()
-        time.sleep(2)
-        stop_all()
-        time.sleep(1)
-        
-        print("Back Right Backward")
-        test_back_right_backward()
         time.sleep(2)
         stop_all()
         

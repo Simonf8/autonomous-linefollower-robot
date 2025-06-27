@@ -18,315 +18,285 @@ from box import BoxHandler
 from position_tracker import OmniWheelOdometry, PositionTracker
 from pid import PIDController
 from intersection_detector import IntersectionDetector
+from camera_line_follower import CameraLineFollower, CameraLineFollowingMixin
+from visual_localizer import PreciseMazeLocalizer
+
+# ================================
+# GPIO MOTOR CONTROL (FALLBACK)
+# ================================
+# Global variables for GPIO pins and library, used if ESP32 is not available
+GPIO_LIBRARY = None
+FOUR_WHEEL_MODE = False
+FL_PIN1, FL_PIN2 = 17, 27
+FR_PIN1, FR_PIN2 = 23, 22
+def initialize_gpio():
+    """Initialize GPIO pins for motor control (fallback)."""
+    global GPIO_LIBRARY, fl_pin1, fl_pin2, fr_pin1, fr_pin2
+    
+    if GPIO_LIBRARY is not None:
+        return  # Already initialized
+    
+    # Try gpiozero first (better for Pi 5), then fall back to RPi.GPIO
+    try:
+        from gpiozero import OutputDevice
+        print("Using gpiozero library (Pi 5 compatible)")
+        GPIO_LIBRARY = "gpiozero"
+        fl_pin1 = OutputDevice(17)
+        fl_pin2 = OutputDevice(27)
+        fr_pin1 = OutputDevice(23)
+        fr_pin2 = OutputDevice(22)
+        FOUR_WHEEL_MODE = False
+        print("Using 2-wheel mode (Front wheels only) - FL(17,27), FR(22,23)")
+    except Exception as e:
+        print(f"GPIO initialization failed: {e}. Running in simulation mode.")
+        GPIO_LIBRARY = "simulation"
+    except ImportError:
+        try:
+            import RPi.GPIO as GPIO
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setwarnings(False)
+            for pin in [FL_PIN1, FL_PIN2, FR_PIN1, FR_PIN2]:
+                GPIO.setup(pin, GPIO.OUT)
+                GPIO.output(pin, GPIO.LOW)
+            FOUR_WHEEL_MODE = False
+            print("Using RPi.GPIO for 2-wheel mode (Front wheels only) - FL(17,27), FR(22,23)")
+        except ImportError:
+            print("No GPIO library available, running in simulation mode.")
+            GPIO_LIBRARY = "simulation"
+        except Exception as e:
+            print(f"GPIO initialization failed: {e}. Running in simulation mode.")
+            GPIO_LIBRARY = "simulation"
 
 # ================================
 # FEATURE CONFIGURATION
 # ================================
 # Enable/disable features for easy testing and debugging
 FEATURES = {
-    'OBJECT_DETECTION_ENABLED': False,      # Enable YOLO object detection 
-    'PATH_SHAPE_DETECTION_ENABLED': False,   # Enable path shape analysis
-    'OBSTACLE_AVOIDANCE_ENABLED': False,     # Enable obstacle avoidance behavior
-    'VISION_SYSTEM_ENABLED': True,          # Enable camera and vision processing
-    'INTERSECTION_CORRECTION_ENABLED': True,# Enable intersection-based position correction
-    'USE_ESP32_LINE_SENSOR': True,          # Use ESP32 hardware sensor for line following
-    'POSITION_CORRECTION_ENABLED': True,    # Enable waypoint position corrections
-    'PERFORMANCE_LOGGING_ENABLED': True,    # Enable detailed performance logging
-    'DEBUG_VISUALIZATION_ENABLED': False,   # Enable debug visualization windows - DISABLED for headless operation
-    'SMOOTH_CORNERING_ENABLED': True,       # Enable smooth cornering like normal wheels
-    'ADAPTIVE_SPEED_ENABLED': True,         # Enable speed adaptation based on conditions
+    'OBJECT_DETECTION_ENABLED': False,
+    'PATH_SHAPE_DETECTION_ENABLED': False,
+    'OBSTACLE_AVOIDANCE_ENABLED': False,
+    'VISION_SYSTEM_ENABLED': True,
+    'CAMERA_LINE_FOLLOWING_ENABLED': False, # Disabled in favor of ESP32 line sensor
+    'INTERSECTION_CORRECTION_ENABLED': True,
+    'USE_ESP32_LINE_SENSOR': True,       # Use ESP32 hardware sensor for line following
+    'POSITION_CORRECTION_ENABLED': True,
+    'PERFORMANCE_LOGGING_ENABLED': False,    # Disabled to reduce log spam
+    'DEBUG_VISUALIZATION_ENABLED': True,
+    'SMOOTH_CORNERING_ENABLED': True,
+    'ADAPTIVE_SPEED_ENABLED': True,
 }
 
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-ESP32_IP = "192.168.83.245"
+ESP32_IP = "192.168.2.115"  # IMPORTANT: Set this to your ESP32's IP address
 CELL_SIZE_M = 0.11
-BASE_SPEED = 60
-TURN_SPEED = 50
-CORNER_SPEED = 55  
+BASE_SPEED = 25
+TURN_SPEED = 20
+CORNER_SPEED = 22
 
-# Robot physical constants
+# Robot physical constants (for odometry, if used)
 PULSES_PER_REV = 920
 WHEEL_DIAMETER_M = 0.025
 ROBOT_WIDTH_M = 0.225
 ROBOT_LENGTH_M = 0.075
 
-# Mission configuration
-START_CELL = (14, 14)
+# Maze and Mission Configuration
+MAZE_GRID = [
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 0
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 1
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], # Row 2
+    [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 3
+    [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 4
+    [0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0], # Row 5
+    [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 6
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], # Row 7
+    [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 8
+    [0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0], # Row 9
+    [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 10
+    [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 11
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], # Row 12
+    [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1], # Row 13
+    [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1]  # Row 14
+]
+START_CELL = (14, 0) # Start position from visual odometry
 END_CELL = (2, 0)
 START_POSITION = ((START_CELL[0] + 0.5) * CELL_SIZE_M, (START_CELL[1] + 0.5) * CELL_SIZE_M)
 START_HEADING = 0.0  # Facing right for horizontal movement
+START_DIRECTION = 'E' # For visual localizer
 
 # Line following configuration
-LINE_FOLLOW_SPEED = 50
+LINE_FOLLOW_SPEED = 25
 
 # Corner turning configuration
 CORNER_TURN_MODES = {
-    'SMOOTH': 'smooth',     
-    'SIDEWAYS': 'sideways',       
-    'PIVOT': 'pivot',             
-    'FRONT_TURN': 'front_turn'    
+    'SMOOTH': 'smooth',
+    'SIDEWAYS': 'sideways',
+    'PIVOT': 'pivot',
+    'FRONT_TURN': 'front_turn'
 }
-
-# Corner detection thresholds
-CORNER_DETECTION_THRESHOLD = 0.35    # Line offset to detect corner
-CORNER_TURN_DURATION = 30            # Frames to execute corner turn
-SHARP_CORNER_THRESHOLD = 0.6         # Threshold for sharp vs gentle corners
-
+CORNER_DETECTION_THRESHOLD = 0.35
+CORNER_TURN_DURATION = 30
+SHARP_CORNER_THRESHOLD = 0.6
 
 IMG_PATH_SRC_PTS = np.float32([[160, 240], [480, 240], [640, 480], [0, 480]])
 IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
 
-# Camera configuration - USB Webcam
-# Webcam specs: 1920x1080 @ 30 FPS with integrated microphone
-WEBCAM_INDEX = 0  # Usually 0 for built-in camera, 1 for external USB webcam
-CAMERA_WIDTH, CAMERA_HEIGHT = 1920, 1080  # Full HD resolution as per webcam specs
-CAMERA_FPS = 30  # 30 FPS as specified in webcam specs
-# Note: For processing efficiency, frames are resized to 640x480 for vision algorithms
+# Camera configuration
+WEBCAM_INDEX = 0
+CAMERA_WIDTH, CAMERA_HEIGHT = 1920, 1080
+CAMERA_FPS = 30
 
-class ESP32Bridge:
-    """ESP32 communication bridge for motors, encoders, and line sensors."""
-    
-    def __init__(self, ip: str, port: int = 1234):
+class ESP32Controller:
+    """Controller for communicating with the ESP32 over WiFi."""
+    def __init__(self, ip, port=1234):
         self.ip = ip
         self.port = port
-        self.socket = None
-        self.connected = False
-        self.connection_attempts = 0
+        self.sock = None
+        self.is_connected = False
+        self.lock = threading.Lock()
         
-        # Latest sensor data from ESP32
+        # Sensor data storage
         self.latest_encoder_data = [0, 0, 0, 0]
-        self.latest_line_position = -1  
+        self.latest_line_position = 1000  # Center
         self.latest_line_error = 0
-        self.latest_sensor_values = [0, 0, 0] 
+        self.latest_sensor_values = [1000, 1000, 1000] # Assuming no line initially
         
-        # Command tracking
-        self.last_command = None
-        self.last_send_time = 0.0
-        
-    def start(self):
-        """Start communication with ESP32."""
-        return self.connect()
-        
+        self.receiver_thread = threading.Thread(target=self._receive_data, daemon=True)
+
     def connect(self):
-        """Establish connection to ESP32."""
-        if self.socket:
-            try:
-                self.socket.close()
-            except:
-                pass
-            self.socket = None
-        
-        if self.connection_attempts > 0:
-            time.sleep(1)
-
+        """Establish connection with the ESP32 server."""
         try:
-            self.socket = socket.create_connection((self.ip, self.port), timeout=3)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            if hasattr(socket, "TCP_KEEPIDLE"):
-                self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
-            if hasattr(socket, "TCP_KEEPINTVL"):
-                self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 3)
-            if hasattr(socket, "TCP_KEEPCNT"):
-                self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
-
-            self.socket.settimeout(0.5)
-            self.connected = True
-            self.connection_attempts = 0
-            print(f"Connected to ESP32 at {self.ip}:{self.port}")
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.connect((self.ip, self.port))
+            self.sock.settimeout(2.0)
+            self.is_connected = True
+            self.receiver_thread.start()
+            print(f"Successfully connected to ESP32 at {self.ip}:{self.port}")
             return True
-        except Exception as e:
-            self.connected = False
-            self.connection_attempts += 1
-            if self.connection_attempts % 10 == 1:
-                print(f"Failed to connect to ESP32 (attempt {self.connection_attempts}): {e}")
-            self.socket = None
+        except (socket.error, socket.timeout) as e:
+            print(f"ERROR: Could not connect to ESP32 at {self.ip}:{self.port}. Reason: {e}")
+            self.sock = None
+            self.is_connected = False
             return False
-        
-    def send_motor_speeds(self, fl: int, fr: int, bl: int, br: int):
-        """Send motor speeds to ESP32."""
-        if not self.connected and not self.connect():
-            return False
-            
-        try:
-            command = f"{fl},{fr},{bl},{br}"
-            return self._send_command(command)
-        except Exception as e:
-            print(f"Error sending motor speeds: {e}")
-            self.connected = False
-            return False
-    
-    def send_line_follow_command(self, base_speed: int = 60):
-        """Send line following command to ESP32."""
-        if not self.connected and not self.connect():
-            return False
-            
-        try:
-            command = f"LINE_FOLLOW,{base_speed}"
-            return self._send_command(command)
-        except Exception as e:
-            print(f"Error sending line follow command: {e}")
-            self.connected = False
-            return False
-    
-    def send_calibrate_command(self):
-        """Send calibration command to ESP32."""
-        if not self.connected and not self.connect():
-            return False
-            
-        try:
-            return self._send_command("CALIBRATE")
-        except Exception as e:
-            print(f"Error sending calibrate command: {e}")
-            self.connected = False
-            return False
-        
-    
-    def _send_command(self, command: str):
-        """Internal method to send command to ESP32."""
-        if not self.socket:
-            return False
-            
-        try:
-            full_command = f"{command}\n"
-            current_time = time.time()
-            
-            self.socket.sendall(full_command.encode())
-            self.last_command = full_command
-            self.last_send_time = current_time
-            
-            if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
-                print(f"Sent to ESP32: {command}")
-            
-            return True
-        except Exception as e:
-            print(f"Socket error: {e}")
-            self.connected = False
-            self.socket = None
-            return False
-            
-    def get_encoder_ticks(self) -> List[int]:
-        """Get encoder ticks from ESP32."""
-        self._receive_data()
-        return self.latest_encoder_data
-    
-    def get_line_sensor_data(self) -> Tuple[int, int, List[int]]:
-        """
-        Get line sensor data from ESP32.
-        
-        Returns:
-            Tuple of (line_position, line_error, sensor_values)
-            line_position: 0-2000 for 3 sensors (0=left, 1000=center, 2000=right, -1=no line)
-            line_error: -1000 to +1000 (error from center)
-            sensor_values: List of 3 calibrated sensor readings (0-1000 each)
-        """
-        self._receive_data()
-        return (self.latest_line_position, self.latest_line_error, self.latest_sensor_values)
-    
-    def is_line_detected(self) -> bool:
-        """Check if line is currently detected."""
-        self._receive_data()
-        return self.latest_line_position != -1
-    
+
     def _receive_data(self):
-        """Try to receive data from ESP32 (non-blocking)."""
-        if not self.socket or not self.connected:
-            return
-            
-        try:
-            data = self.socket.recv(1024)
-            if data:
-                data_string = data.decode().strip()
-                for line in data_string.split('\n'):
-                    if line:
-                        self.update_sensor_data(line)
-            elif len(data) == 0:
-                print("ESP32 closed the connection.")
-                self.connected = False
-                self.socket.close()
-                self.socket = None
-        except (socket.timeout, BlockingIOError):
-            pass
-        except Exception as e:
-            print(f"Socket receive error: {e}")
-            self.connected = False
-            self.socket = None
-            
-    def update_sensor_data(self, data_string: str):
-        """Update sensor data from ESP32 string."""
-        try:
-            if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
-                print(f"Received from ESP32: {data_string}")
+        """Continuously receive and parse sensor data from the ESP32."""
+        buffer = ""
+        while self.is_connected and self.sock:
+            try:
+                data = self.sock.recv(128)
+                if not data:
+                    print("ESP32 connection lost.")
+                    self.is_connected = False
+                    break
+                
+                buffer += data.decode('utf-8')
+                
+                while '\n' in buffer:
+                    line, buffer = buffer.split('\n', 1)
+                    line = line.strip()
+                    if not line: continue
+                    
+                    parts = line.split(',')
+                    with self.lock:
+                        if parts[0] == "ENCODERS" and len(parts) == 5:
+                            self.latest_encoder_data = [int(p) for p in parts[1:]]
+                        elif parts[0] == "LINE" and len(parts) >= 3:
+                            self.latest_line_position = int(parts[1])
+                            self.latest_line_error = int(parts[2])
+                            if len(parts) > 3:
+                                self.latest_sensor_values = [int(p) for p in parts[3:]]
 
-            parts = data_string.split(',')
-            
-            if parts[0] == "ENCODERS" and len(parts) == 5:
-                self.latest_encoder_data = [int(p) for p in parts[1:]]
-            elif parts[0] == "LINE" and len(parts) == 6:
-                self.latest_line_position = int(parts[1])
-                self.latest_line_error = int(parts[2])
-                self.latest_sensor_values = [int(p) for p in parts[3:]]
+            except (socket.timeout, ConnectionResetError):
+                continue # Ignore timeouts, just means no new data
+            except Exception as e:
+                print(f"Error receiving data from ESP32: {e}")
+                self.is_connected = False
+                break
+        print("ESP32 receiver thread stopped.")
 
-        except (ValueError, IndexError) as e:
-            print(f"Error parsing sensor data '{data_string}': {e}")
+    def send_motor_speeds(self, fl: int, fr: int, bl: int, br: int):
+        """Send motor speeds to the ESP32."""
+        if not self.is_connected or not self.sock:
+            # print("Not connected to ESP32. Cannot send motor speeds.")
+            return False
+        try:
+            command = f"{fl},{fr},{bl},{br}\n"
+            self.sock.sendall(command.encode('utf-8'))
+            return True
+        except socket.error as e:
+            print(f"Failed to send motor speeds to ESP32: {e}")
+            self.is_connected = False
+            return False
+
+    def get_encoder_ticks(self) -> List[int]:
+        """Get the latest encoder ticks from the ESP32."""
+        with self.lock:
+            return self.latest_encoder_data
+
+    def get_line_sensor_data(self) -> Tuple[int, int, List[int]]:
+        """Get the latest line sensor data from the ESP32."""
+        with self.lock:
+            return (self.latest_line_position, self.latest_line_error, self.latest_sensor_values)
+
+    def is_line_detected(self) -> bool:
+        """Check if a line is currently detected."""
+        with self.lock:
+            return self.latest_line_position != -1
 
     def stop(self):
-        """Close connection to ESP32."""
-        self.connected = False
-        if self.socket:
-            try:
-                self.socket.close()
-            except Exception:
-                pass
-            self.socket = None
+        """Stop all motors and close the connection."""
+        self.send_motor_speeds(0, 0, 0, 0)
+        self.is_connected = False
+        if self.sock:
+            self.sock.close()
+            self.sock = None
+        print("ESP32 controller stopped.")
 
-
-class RobotController:
-    """Main robot controller."""
+class RobotController(CameraLineFollowingMixin):
+    """Main robot controller integrating visual localization and ESP32 control."""
 
     def __init__(self):
         self.running = True
-        self.esp32 = ESP32Bridge(ESP32_IP)
         
+        # Initialize motor controller (ESP32 or fallback)
+        if FEATURES['USE_ESP32_LINE_SENSOR']:
+            self.motor_controller = ESP32Controller(ip=ESP32_IP)
+        else:
+            # This part is now a fallback if ESP32 is disabled
+            from main import DirectMotorController # Lazy import
+            self.motor_controller = DirectMotorController()
+
         self.object_detector = None
         self.path_shape_detector = None
         self.intersection_detector = None
         self.frame = None
         self.processed_frame = None
         self.frame_lock = threading.Lock()
-        
+
         self.detections = {}
         self.path_shape = "straight"
         self.last_intersection_time = 0
-        
-        # Odometry and position tracking setup
-        initial_pose = (START_POSITION[0], START_POSITION[1], START_HEADING)
-        odometry = OmniWheelOdometry(
-            initial_pose=initial_pose,
-            pulses_per_rev=PULSES_PER_REV,
-            wheel_diameter=WHEEL_DIAMETER_M,
-            robot_width=ROBOT_WIDTH_M,
-            robot_length=ROBOT_LENGTH_M
+
+        # Position tracking using Visual Localizer
+        self.position_tracker = PreciseMazeLocalizer(
+            maze=MAZE_GRID,
+            start_pos=START_CELL,
+            start_direction=START_DIRECTION
         )
-        self.position_tracker = PositionTracker(odometry=odometry, cell_size_m=CELL_SIZE_M)
-        
+
         # Pathfinder setup
-        maze_grid = Pathfinder.create_maze_grid()
-        self.pathfinder = Pathfinder(grid=maze_grid, cell_size_m=CELL_SIZE_M)
-        
+        self.pathfinder = Pathfinder(grid=MAZE_GRID, cell_size_m=CELL_SIZE_M)
+
         self.path = []
         self.current_target_index = 0
-        
+
         self.line_pid = PIDController(kp=0.5, ki=0.01, kd=0.1, output_limits=(-100, 100))
         self.state = "idle"
-        
+
         if FEATURES['VISION_SYSTEM_ENABLED']:
             self._setup_vision()
-
-    def set_line_detector_threshold(self, value: int):
-        """Placeholder for setting line detector threshold."""
-        print("Camera line detector is disabled. Threshold not set.")
 
     def _setup_vision(self):
         """Initialize vision systems if enabled."""
@@ -348,27 +318,16 @@ class RobotController:
 
     def run(self):
         """Main control loop."""
-        if not self.esp32.start():
-            print("WARNING: ESP32 not connected. Running in simulation mode for pathfinding visualization.")
+        if not self.motor_controller.connect():
+            print("WARNING: Motor controller failed to connect. Running in simulation mode.")
         
-        # Auto-start mission for pathfinding visualization
+        if isinstance(self.position_tracker, PreciseMazeLocalizer):
+            self.position_tracker.start_localization()
+
         self._start_mission()
 
         while self.running:
-            start_time = time.time()
-            
-            # Update odometry
-            encoder_ticks = self.esp32.get_encoder_ticks()
-            if encoder_ticks:
-                self.position_tracker.update(encoder_ticks)
-            
             self._run_state_machine()
-
-            if FEATURES['PERFORMANCE_LOGGING_ENABLED']:
-                cycle_time = (time.time() - start_time) * 1000
-                if cycle_time > 2: # Log only if loop time is significant
-                    print(f"Loop time: {cycle_time:.2f} ms")
-            
             time.sleep(0.01)
         
         self.stop()
@@ -380,7 +339,7 @@ class RobotController:
             return
 
         print("Starting mission...")
-        self.position_tracker.odometry.set_pose(START_POSITION[0], START_POSITION[1], START_HEADING)
+        # Pose is now managed by the visual localizer
         self.state = "planning"
 
     def _process_vision(self):
@@ -393,48 +352,13 @@ class RobotController:
 
         processed_frame = frame_copy
         
+        # Visual localization is handled by its own thread, no need to call it here.
+        # The intersection logic below can be used to augment or validate.
+        
         if FEATURES['INTERSECTION_CORRECTION_ENABLED'] and self.intersection_detector:
-            # Update intersection detector with current encoder data and grid position
-            encoder_ticks = self.esp32.get_encoder_ticks()
-            if encoder_ticks:
-                self.intersection_detector.update_encoder_data(encoder_ticks)
-            
-            current_cell = self.position_tracker.get_current_cell()
-            if current_cell:
-                self.intersection_detector.update_grid_position(current_cell[0], current_cell[1])
-            
-            # Only check for intersection/corners every so often to avoid multiple triggers
-            if time.time() - self.last_intersection_time > 3.0: # 3 second cooldown
-                detected_event = self.intersection_detector.detect(frame_copy)
-                if detected_event:
-                    # Validate detection with grid if pathfinder is available
-                    is_valid = True
-                    if hasattr(self.pathfinder, 'grid'):
-                        grid_array = np.array(self.pathfinder.get_grid())
-                        is_valid = self.intersection_detector.compare_with_grid(
-                            grid_array, detected_event
-                        )
-                    
-                    if is_valid:
-                        print(f"Vision event detected and validated: {detected_event}")
-                        
-                        # Handle different types of detected events
-                        if detected_event == "intersection":
-                            print("Intersection detected! Recalibrating position.")
-                            self.position_tracker.recalibrate_position_to_nearest_cell()
-                                                 elif detected_event in ["left_corner", "right_corner"]:
-                             print(f"Corner detected: {detected_event}. Fine-tuning position.")
-                             # For corners, we apply a minor position correction
-                             # This is less aggressive than a full recalibration
-                             current_cell = self.position_tracker.get_current_cell()
-                             self.position_tracker.correct_at_waypoint(current_cell)
-                        
-                        self.last_intersection_time = time.time()
-                    else:
-                        print(f"Vision event {detected_event} detected but failed grid validation")
-                
-                if FEATURES['DEBUG_VISUALIZATION_ENABLED']:
-                    processed_frame = self.intersection_detector.draw_debug_info(processed_frame, detected_event)
+            # This logic can be adapted to work with the visual localizer's output
+            # For now, we rely on the primary localizer.
+            pass # Temporarily disabled to avoid conflicts with PreciseMazeLocalizer
 
         # Store the processed frame for the video feed
         with self.frame_lock:
@@ -488,36 +412,28 @@ class RobotController:
             self.running = False
             
     def _follow_line_with_sensor(self):
-        """Follow the line using ESP32 line sensor data."""
-        line_pos, line_err, sensor_vals = self.esp32.get_line_sensor_data()
+        """Follow the line using hardware sensors via ESP32."""
+        if not FEATURES['USE_ESP32_LINE_SENSOR']:
+            print("ESP32 line sensor is disabled in features.")
+            self._stop_motors()
+            return
+            
+        line_pos, line_err, _ = self.motor_controller.get_line_sensor_data()
         
-        if line_pos == -1:
-            print("Line lost!")
+        if line_pos == -1: # ESP32 signals -1 when line is lost
+            # print("Line lost!") # This can be spammy, maybe handle recovery differently
             self._recover_line()
             return
 
-        # Detect corners based on line error magnitude
-        abs_error = abs(line_err)
+        # Simple PID control for line following
+        turn_correction = self.line_pid.update(line_err)
         
-        if abs_error > CORNER_DETECTION_THRESHOLD * 1000:  # ESP32 sends error in range -1000 to +1000
-            # Corner detected - determine direction
-            corner_direction = "left" if line_err < 0 else "right"
-            
-            # Check if it's a sharp corner
-            is_sharp_corner = abs_error > SHARP_CORNER_THRESHOLD * 1000
-            
-            print(f"Corner detected: {corner_direction} ({'sharp' if is_sharp_corner else 'gentle'})")
-            
-            # Execute corner turn using the selected mode
-            self._execute_corner_turn(corner_direction, line_err)
-        else:
-            # Normal line following
-            turn_correction = self.line_pid.update(line_err)
-            
-            left_speed = int(LINE_FOLLOW_SPEED - turn_correction)
-            right_speed = int(LINE_FOLLOW_SPEED + turn_correction)
+        left_speed = int(LINE_FOLLOW_SPEED - turn_correction)
+        right_speed = int(LINE_FOLLOW_SPEED + turn_correction)
 
-            self.esp32.send_motor_speeds(left_speed, right_speed, left_speed, right_speed)
+        # Assuming a 2-wheel drive differential steering setup for simplicity
+        # For omni-wheels, this would be a simple forward movement with steering
+        self.motor_controller.send_motor_speeds(left_speed, right_speed, left_speed, right_speed)
 
     def _execute_corner_turn(self, corner_direction: str, line_error: int):
         """Execute different types of corner turns based on the robot's location."""
@@ -550,7 +466,7 @@ class RobotController:
         left_speed = int(CORNER_SPEED - turn_correction)
         right_speed = int(CORNER_SPEED + turn_correction)
         
-        self.esp32.send_motor_speeds(left_speed, right_speed, left_speed, right_speed)
+        self.motor_controller.send_motor_speeds(left_speed, right_speed, left_speed, right_speed)
         return True
 
     def _sideways_corner_turn(self, corner_direction: str, line_error: int):
@@ -569,7 +485,7 @@ class RobotController:
             bl_speed = CORNER_SPEED // 2      # Back left: reduced forward
             br_speed = CORNER_SPEED           # Back right: full forward
         
-        self.esp32.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+        self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
         return True
 
     def _pivot_corner_turn(self, corner_direction: str, line_error: int):
@@ -587,7 +503,7 @@ class RobotController:
             bl_speed = TURN_SPEED     # Back left: forward
             br_speed = -TURN_SPEED    # Back right: reverse
         
-        self.esp32.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+        self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
         return True
 
     def _front_turn_corner(self, corner_direction: str, line_error: int):
@@ -607,7 +523,7 @@ class RobotController:
             bl_speed = base_speed             # Back left: normal
             br_speed = base_speed * 3 // 4    # Back right: moderate
         
-        self.esp32.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+        self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
         return True
 
     def _recover_line(self):
@@ -616,14 +532,16 @@ class RobotController:
 
     def _stop_motors(self):
         """Stop all motors."""
-        self.esp32.send_motor_speeds(0, 0, 0, 0)
+        self.motor_controller.send_motor_speeds(0, 0, 0, 0)
     
     def stop(self):
         """Stop the robot and clean up resources."""
         print("Stopping robot...")
         self.running = False
         self._stop_motors()
-        self.esp32.stop()
+        if isinstance(self.position_tracker, PreciseMazeLocalizer):
+            self.position_tracker.stop_localization()
+        self.motor_controller.stop()
 
 
 def print_feature_status():
@@ -653,10 +571,19 @@ def main():
     @app.route('/api/robot_data')
     def robot_data():
         """Provide robot data to the web UI."""
-        line_pos, line_err, sensor_vals = robot.esp32.get_line_sensor_data()
+        line_pos, line_err, sensor_vals = robot.motor_controller.get_line_sensor_data()
         x, y, heading_rad = robot.position_tracker.get_pose()
         heading_deg = math.degrees(heading_rad)
-        motor_speeds = robot.esp32.latest_encoder_data
+        
+        # Get motor speeds if they are available from the controller
+        motor_speeds = [0,0,0,0]
+        if hasattr(robot.motor_controller, 'latest_encoder_data'):
+            motor_speeds = robot.motor_controller.latest_encoder_data
+        
+        # Get camera line following status if available
+        camera_line_status = {}
+        if hasattr(robot, 'get_camera_line_status'):
+            camera_line_status = robot.get_camera_line_status()
         
         data = {
             'state': robot.state,
@@ -666,6 +593,7 @@ def main():
             'line_position': line_pos,
             'line_error': line_err,
             'line_sensors': sensor_vals,
+            'camera_line_following': camera_line_status,
             'motors': {
                 'fl': motor_speeds[0], 'fr': motor_speeds[1],
                 'bl': motor_speeds[2], 'br': motor_speeds[3],
@@ -689,6 +617,11 @@ def main():
                         time.sleep(0.1)
                         continue
                     frame = robot.processed_frame.copy()
+                
+                # Add camera line following debug overlay if available
+                if (hasattr(robot, 'camera_line_result') and 
+                    robot.camera_line_result.get('processed_frame') is not None):
+                    frame = robot.camera_line_result['processed_frame']
                 
                 _, buffer = cv2.imencode('.jpg', frame)
                 yield (b'--frame\r\n'
@@ -714,7 +647,7 @@ def main():
         def generate():
             while robot.running:
                 robot_cell = robot.position_tracker.get_current_cell()
-                path = robot.path  # Use the main path attribute
+                path = robot.path
                 
                 grid_img = generate_grid_image(
                     pathfinder=robot.pathfinder,
@@ -735,51 +668,37 @@ def main():
 
     def generate_grid_image(pathfinder, robot_cell, path, start_cell, end_cell):
         """Generates the grid image for the web UI."""
-        # Debug: Print path info
-        if path and len(path) > 0:
-            print(f"DEBUG: Rendering path with {len(path)} waypoints")
-        else:
-            print("DEBUG: No path to render")
-            
         grid = np.array(pathfinder.get_grid())
         cell_size = 20
         height, width = grid.shape
-        # Image is created with (height, width) but cv2 functions use (x, y) coordinates
         grid_img = np.zeros((height * cell_size, width * cell_size, 3), dtype=np.uint8)
 
         for r in range(height):
             for c in range(width):
-                # grid is indexed by (row, col) which is (y, x)
-                # Obstacles (1) are white, paths (0) are black
                 color = (255, 255, 255) if grid[r, c] == 1 else (0, 0, 0)
-                # cv2.rectangle uses (x, y) for its points
                 cv2.rectangle(grid_img, (c * cell_size, r * cell_size), 
                               ((c + 1) * cell_size, (r + 1) * cell_size), color, -1)
         
         if path:
             for i in range(len(path) - 1):
-                # Path cells are (x, y)
-                # cv2.line expects points as (x, y)
                 p1_x = path[i][0] * cell_size + cell_size // 2
                 p1_y = path[i][1] * cell_size + cell_size // 2
                 p2_x = path[i+1][0] * cell_size + cell_size // 2
                 p2_y = path[i+1][1] * cell_size + cell_size // 2
-                cv2.line(grid_img, (p1_x, p1_y), (p2_x, p2_y), (128, 0, 128), 2)
+                # Use blue for path to distinguish from red end cell
+                cv2.line(grid_img, (p1_x, p1_y), (p2_x, p2_y), (255, 0, 0), 2)
 
-        # Start cell is (x, y), draw it in green
         start_color = (0, 255, 0)
         start_x, start_y = start_cell[0], start_cell[1]
         cv2.rectangle(grid_img, (start_x * cell_size, start_y * cell_size),
                       ((start_x + 1) * cell_size, (start_y + 1) * cell_size), start_color, -1)
         
-        # End cell is (x, y), draw it in red (but path is also red, let's use blue)
         end_color = (0, 0, 255)
         end_x, end_y = end_cell[0], end_cell[1]
         cv2.rectangle(grid_img, (end_x * cell_size, end_y * cell_size),
                       ((end_x + 1) * cell_size, (end_y + 1) * cell_size), end_color, -1)
 
         if robot_cell:
-            # Robot cell is (x, y), draw it as an orange circle
             robot_x, robot_y = robot_cell[0], robot_cell[1]
             cv2.circle(grid_img, 
                        (robot_x * cell_size + cell_size // 2, robot_y * cell_size + cell_size // 2), 
@@ -821,29 +740,20 @@ def main():
             while robot_controller.running:
                 ret, frame = cap.read()
                 if ret:
-                    # For processing, we might want to use a smaller resolution to improve performance
-                    # You can adjust this based on your processing needs
                     processing_width, processing_height = 640, 480
                     resized_frame = cv2.resize(frame, (processing_width, processing_height))
                     with robot_controller.frame_lock:
                         robot_controller.frame = resized_frame
+                        # Also pass the frame to the visual localizer if it needs it
+                        if isinstance(robot_controller.position_tracker, PreciseMazeLocalizer):
+                            robot_controller.position_tracker.prev_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
                 else:
-                    print("Warning: Failed to read frame from camera. Retrying...")
+                    # print("Warning: Failed to read frame from camera. Retrying...")
                     time.sleep(1)
             cap.release()
 
         camera_thread = threading.Thread(target=camera_capture_thread, args=(robot,), daemon=True)
         camera_thread.start()
-
-    # Start the vision processing thread
-    if FEATURES['VISION_SYSTEM_ENABLED']:
-        def vision_processing_thread(robot_controller):
-            while robot_controller.running:
-                robot_controller._process_vision()
-                time.sleep(0.1) # Process at 10Hz
-
-        vision_thread = threading.Thread(target=vision_processing_thread, args=(robot,), daemon=True)
-        vision_thread.start()
 
     # Start the robot controller in a separate thread
     robot_thread = threading.Thread(target=robot.run, daemon=True)
