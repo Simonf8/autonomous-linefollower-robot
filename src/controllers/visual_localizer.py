@@ -6,7 +6,7 @@ from typing import Tuple, Optional, Dict, List
 import math
 
 class PreciseMazeLocalizer:
-    def __init__(self, maze, start_pos: Tuple[int, int], start_direction: str):
+    def __init__(self, maze, start_pos: Tuple[int, int], camera_width: int, camera_height: int, camera_fps: int, start_direction: str = 'N'):
         # Your exact maze
         self.maze = maze
         
@@ -14,10 +14,10 @@ class PreciseMazeLocalizer:
         self.current_direction = start_direction
         
         # Initialize camera
-        self.cap = cv2.VideoCapture(1)
-        if not self.cap.isOpened():
-            print("Warning: Could not open camera")
-            self.cap = None
+        self.cap = None # Will be initialized in initialize_camera
+        self.camera_width = camera_width
+        self.camera_height = camera_height
+        self.camera_fps = camera_fps
         self.latest_frame = None
         
         # Movement detection
@@ -51,6 +51,7 @@ class PreciseMazeLocalizer:
         # Threading
         self.running = False
         self.localization_thread = None
+        self.frame_lock = threading.Lock()
         
     def initialize_camera(self, camera_index=0):
         """Initializes the camera with a given index."""
@@ -60,7 +61,12 @@ class PreciseMazeLocalizer:
                 print(f"Warning: Could not open camera at index {camera_index}")
                 self.cap = None
                 return False
-            print(f"Successfully opened camera at index {camera_index}")
+            
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.camera_width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.camera_height)
+            self.cap.set(cv2.CAP_PROP_FPS, self.camera_fps)
+            
+            print(f"Successfully opened camera at index {camera_index} with {self.camera_width}x{self.camera_height} resolution at {self.camera_fps} FPS")
             return True
         return True
 
@@ -199,15 +205,17 @@ class PreciseMazeLocalizer:
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Enhanced corner detection
-        enhanced = cv2.equalizeHist(gray)
-        corners = cv2.cornerHarris(enhanced, blockSize=3, ksize=5, k=0.04)
-        corners = cv2.dilate(corners, None)
+        # Use FAST for faster corner detection
+        fast = cv2.FastFeatureDetector_create(threshold=25, nonmaxSuppression=True)
+        keypoints = fast.detect(gray, None)
         
-        # Get corner coordinates
-        corner_threshold = 0.01 * corners.max() if corners.max() > 0 else 0
-        corner_coords = np.where(corners > corner_threshold)
-        corner_points = list(zip(corner_coords[1], corner_coords[0]))
+        # Get corner coordinates from keypoints
+        corner_points = [(int(kp.pt[0]), int(kp.pt[1])) for kp in keypoints]
+
+        # Draw keypoints for debugging if needed
+        # frame_with_keypoints = cv2.drawKeypoints(frame, keypoints, None, color=(0,255,0))
+        # with self.frame_lock:
+        #     self.latest_frame = frame_with_keypoints
         
         # Analyze corner distances
         distance_analysis = self.analyze_corner_distance(corner_points, frame.shape[0])
@@ -416,7 +424,7 @@ class PreciseMazeLocalizer:
             try:
                 result = self.localize_with_confidence()
                 self.last_status = result
-                time.sleep(0.5)  # Update every 500ms
+                time.sleep(0.1)  # Update every 100ms for faster response
             except Exception as e:
                 self.last_status = {
                     'status': 'error',

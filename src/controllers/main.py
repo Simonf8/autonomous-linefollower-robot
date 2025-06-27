@@ -12,12 +12,10 @@ from typing import List, Tuple, Optional
 from flask import Flask, jsonify, render_template, request, Response
 
 # Import our clean modules
-from object_detection import ObjectDetector, PathShapeDetector
+from object_detection import ObjectDetector
 from pathfinder import Pathfinder
 from box import BoxHandler
-from position_tracker import OmniWheelOdometry, PositionTracker
 from pid import PIDController
-from intersection_detector import IntersectionDetector
 from camera_line_follower import CameraLineFollower, CameraLineFollowingMixin
 from visual_localizer import PreciseMazeLocalizer
 
@@ -27,11 +25,9 @@ from visual_localizer import PreciseMazeLocalizer
 # Enable/disable features for easy testing and debugging
 FEATURES = {
     'OBJECT_DETECTION_ENABLED': False,
-    'PATH_SHAPE_DETECTION_ENABLED': False,
     'OBSTACLE_AVOIDANCE_ENABLED': False,
     'VISION_SYSTEM_ENABLED': True,
     'CAMERA_LINE_FOLLOWING_ENABLED': False, # Disabled in favor of ESP32 line sensor
-    'INTERSECTION_CORRECTION_ENABLED': True,
     'USE_ESP32_LINE_SENSOR': True,       # Use ESP32 hardware sensor for line following
     'POSITION_CORRECTION_ENABLED': True,
     'PERFORMANCE_LOGGING_ENABLED': False,    # Disabled to reduce log spam
@@ -48,12 +44,6 @@ CELL_SIZE_M = 0.11
 BASE_SPEED = 25
 TURN_SPEED = 20
 CORNER_SPEED = 22
-
-# Robot physical constants (for odometry, if used)
-PULSES_PER_REV = 920
-WHEEL_DIAMETER_M = 0.025
-ROBOT_WIDTH_M = 0.225
-ROBOT_LENGTH_M = 0.075
 
 # Maze and Mission Configuration
 MAZE_GRID = [
@@ -75,9 +65,7 @@ MAZE_GRID = [
 ]
 START_CELL = (0, 14) # Start position (col, row)
 END_CELL = (0, 2)   # End position (col, row)
-START_POSITION = ((START_CELL[0] + 0.5) * CELL_SIZE_M, (START_CELL[1] + 0.5) * CELL_SIZE_M)
-START_HEADING = 0.0  # Facing right for horizontal movement
-START_DIRECTION = 'E' # For visual localizer
+START_DIRECTION = 'F' # Use 'F'(North), 'B'(South), 'L'(West), 'R'(East)
 
 # Line following configuration
 LINE_FOLLOW_SPEED = 25
@@ -93,12 +81,9 @@ CORNER_DETECTION_THRESHOLD = 0.35
 CORNER_TURN_DURATION = 30
 SHARP_CORNER_THRESHOLD = 0.6
 
-IMG_PATH_SRC_PTS = np.float32([[160, 240], [480, 240], [640, 480], [0, 480]])
-IMG_PATH_DST_PTS = np.float32([[0, 0], [640, 0], [640, 480], [0, 480]])
-
 # Camera configuration
 WEBCAM_INDEX = 1
-CAMERA_WIDTH, CAMERA_HEIGHT = 1920, 1080
+CAMERA_WIDTH, CAMERA_HEIGHT = 320, 240
 CAMERA_FPS = 30
 
 class ESP32Controller:
@@ -223,21 +208,20 @@ class RobotController(CameraLineFollowingMixin):
             self.motor_controller = DirectMotorController()
 
         self.object_detector = None
-        self.path_shape_detector = None
-        self.intersection_detector = None
         self.frame = None
         self.processed_frame = None
         self.frame_lock = threading.Lock()
 
         self.detections = {}
-        self.path_shape = "straight"
         self.last_intersection_time = 0
 
         # Position tracking using Visual Localizer
         self.position_tracker = PreciseMazeLocalizer(
             maze=MAZE_GRID,
             start_pos=START_CELL,
-            start_direction=START_DIRECTION
+            camera_width=CAMERA_WIDTH,
+            camera_height=CAMERA_HEIGHT,
+            camera_fps=CAMERA_FPS
         )
 
         # Pathfinder setup
@@ -259,16 +243,8 @@ class RobotController(CameraLineFollowingMixin):
             return
 
         print("Initializing vision system...")
-        if FEATURES['INTERSECTION_CORRECTION_ENABLED']:
-            self.intersection_detector = IntersectionDetector(debug=FEATURES['DEBUG_VISUALIZATION_ENABLED'])
         if FEATURES['OBJECT_DETECTION_ENABLED']:
             self.object_detector = ObjectDetector()
-        if FEATURES['PATH_SHAPE_DETECTION_ENABLED']:
-            self.path_shape_detector = PathShapeDetector(
-                source_pts=IMG_PATH_SRC_PTS,
-                dest_pts=IMG_PATH_DST_PTS,
-                debug=FEATURES['DEBUG_VISUALIZATION_ENABLED']
-            )
 
     def run(self):
         """Main control loop."""
@@ -313,11 +289,6 @@ class RobotController(CameraLineFollowingMixin):
         # Visual localization is handled by its own thread, no need to call it here.
         # The intersection logic below can be used to augment or validate.
         
-        if FEATURES['INTERSECTION_CORRECTION_ENABLED'] and self.intersection_detector:
-            # This logic can be adapted to work with the visual localizer's output
-            # For now, we rely on the primary localizer.
-            pass # Temporarily disabled to avoid conflicts with PreciseMazeLocalizer
-
         # Store the processed frame for the video feed
         with self.frame_lock:
             self.processed_frame = processed_frame
@@ -518,7 +489,27 @@ def main():
     """Main entry point for the robot controller."""
     print_feature_status()
     
+    # --- Direction Mapping ---
+    # Translate intuitive directions to the system's cardinal directions
+    direction_map = {
+        'F': 'N',  # Forward -> North
+        'B': 'S',  # Backward -> South
+        'L': 'W',  # Left -> West
+        'R': 'E'   # Right -> East
+    }
+    # Also allow cardinal directions to be used directly
+    direction_map.update({ 'N': 'N', 'S': 'S', 'E': 'E', 'W': 'W' })
+
+    # Get the system-compatible direction
+    try:
+        system_start_direction = direction_map[START_DIRECTION.upper()]
+    except KeyError:
+        print(f"ERROR: Invalid START_DIRECTION '{START_DIRECTION}'. Using 'N' as default.")
+        system_start_direction = 'N'
+    
     robot = RobotController()
+    # Manually set the start direction for the localizer
+    robot.position_tracker.current_direction = system_start_direction
     
     app = Flask(__name__, template_folder='../../templates', static_folder='../../static')
     
@@ -538,10 +529,8 @@ def main():
         if hasattr(robot.motor_controller, 'latest_encoder_data'):
             motor_speeds = robot.motor_controller.latest_encoder_data
         
-        # Get camera line following status if available
-        camera_line_status = {}
-        if hasattr(robot, 'get_camera_line_status'):
-            camera_line_status = robot.get_camera_line_status()
+        # Get visual localizer status
+        localizer_status = robot.position_tracker.get_status()
         
         data = {
             'state': robot.state,
@@ -551,7 +540,13 @@ def main():
             'line_position': line_pos,
             'line_error': line_err,
             'line_sensors': sensor_vals,
-            'camera_line_following': camera_line_status,
+            'visual_localizer': {
+                'status': localizer_status.get('status', 'N/A'),
+                'confidence': localizer_status.get('confidence', 0),
+                'position': localizer_status.get('current_position', (0,0)),
+                'direction': localizer_status.get('current_direction', 'N/A'),
+                'scene_type': localizer_status.get('scene_type', 'unknown'),
+            },
             'motors': {
                 'fl': motor_speeds[0], 'fr': motor_speeds[1],
                 'bl': motor_speeds[2], 'br': motor_speeds[3],
@@ -670,10 +665,6 @@ def main():
     # Start the camera capture thread if vision is enabled
     if FEATURES['VISION_SYSTEM_ENABLED']:
         print("Vision system enabled. Camera is managed by PreciseMazeLocalizer.")
-
-    # Start the Flask web server in a separate thread
-    flask_thread = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False), daemon=True)
-    flask_thread.start()
 
     # Start the robot controller in a separate thread
     robot_thread = threading.Thread(target=robot.run, daemon=True)

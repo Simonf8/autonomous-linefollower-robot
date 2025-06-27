@@ -108,27 +108,29 @@
                     
                     <!-- Camera Line Following -->
                     <div class="camera-line-section">
-                        <h3 class="subsection-title">CAMERA VISION</h3>
-                        <div class="camera-line-info">
-                            <div class="sensor-info-item">
-                                <span class="sensor-info-label">STATUS:</span>
-                                <span class="sensor-info-value cyber-text" id="camera-line-status">INACTIVE</span>
-                            </div>
-                            <div class="sensor-info-item">
-                                <span class="sensor-info-label">LINE OFFSET:</span>
-                                <span class="sensor-info-value cyber-text" id="camera-line-offset">0.000</span>
-                            </div>
-                            <div class="sensor-info-item">
-                                <span class="sensor-info-label">CONFIDENCE:</span>
-                                <span class="sensor-info-value cyber-text" id="camera-line-confidence">0.000</span>
-                            </div>
-                            <div class="sensor-info-item">
-                                <span class="sensor-info-label">TURN ANGLE:</span>
-                                <span class="sensor-info-value cyber-text" id="camera-turn-angle">0.0°</span>
-                            </div>
-                            <div class="sensor-info-item">
-                                <span class="sensor-info-label">CORNER:</span>
-                                <span class="sensor-info-value cyber-text" id="camera-corner-status">NONE</span>
+                        <h3 class="subsection-title">VISUAL LOCALIZER</h3>
+                        <div class="card-content">
+                            <div class="data-grid">
+                                <div class="data-item">
+                                    <span class="label">STATUS:</span>
+                                    <span id="localizer-status" class="value status-ok">INIT</span>
+                                </div>
+                                <div class="data-item">
+                                    <span class="label">POSITION:</span>
+                                    <span id="localizer-position" class="value">(0, 0)</span>
+                                </div>
+                                <div class="data-item">
+                                    <span class="label">CONFIDENCE:</span>
+                                    <span id="localizer-confidence" class="value">0.00</span>
+                                </div>
+                                <div class="data-item">
+                                    <span class="label">DIRECTION:</span>
+                                    <span id="localizer-direction" class="value">N/A</span>
+                                </div>
+                                <div class="data-item">
+                                    <span class="label">SCENE:</span>
+                                    <span id="localizer-scene" class="value">unknown</span>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -201,7 +203,7 @@
                 })
                 .then(data => {
                     document.getElementById('robot-position').textContent = `(${data.x.toFixed(2)}, ${data.y.toFixed(2)})`;
-                    document.getElementById('robot-heading').textContent = `${data.heading.toFixed(1)}°`;
+                    document.getElementById('robot-heading').textContent = data.heading.toFixed(1) + '°';
                     document.getElementById('robot-state').textContent = data.state;
                     
                     // Update package status
@@ -212,38 +214,21 @@
                     document.getElementById('boxes-collected').textContent = `${data.collected_boxes || 0}/${data.total_tasks || 4}`;
                     document.getElementById('boxes-delivered').textContent = `${data.delivered_boxes || 0}/${data.total_tasks || 4}`;
 
-                    // Update line sensor display
+                    // Update Visual Localizer data
+                    const localizerData = data.visual_localizer;
+                    document.getElementById('localizer-status').textContent = localizerData.status.toUpperCase();
+                    document.getElementById('localizer-position').textContent = `(${localizerData.position[0]}, ${localizerData.position[1]})`;
+                    document.getElementById('localizer-confidence').textContent = localizerData.confidence.toFixed(2);
+                    document.getElementById('localizer-direction').textContent = localizerData.direction;
+                    document.getElementById('localizer-scene').textContent = localizerData.scene_type;
+
+                    // Update Line Sensor data
+                    document.getElementById('line-position').textContent = data.line_position;
+                    document.getElementById('line-error').textContent = data.line_error;
+                    
                     const sensorContainer = document.getElementById('sensor-array');
                     const sensorLabels = ['L', 'C', 'R'];
                     let sensorPattern = "";
-                    
-                    // Update camera line following data
-                    if (data.camera_line_following) {
-                        const cameraData = data.camera_line_following;
-                        document.getElementById('camera-line-status').textContent = cameraData.status ? cameraData.status.toUpperCase() : 'INACTIVE';
-                        document.getElementById('camera-line-offset').textContent = cameraData.line_offset ? cameraData.line_offset.toFixed(3) : '0.000';
-                        document.getElementById('camera-line-confidence').textContent = cameraData.confidence ? cameraData.confidence.toFixed(3) : '0.000';
-                        document.getElementById('camera-turn-angle').textContent = cameraData.turn_angle ? cameraData.turn_angle.toFixed(1) + '°' : '0.0°';
-                        
-                        // Corner detection status
-                        let cornerStatus = 'NONE';
-                        if (cameraData.corner_detected) {
-                            cornerStatus = cameraData.corner_direction ? cameraData.corner_direction.toUpperCase() : 'DETECTED';
-                        }
-                        document.getElementById('camera-corner-status').textContent = cornerStatus;
-                        
-                        // Change color based on line detection status
-                        const statusElement = document.getElementById('camera-line-status');
-                        if (cameraData.line_detected) {
-                            statusElement.style.color = 'var(--cyber-green)';
-                        } else {
-                            statusElement.style.color = 'var(--cyber-red)';
-                        }
-                    }
-
-                    // Update line position and error
-                    document.getElementById('line-position').textContent = data.line_position !== undefined ? data.line_position : -1;
-                    document.getElementById('line-error').textContent = data.line_error !== undefined ? data.line_error : 0;
                     
                     if (data.line_sensors && data.line_sensors.length >= 3) {
                         // Update visual sensor display
