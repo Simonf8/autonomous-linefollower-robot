@@ -1,4 +1,4 @@
-from gpiozero import Motor
+from gpiozero import Motor, RotaryEncoder
 import time
 import atexit
 import signal
@@ -18,24 +18,40 @@ class PiMotorController:
             'br': {'p1': 23, 'p2': 22},   # Back Right
         }
         
+        # GPIO pin numbers for the wheel encoders (A and B phases)
+        self.encoder_pins = {
+            'fl': {'A': 5, 'B': 6},    # Front Left
+            'fr': {'A': 13, 'B': 19},  # Front Right
+            'bl': {'A': 12, 'B': 18},  # Back Left
+            'br': {'A': 24, 'B': 25},  # Back Right
+        }
+        
         # Apply motor trims if provided
         self.trims = trims if trims else {'fl': 1.0, 'fr': 1.0, 'bl': 1.0, 'br': 1.0}
         
         self.motors = {}
-        self._setup_motors()
+        self.encoders = {}
+        self._setup_motors_and_encoders()
         
         # Register cleanup handlers
         atexit.register(self._cleanup)
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
-    def _setup_motors(self):
-        """Initialize motor objects using gpiozero with error handling."""
+    def _setup_motors_and_encoders(self):
+        """Initialize motor and encoder objects using gpiozero with error handling."""
         try:
+            # Initialize motors
             for wheel, pins in self.motor_pins.items():
                 # The gpiozero Motor class handles the two-pin setup automatically.
                 self.motors[wheel] = Motor(forward=pins['p1'], backward=pins['p2'])
-            print("Pi Motor Controller initialized using gpiozero.")
+
+            # Initialize encoders
+            for wheel, pins in self.encoder_pins.items():
+                # max_steps=0 allows for unlimited counting in both directions
+                self.encoders[wheel] = RotaryEncoder(a=pins['A'], b=pins['B'], max_steps=0)
+
+            print("Pi Motor Controller and Encoders initialized using gpiozero.")
         except Exception as e:
             if "GPIO busy" in str(e):
                 print(f"GPIO Error: {e}")
@@ -45,12 +61,14 @@ class PiMotorController:
                 try:
                     for wheel, pins in self.motor_pins.items():
                         self.motors[wheel] = Motor(forward=pins['p1'], backward=pins['p2'])
-                    print("Pi Motor Controller initialized after GPIO cleanup.")
+                    for wheel, pins in self.encoder_pins.items():
+                        self.encoders[wheel] = RotaryEncoder(a=pins['A'], b=pins['B'], max_steps=0)
+                    print("Pi Motor Controller and Encoders initialized after GPIO cleanup.")
                 except Exception as retry_error:
-                    print(f"Failed to initialize motors after cleanup: {retry_error}")
+                    print(f"Failed to initialize motors/encoders after cleanup: {retry_error}")
                     raise
             else:
-                print(f"Motor initialization error: {e}")
+                print(f"Motor/Encoder initialization error: {e}")
                 raise
 
     def _force_gpio_cleanup(self):
@@ -77,6 +95,11 @@ class PiMotorController:
                 motor.stop()
                 motor.close()
             self.motors.clear()
+
+            print("Cleaning up encoder resources...")
+            for encoder in self.encoders.values():
+                encoder.close()
+            self.encoders.clear()
             
             # Reset the pin factory to release all pins
             from gpiozero import Device
@@ -98,6 +121,26 @@ class PiMotorController:
         self._set_motor_speed('fr', fr)
         self._set_motor_speed('bl', bl)
         self._set_motor_speed('br', br)
+
+    def get_encoder_counts(self):
+        """Returns the current raw step count for each encoder."""
+        if not self.encoders:
+            return {'fl': 0, 'fr': 0, 'bl': 0, 'br': 0}
+        
+        return {
+            wheel: encoder.steps
+            for wheel, encoder in self.encoders.items()
+        }
+
+    def reset_encoders(self):
+        """Resets all encoder counts to zero."""
+        if not self.encoders:
+            print("Warning: Encoders not initialized, cannot reset.")
+            return
+
+        for encoder in self.encoders.values():
+            encoder.steps = 0
+        print("All encoder counts have been reset.")
 
     def _set_motor_speed(self, wheel: str, speed: int):
         """Set speed for a single motor."""
