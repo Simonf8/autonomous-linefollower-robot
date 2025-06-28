@@ -85,7 +85,7 @@ START_DIRECTION = 'E'
 
 # Time in seconds it takes for the robot to cross one 12cm cell at BASE_SPEED.
 # This is used for dead reckoning in long, straight corridors.
-CELL_CROSSING_TIME_S = 0.8 
+CELL_CROSSING_TIME_S = 0.14  # Reduced from 0.8 to make position updates faster
 
 # Corner turning configuration
 CORNER_TURN_MODES = {
@@ -109,8 +109,13 @@ class RobotController(CameraLineFollowingMixin):
     def __init__(self):
         self.running = True
         
-        # Initialize motor controller directly
-        self.motor_controller = PiMotorController(trims=MOTOR_TRIMS)
+        # Initialize motor controller directly with error handling
+        try:
+            self.motor_controller = PiMotorController(trims=MOTOR_TRIMS)
+        except Exception as e:
+            print(f"Failed to initialize motor controller: {e}")
+            print("Robot will run in simulation mode without motor control.")
+            self.motor_controller = None
 
         # Initialize audio feedback system
         self.audio_feedback = AudioFeedback()
@@ -280,7 +285,11 @@ class RobotController(CameraLineFollowingMixin):
                 return
             vision_result = self.camera_line_follower.detect_line(frame)
             fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(vision_result, base_speed=BASE_SPEED)
-            self.motor_controller.send_motor_speeds(fl, fr, bl, br)
+            if self.motor_controller:
+                self.motor_controller.send_motor_speeds(fl, fr, bl, br)
+            
+            # Force movement detection since robot is actively moving
+            self.position_tracker.force_movement_detection()
             return # Bypass the complex logic below.
 
         # --- This logic is for complex paths WITH turns ---
@@ -292,6 +301,14 @@ class RobotController(CameraLineFollowingMixin):
                 self.state = "mission_complete"
                 self._stop_motors()
                 return
+
+        # Add dead reckoning for complex paths too
+        # If robot has been moving forward for a while, assume it reached the next cell
+        time_since_last_update = time.time() - self.last_cell_update_time
+        if time_since_last_update > CELL_CROSSING_TIME_S:  # Use normal crossing time, not 1.5x
+            print(f"Dead reckoning: Advancing position after {time_since_last_update:.1f}s")
+            self.position_tracker.nudge_position_forward()
+            self.last_cell_update_time = time.time()
 
         # Determine required action for the next waypoint
         current_dir = self.position_tracker.current_direction
@@ -326,7 +343,11 @@ class RobotController(CameraLineFollowingMixin):
         else:
             # Default action: follow the line forward using the vision result
             fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(vision_result, base_speed=BASE_SPEED)
-            self.motor_controller.send_motor_speeds(fl, fr, bl, br)
+            if self.motor_controller:
+                self.motor_controller.send_motor_speeds(fl, fr, bl, br)
+            
+            # Force movement detection since robot is actively moving
+            self.position_tracker.force_movement_detection()
 
     def _execute_arcing_turn(self):
         """
@@ -435,7 +456,8 @@ class RobotController(CameraLineFollowingMixin):
         left_speed = int(CORNER_SPEED - turn_correction)
         right_speed = int(CORNER_SPEED + turn_correction)
         
-        self.motor_controller.send_motor_speeds(left_speed, right_speed, left_speed, right_speed)
+        if self.motor_controller:
+            self.motor_controller.send_motor_speeds(left_speed, right_speed, left_speed, right_speed)
         return True
 
     def _sideways_corner_turn(self, corner_direction: str, line_error: int):
@@ -454,7 +476,8 @@ class RobotController(CameraLineFollowingMixin):
             bl_speed = CORNER_SPEED // 2      # Back left: reduced forward
             br_speed = CORNER_SPEED           # Back right: full forward
         
-        self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+        if self.motor_controller:
+            self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
         return True
 
     def _pivot_corner_turn(self, corner_direction: str, line_error: int):
@@ -472,7 +495,8 @@ class RobotController(CameraLineFollowingMixin):
             bl_speed = TURN_SPEED     # Back left: forward
             br_speed = -TURN_SPEED    # Back right: reverse
         
-        self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+        if self.motor_controller:
+            self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
         return True
 
     def _front_turn_corner(self, corner_direction: str, line_error: int):
@@ -492,7 +516,8 @@ class RobotController(CameraLineFollowingMixin):
             bl_speed = base_speed             # Back left: normal
             br_speed = base_speed * 3 // 4    # Back right: moderate
         
-        self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+        if self.motor_controller:
+            self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
         return True
 
     def _recover_line(self):
@@ -501,7 +526,10 @@ class RobotController(CameraLineFollowingMixin):
 
     def _stop_motors(self):
         """Stop all motors."""
-        self.motor_controller.send_motor_speeds(0, 0, 0, 0)
+        if self.motor_controller:
+            self.motor_controller.send_motor_speeds(0, 0, 0, 0)
+        else:
+            print("Motors not available - running in simulation mode")
     
     def stop(self):
         """Stop the robot and clean up resources."""
@@ -510,7 +538,8 @@ class RobotController(CameraLineFollowingMixin):
         self._stop_motors()
         if isinstance(self.position_tracker, PreciseMazeLocalizer):
             self.position_tracker.stop_localization()
-        self.motor_controller.stop()
+        if self.motor_controller:
+            self.motor_controller.stop()
 
     def _get_required_turn(self, current_pos: Tuple[int, int], current_dir: str, target_pos: Tuple[int, int]) -> str:
         """Determines the turn required to move from the current pose to the target position."""
@@ -563,7 +592,8 @@ class RobotController(CameraLineFollowingMixin):
         bl = int(vx + vy + turn_omega)
         br = int(vx - vy - turn_omega)
 
-        self.motor_controller.send_motor_speeds(fl, fr, bl, br)
+        if self.motor_controller:
+            self.motor_controller.send_motor_speeds(fl, fr, bl, br)
 
     def _is_path_straight(self, path: List[Tuple[int, int]]) -> bool:
         """Checks if a path is a straight line (either horizontal or vertical)."""

@@ -23,9 +23,10 @@ class PreciseMazeLocalizer:
         
         # Movement detection - adjusted for line following
         self.prev_frame = None
-        self.movement_threshold = 30  # Lower threshold
+        self.movement_threshold = 15  # Much lower threshold for line following
         self.stationary_frames = 0
-        self.max_stationary_frames = 30  # Allow more stationary frames
+        self.max_stationary_frames = 60  # Allow even more stationary frames
+        self.last_movement_time = time.time()
         self.blur_threshold = 100.0 # New: tunable threshold for blur detection
         
         # Corner distance detection
@@ -164,22 +165,29 @@ class PreciseMazeLocalizer:
         """Detect if robot is moving using frame difference"""
         if self.prev_frame is None:
             self.prev_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-            return False
+            return True  # Assume moving initially
         
         current_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
         
         # Calculate frame difference
         diff = cv2.absdiff(self.prev_frame, current_gray)
-        _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+        _, thresh = cv2.threshold(diff, 20, 255, cv2.THRESH_BINARY)  # Lower threshold
         
         # Count changed pixels
         movement_pixels = cv2.countNonZero(thresh)
         is_moving = movement_pixels > self.movement_threshold
         
-        if not is_moving:
-            self.stationary_frames += 1
-        else:
+        if is_moving:
             self.stationary_frames = 0
+            self.last_movement_time = time.time()
+        else:
+            self.stationary_frames += 1
+        
+        # If we haven't detected movement for a while, but robot should be moving,
+        # assume it's moving anyway (for line following robots that move slowly)
+        time_since_last_movement = time.time() - self.last_movement_time
+        if time_since_last_movement < 5.0:  # Within last 5 seconds
+            is_moving = True
             
         self.prev_frame = current_gray
         return is_moving
@@ -221,8 +229,12 @@ class PreciseMazeLocalizer:
         # Check if robot is moving
         is_moving = self.detect_movement(frame)
         
-        # If stationary for too long, don't update position
-        if self.stationary_frames > self.max_stationary_frames:
+        # Check if we should consider robot as moving based on recent activity
+        time_since_last_movement = time.time() - self.last_movement_time
+        force_moving = time_since_last_movement < 3.0  # Consider moving if activity within 3 seconds
+        
+        # If stationary for too long AND no recent movement activity, don't update position
+        if self.stationary_frames > self.max_stationary_frames and not force_moving:
             return {
                 'status': 'stationary',
                 'confidence': 0.0,
@@ -244,6 +256,12 @@ class PreciseMazeLocalizer:
 
         # Detect lines instead of corners
         scene = self.classify_scene_by_lines(gray)
+        
+        # Override movement detection if we have recent activity
+        time_since_last_movement = time.time() - self.last_movement_time
+        if time_since_last_movement < 3.0:
+            is_moving = True
+            
         scene['is_moving'] = is_moving
         scene['status'] = 'ok'
         
@@ -558,11 +576,21 @@ class PreciseMazeLocalizer:
             # Reset the stability filter to prevent it from getting stuck on the old cell
             self.position_candidate = self.current_pos
             self.candidate_stability_counter = 0
+            
+            # Mark as moving to help with tracking
+            self.last_movement_time = time.time()
+            self.stationary_frames = 0
 
             print(f"Dead reckoning nudge: Position updated to {self.current_pos}")
             self.last_status['message'] = "Position nudged by dead reckoning"
         else:
             print(f"WARN: Dead reckoning nudge to {new_pos} ignored; out of bounds or wall.")
+    
+    def force_movement_detection(self):
+        """Force the system to detect movement - useful when robot is definitely moving"""
+        self.last_movement_time = time.time()
+        self.stationary_frames = 0
+        print("Movement detection forced - robot marked as moving")
 
     def set_search_mode(self, mode: str):
         """Set the localization search mode to 'normal' or 'corridor'."""
