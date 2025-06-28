@@ -9,6 +9,68 @@
     <title>ROBOT NAVIGATION</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+    <style>
+        .motor-encoder-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            padding: 10px;
+        }
+        .quad-data-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+            background-color: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--cyber-cyan-translucent);
+            border-radius: 5px;
+            padding: 10px;
+        }
+        .quad-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 5px 8px;
+            background-color: rgba(0, 255, 255, 0.05);
+            border-radius: 3px;
+            border: 1px solid transparent;
+        }
+        .quad-item span:first-child {
+            color: var(--cyber-cyan);
+            font-weight: bold;
+        }
+        .quad-item span:last-child {
+            color: #ffffff;
+            font-family: 'Orbitron', sans-serif;
+            font-weight: 700;
+            font-size: 1.1rem;
+            text-shadow: 0 0 5px var(--cyber-cyan);
+        }
+        .subsection-title {
+            color: var(--cyber-pink);
+            text-transform: uppercase;
+            font-weight: 700;
+            margin: 10px 0;
+            padding-left: 10px;
+            border-left: 3px solid var(--cyber-pink);
+            font-size: 0.9rem;
+        }
+        .data-item.full-width {
+            grid-column: 1 / -1;
+        }
+        .camera-line-section {
+            padding: 0 10px 10px;
+        }
+        .sub-panel {
+            border: 1px solid var(--cyber-cyan-translucent);
+            border-radius: 5px;
+            padding: 15px;
+            background-color: rgba(0, 255, 255, 0.03);
+            margin-bottom: 15px;
+        }
+        .sub-panel .subsection-title {
+            margin-top: 0;
+        }
+    </style>
 </head>
 <body>
     <div class="matrix-bg"></div>
@@ -112,79 +174,71 @@
                         <div class="panel-indicator"></div>
                     </div>
                     
-                    <!-- Camera Line Following -->
                     <div class="camera-line-section">
-                        <h3 class="subsection-title">VISUAL LOCALIZER</h3>
-                        <div class="card-content">
+                        <div class="sub-panel">
+                            <h3 class="subsection-title">POSITION TRACKER</h3>
                             <div class="data-grid">
                                 <div class="data-item">
                                     <span class="label">STATUS:</span>
-                                    <span id="localizer-status" class="value status-ok">INIT</span>
+                                    <span id="tracker-status" class="value status-ok">INIT</span>
                                 </div>
                                 <div class="data-item">
                                     <span class="label">POSITION:</span>
-                                    <span id="localizer-position" class="value">(0, 0)</span>
-                                </div>
-                                <div class="data-item">
-                                    <span class="label">CONFIDENCE:</span>
-                                    <span id="localizer-confidence" class="value">0.00</span>
+                                    <span id="tracker-position" class="value">(0, 0)</span>
                                 </div>
                                 <div class="data-item">
                                     <span class="label">DIRECTION:</span>
-                                    <span id="localizer-direction" class="value">N/A</span>
+                                    <span id="tracker-direction" class="value">N/A</span>
+                                </div>
+                                <div class="data-item full-width">
+                                    <span class="label">MESSAGE:</span>
+                                    <span id="tracker-message" class="value"></span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="sub-panel">
+                            <h3 class="subsection-title">CAMERA LINE DATA</h3>
+                            <div class="data-grid">
+                                <div class="data-item">
+                                    <span class="label">LINE OFFSET:</span>
+                                    <span id="line-offset" class="value">0.00</span>
                                 </div>
                                 <div class="data-item">
-                                    <span class="label">SCENE:</span>
-                                    <span id="localizer-scene" class="value">unknown</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- Hardware Sensor Array -->
-                    <div class="hardware-sensor-section">
-                        <h3 class="subsection-title">HARDWARE SENSORS</h3>
-                        <div class="sensor-display" id="sensor-array">
-                            <!-- Sensors will be dynamically added here -->
-                        </div>
-                        <div class="sensor-details">
-                            <div class="sensor-info">
-                                <div class="sensor-info-item">
-                                    <span class="sensor-info-label">LINE POSITION:</span>
-                                    <span class="sensor-info-value cyber-text" id="line-position">-1</span>
-                                </div>
-                                <div class="sensor-info-item">
-                                    <span class="sensor-info-label">LINE ERROR:</span>
-                                    <span class="sensor-info-value cyber-text" id="line-error">0</span>
-                                </div>
-                                <div class="sensor-info-item">
-                                    <span class="sensor-info-label">PATTERN:</span>
-                                    <span class="sensor-info-value cyber-text" id="sensor-pattern">000</span>
-                                </div>
-                            </div>
-                            <div class="sensor-values">
-                                <div class="sensor-value-item">
-                                    <span class="sensor-label">LEFT</span>
-                                    <span class="sensor-value cyber-text" id="sensor-left">0</span>
-                                </div>
-                                <div class="sensor-value-item">
-                                    <span class="sensor-label">CENTER</span>
-                                    <span class="sensor-value cyber-text" id="sensor-center">0</span>
-                                </div>
-                                <div class="sensor-value-item">
-                                    <span class="sensor-label">RIGHT</span>
-                                    <span class="sensor-value cyber-text" id="sensor-right">0</span>
+                                    <span class="label">INTERSECTION:</span>
+                                    <span id="intersection-status" class="value">FALSE</span>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Corner Turning Mode Control -->
-                <!-- REMOVED as per user request for autonomous cornering -->
-
-                <!-- Controls -->
-                
+                <!-- Motor and Encoder Panel -->
+                <div class="panel motor-panel">
+                    <div class="panel-header">
+                        <h2>MOTOR & ENCODER DATA</h2>
+                        <div class="panel-indicator"></div>
+                    </div>
+                    <div class="motor-encoder-grid">
+                        <div class="motor-data">
+                            <h3 class="subsection-title">MOTOR SPEEDS</h3>
+                            <div class="quad-data-grid">
+                                <div class="quad-item"><span>FL:</span><span id="motor-fl">0</span></div>
+                                <div class="quad-item"><span>FR:</span><span id="motor-fr">0</span></div>
+                                <div class="quad-item"><span>BL:</span><span id="motor-bl">0</span></div>
+                                <div class="quad-item"><span>BR:</span><span id="motor-br">0</span></div>
+                            </div>
+                        </div>
+                        <div class="encoder-data">
+                            <h3 class="subsection-title">ENCODER TICKS</h3>
+                            <div class="quad-data-grid">
+                                <div class="quad-item"><span>FL:</span><span id="encoder-fl">0</span></div>
+                                <div class="quad-item"><span>FR:</span><span id="encoder-fr">0</span></div>
+                                <div class="quad-item"><span>BL:</span><span id="encoder-bl">0</span></div>
+                                <div class="quad-item"><span>BR:</span><span id="encoder-br">0</span></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -223,50 +277,31 @@
                     document.getElementById('boxes-collected').textContent = `${data.collected_boxes || 0}/${data.total_tasks || 4}`;
                     document.getElementById('boxes-delivered').textContent = `${data.delivered_boxes || 0}/${data.total_tasks || 4}`;
 
-                    // Update Visual Localizer data
-                    const localizerData = data.visual_localizer;
-                    document.getElementById('localizer-status').textContent = localizerData.status.toUpperCase();
-                    document.getElementById('localizer-position').textContent = `(${localizerData.position[0]}, ${localizerData.position[1]})`;
-                    document.getElementById('localizer-confidence').textContent = localizerData.confidence.toFixed(2);
-                    document.getElementById('localizer-direction').textContent = localizerData.direction;
-                    document.getElementById('localizer-scene').textContent = localizerData.scene_type;
+                    // Update Position Tracker data
+                    const trackerData = data.position_tracker;
+                    document.getElementById('tracker-status').textContent = trackerData.status.toUpperCase();
+                    document.getElementById('tracker-position').textContent = `(${trackerData.position[0]}, ${trackerData.position[1]})`;
+                    document.getElementById('tracker-direction').textContent = trackerData.direction;
+                    document.getElementById('tracker-message').textContent = trackerData.message;
 
-                    // Update Line Sensor data
-                    document.getElementById('line-position').textContent = data.line_position;
-                    document.getElementById('line-error').textContent = data.line_error;
-                    
-                    const sensorContainer = document.getElementById('sensor-array');
-                    const sensorLabels = ['L', 'C', 'R'];
-                    let sensorPattern = "";
-                    
-                    if (data.line_sensors && data.line_sensors.length >= 3) {
-                        // Update visual sensor display
-                        sensorContainer.innerHTML = data.line_sensors.map((sensor, index) => {
-                            // In ESP32 code, 0 means line detected (dark), 1000 means no line (bright)
-                            const isActive = sensor < 500; 
-                            const className = isActive ? 'sensor-active' : 'sensor-inactive';
-                            sensorPattern += isActive ? '1' : '0';
-                            return `<div class="sensor-item ${className}">
-                                        <span class="sensor-label">${sensorLabels[index]}</span>
-                                        <span class="sensor-raw-value">${sensor}</span>
-                                    </div>`;
-                        }).join('');
-                        
-                        // Update pattern
-                        document.getElementById('sensor-pattern').textContent = sensorPattern;
-                        
-                        // Update individual sensor values
-                        document.getElementById('sensor-left').textContent = data.line_sensors[0];
-                        document.getElementById('sensor-center').textContent = data.line_sensors[1];
-                        document.getElementById('sensor-right').textContent = data.line_sensors[2];
-                    } else {
-                        // No sensor data available
-                        sensorContainer.innerHTML = `<div class="sensor-offline">SENSORS OFFLINE</div>`;
-                        document.getElementById('sensor-pattern').textContent = "---";
-                        document.getElementById('sensor-left').textContent = "---";
-                        document.getElementById('sensor-center').textContent = "---";
-                        document.getElementById('sensor-right').textContent = "---";
-                    }
+                    // Update Line Follower data
+                    const lineFollowerData = data.line_follower;
+                    document.getElementById('line-offset').textContent = lineFollowerData.line_offset.toFixed(2);
+                    document.getElementById('intersection-status').textContent = lineFollowerData.is_at_intersection ? 'TRUE' : 'FALSE';
+
+                    // Update Motor Speeds
+                    const motors = data.motors || {};
+                    document.getElementById('motor-fl').textContent = motors.fl || 0;
+                    document.getElementById('motor-fr').textContent = motors.fr || 0;
+                    document.getElementById('motor-bl').textContent = motors.bl || 0;
+                    document.getElementById('motor-br').textContent = motors.br || 0;
+
+                    // Update Encoder Ticks
+                    const encoders = data.encoders || {};
+                    document.getElementById('encoder-fl').textContent = encoders.fl || 0;
+                    document.getElementById('encoder-fr').textContent = encoders.fr || 0;
+                    document.getElementById('encoder-bl').textContent = encoders.bl || 0;
+                    document.getElementById('encoder-br').textContent = encoders.br || 0;
 
                     const statusIndicator = document.getElementById('status-indicator');
                     const statusText = document.getElementById('status-text');
@@ -283,41 +318,35 @@
 
                 })
                 .catch(error => {
-                    console.error('Error updating data:', error);
-                    document.getElementById('status-indicator').className = 'status-indicator offline';
-                    document.getElementById('status-text').textContent = 'CONNECTION LOST';
+                    console.error('Error fetching robot data:', error);
+                    document.getElementById('status-text').textContent = 'SYSTEM OFFLINE';
+                    const indicator = document.getElementById('status-indicator');
+                    indicator.classList.remove('online');
+                    indicator.classList.add('offline');
                 });
         }
 
-        function init() {
+        document.addEventListener('DOMContentLoaded', function() {
+            // Initial call and set interval
+            updateData();
+            setInterval(updateData, 500); // Update every 500ms
+            
             updateTimestamp();
             setInterval(updateTimestamp, 1000);
-            updateData();
-            setInterval(updateData, 500); // Poll every 500ms
 
-            // Control button event listeners
+            // Button event listeners
             document.getElementById('start-btn').addEventListener('click', () => {
-                fetch('/start_mission')
-                    .then(response => response.json())
-                    .then(data => console.log('Mission start response:', data))
-                    .catch(err => console.error('Error starting mission:', err));
+                fetch('/start_mission').then(res => res.json()).then(data => {
+                    console.log('Start mission response:', data);
+                });
             });
 
             document.getElementById('stop-btn').addEventListener('click', () => {
-                fetch('/stop_robot')
-                    .then(response => response.json())
-                    .then(data => {
-                        console.log('Stop robot response:', data);
-                        // Visually indicate that the system is stopped
-                        document.getElementById('robot-state').textContent = 'STOPPED';
-                        document.getElementById('status-indicator').className = 'status-indicator error';
-                        document.getElementById('status-text').textContent = 'SYSTEM HALTED';
-                    })
-                    .catch(err => console.error('Error stopping robot:', err));
+                fetch('/stop_robot').then(res => res.json()).then(data => {
+                    console.log('Stop robot response:', data);
+                });
             });
-        }
-
-        document.addEventListener('DOMContentLoaded', init);
+        });
     </script>
 </body>
 </html> 

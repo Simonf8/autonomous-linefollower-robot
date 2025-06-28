@@ -127,6 +127,8 @@ class RobotController(CameraLineFollowingMixin):
 
         self.detections = {}
         self.last_intersection_time = 0
+        self.motor_speeds = {'fl': 0, 'fr': 0, 'bl': 0, 'br': 0}
+        self.camera_line_result = {}
 
         # Position tracking using Encoders
         self.position_tracker = EncoderPositionTracker(
@@ -134,7 +136,8 @@ class RobotController(CameraLineFollowingMixin):
             start_pos=START_CELL,
             motor_controller=self.motor_controller,
             start_direction=START_DIRECTION,
-            cell_size_m=CELL_SIZE_M
+            cell_size_m=CELL_SIZE_M,
+            debug=FEATURES['DEBUG_VISUALIZATION_ENABLED']
         )
 
         # Pathfinder setup
@@ -160,6 +163,12 @@ class RobotController(CameraLineFollowingMixin):
                 fps=CAMERA_FPS,
                 debug=FEATURES['DEBUG_VISUALIZATION_ENABLED']
             )
+
+    def _set_motor_speeds(self, fl, fr, bl, br):
+        """A wrapper to set motor speeds and store them for the UI."""
+        self.motor_speeds = {'fl': int(fl), 'fr': int(fr), 'bl': int(bl), 'br': int(br)}
+        if self.motor_controller:
+            self.motor_controller.send_motor_speeds(int(fl), int(fr), int(bl), int(br))
 
     def _setup_vision(self):
         """Initialize vision systems if enabled."""
@@ -295,10 +304,9 @@ class RobotController(CameraLineFollowingMixin):
                 self.motor_controller.send_motor_speeds(BASE_SPEED, BASE_SPEED, BASE_SPEED, BASE_SPEED)
             return
 
-        vision_result = self.camera_line_follower.detect_line(frame)
-        fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(vision_result, base_speed=BASE_SPEED)
-        if self.motor_controller:
-            self.motor_controller.send_motor_speeds(fl, fr, bl, br)
+        self.camera_line_result = self.camera_line_follower.detect_line(frame)
+        fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(self.camera_line_result, base_speed=BASE_SPEED)
+        self._set_motor_speeds(fl, fr, bl, br)
 
     def _execute_arcing_turn(self):
         """
@@ -316,9 +324,9 @@ class RobotController(CameraLineFollowingMixin):
             self._stop_motors()
             return
 
-        vision_result = self.camera_line_follower.detect_line(frame)
-        line_offset = vision_result.get('line_offset', 1.0) # Default to a large offset
-        aspect_ratio = vision_result.get('aspect_ratio', 1.0) # Default to a wide shape
+        self.camera_line_result = self.camera_line_follower.detect_line(frame)
+        line_offset = self.camera_line_result.get('line_offset', 1.0) # Default to a large offset
+        aspect_ratio = self.camera_line_result.get('aspect_ratio', 1.0) # Default to a wide shape
 
         is_line_centered = abs(line_offset) < LINE_CENTERED_THRESHOLD
         is_line_straight = aspect_ratio < STRAIGHT_LINE_ASPECT_RATIO_THRESHOLD
@@ -415,8 +423,7 @@ class RobotController(CameraLineFollowingMixin):
         left_speed = int(CORNER_SPEED - turn_correction)
         right_speed = int(CORNER_SPEED + turn_correction)
         
-        if self.motor_controller:
-            self.motor_controller.send_motor_speeds(left_speed, right_speed, left_speed, right_speed)
+        self._set_motor_speeds(left_speed, right_speed, left_speed, right_speed)
         return True
 
     def _sideways_corner_turn(self, corner_direction: str, line_error: int):
@@ -435,8 +442,7 @@ class RobotController(CameraLineFollowingMixin):
             bl_speed = CORNER_SPEED // 2      # Back left: reduced forward
             br_speed = CORNER_SPEED           # Back right: full forward
         
-        if self.motor_controller:
-            self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+        self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
         return True
 
     def _pivot_corner_turn(self, corner_direction: str, line_error: int):
@@ -454,8 +460,7 @@ class RobotController(CameraLineFollowingMixin):
             bl_speed = TURN_SPEED     # Back left: forward
             br_speed = -TURN_SPEED    # Back right: reverse
         
-        if self.motor_controller:
-            self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+        self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
         return True
 
     def _front_turn_corner(self, corner_direction: str, line_error: int):
@@ -475,8 +480,7 @@ class RobotController(CameraLineFollowingMixin):
             bl_speed = base_speed             # Back left: normal
             br_speed = base_speed * 3 // 4    # Back right: moderate
         
-        if self.motor_controller:
-            self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+        self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
         return True
 
     def _recover_line(self):
@@ -485,10 +489,7 @@ class RobotController(CameraLineFollowingMixin):
 
     def _stop_motors(self):
         """Stop all motors."""
-        if self.motor_controller:
-            self.motor_controller.send_motor_speeds(0, 0, 0, 0)
-        else:
-            print("Motors not available - running in simulation mode")
+        self._set_motor_speeds(0, 0, 0, 0)
     
     def stop(self):
         """Stop the robot and clean up resources."""
@@ -557,8 +558,7 @@ class RobotController(CameraLineFollowingMixin):
         bl = int(vx + vy + turn_omega)
         br = int(vx - vy - turn_omega)
 
-        if self.motor_controller:
-            self.motor_controller.send_motor_speeds(fl, fr, bl, br)
+        self._set_motor_speeds(fl, fr, bl, br)
 
     def _is_path_straight(self, path: List[Tuple[int, int]]) -> bool:
         """Checks if a path is a straight line (either horizontal or vertical)."""
@@ -612,27 +612,30 @@ def main():
         heading_deg = math.degrees(heading_rad)
         
         # Get localizer status from the active tracker
-        localizer_status = robot.position_tracker.get_status()
+        position_tracker_status = robot.position_tracker.get_status()
+
+        encoder_counts = robot.motor_controller.get_encoder_counts() if robot.motor_controller else {}
 
         data = {
             'state': robot.state,
             'x': x,
             'y': y,
             'heading': heading_deg,
-            'line_position': -1,
-            'line_error': 0,
-            'line_sensors': [0,0,0],
-            'visual_localizer': {
-                'status': localizer_status.get('status', 'N/A'),
-                'confidence': localizer_status.get('confidence', 0),
-                'position': localizer_status.get('current_position', (0,0)),
-                'direction': localizer_status.get('current_direction', 'N/A'),
-                'scene_type': localizer_status.get('scene_type', 'unknown'),
+            'position_tracker': {
+                'status': position_tracker_status.get('status', 'N/A'),
+                'confidence': position_tracker_status.get('confidence', 0),
+                'position': position_tracker_status.get('current_position', (0,0)),
+                'direction': position_tracker_status.get('current_direction', 'N/A'),
+                'message': position_tracker_status.get('message', ''),
             },
-            'motors': {'fl': 0, 'fr': 0, 'bl': 0, 'br': 0},
+            'line_follower': {
+                'line_offset': robot.camera_line_result.get('line_offset', 0),
+                'is_at_intersection': robot.camera_line_result.get('is_at_intersection', False),
+            },
+            'motors': robot.motor_speeds,
+            'encoders': encoder_counts,
             'path': robot.path,
             'current_target_index': robot.current_target_index,
-            'camera_image': None 
         }
         return jsonify(data)
 

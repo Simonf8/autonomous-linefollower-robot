@@ -7,12 +7,14 @@ class EncoderPositionTracker:
 
     def __init__(self, maze: list, start_pos: Tuple[int, int], motor_controller,
                  start_direction: str = 'N', cell_size_m: float = 0.11,
-                 wheel_circumference_m: float = 0.204, ticks_per_revolution: int = 960):
+                 wheel_circumference_m: float = 0.204, ticks_per_revolution: int = 960,
+                 debug: bool = False):
 
         self.maze = maze
         self.motor_controller = motor_controller
         self.cell_size_m = cell_size_m
         self.start_direction = start_direction
+        self.debug = debug
 
         # Robot physical parameters
         self.TICKS_PER_REVOLUTION = ticks_per_revolution
@@ -80,7 +82,8 @@ class EncoderPositionTracker:
 
         # Check if we have crossed into a new cell
         if self.distance_since_last_cell >= self.cell_size_m:
-            print(f"Cell crossing triggered! Dist: {self.distance_since_last_cell:.3f}m")
+            if self.debug:
+                print(f"Cell crossing triggered! Dist: {self.distance_since_last_cell:.3f}m")
             self._advance_cell()
             self.distance_since_last_cell = 0 # Reset distance
 
@@ -97,10 +100,12 @@ class EncoderPositionTracker:
         if (0 <= new_pos[1] < len(self.maze) and
             0 <= new_pos[0] < len(self.maze[0]) and
             self.maze[new_pos[1]][new_pos[0]] == 0):
-            print(f"Encoder Tracker: Moved from {self.current_pos} -> {new_pos}")
+            if self.debug:
+                print(f"Encoder Tracker: Moved from {self.current_pos} -> {new_pos}")
             self.current_pos = new_pos
         else:
-            print(f"Encoder Tracker: WARN: Advance to {new_pos} blocked by wall or boundary.")
+            if self.debug:
+                print(f"Encoder Tracker: WARN: Advance to {new_pos} blocked by wall or boundary.")
 
     def get_current_cell(self) -> Tuple[int, int]:
         return self.current_pos
@@ -115,7 +120,8 @@ class EncoderPositionTracker:
         elif turn == 'right':
             self.current_direction = turn_map_right[self.current_direction]
         
-        print(f"Encoder Tracker: Direction updated to {self.current_direction} after {turn} turn.")
+        if self.debug:
+            print(f"Encoder Tracker: Direction updated to {self.current_direction} after {turn} turn.")
 
     def get_pose(self) -> Tuple[float, float, float]:
         """Returns the robot's current pose (x, y, heading) in meters and radians."""
