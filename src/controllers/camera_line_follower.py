@@ -487,6 +487,7 @@ class CameraLineFollower:
         
         # PID controller for smooth line following
         self.pid = PIDController(kp=1.2, ki=0.1, kd=0.8, output_limits=(-100, 100))
+        self.strafe_gain = 30.0 # Proportional gain for sideways correction
         
         # Detection history for smoothing
         self.line_offset_history = deque(maxlen=5)
@@ -497,6 +498,7 @@ class CameraLineFollower:
         
         self.max_line_width = 0.8 # Max line width as a ratio of ROI width
         self.intersection_solidity_threshold = 0.85 # Lower value means more complex shape
+        self.intersection_aspect_ratio_threshold = 0.8 # If width is > 80% of height, might be a corner
         
         self.canny_high = 150
         self.binary_threshold = 70
@@ -563,61 +565,41 @@ class CameraLineFollower:
         return result
     
     def _preprocess_roi(self, roi: np.ndarray) -> np.ndarray:
-        """Applies a series of filters to the ROI to isolate the line."""
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        """Applies a series of filters to the ROI to isolate the line using color masking."""
+        # Convert to HSV color space, which is better for color detection
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         
-        # Apply Gaussian blur to reduce noise
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        # Define range for black color in HSV
+        # These values might need tuning for your specific lighting conditions
+        lower_black = np.array([0, 0, 0])
+        upper_black = np.array([180, 255, 50])
         
-        # Use a simple global binary threshold. This is more effective for
-        # detecting a solid black line on a lighter background.
-        # Pixels darker than 70 will be considered the line.
-        _, binary = cv2.threshold(blurred, 70, 255, cv2.THRESH_BINARY_INV)
-
-        # Use morphological closing to connect any small gaps in the line
-        kernel = np.ones((5, 5), np.uint8)
-        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        # Create a mask that isolates the black parts of the image
+        mask = cv2.inRange(hsv, lower_black, upper_black)
         
-        return closed
+        # The morphological close was removed as it was smoothing out the corners,
+        # preventing the solidity/aspect ratio detection from working correctly.
+        return mask
     
     def _find_line_in_roi(self, binary_roi: np.ndarray) -> Optional[Dict]:
         """
-        Finds the largest contour in the binary ROI that is near the center, 
-        treating it as the line. This helps ignore distraction lines on the edges.
+        Finds the largest contour in the binary ROI, treating it as the line.
         """
         contours, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
             return None
 
-        # --- Filter contours to only consider those near the center ---
-        roi_width = binary_roi.shape[1]
-        center_x = roi_width / 2
-        # Define a search zone in the middle 60% of the ROI
-        search_zone_width = roi_width * 0.6
-        search_zone_start = center_x - (search_zone_width / 2)
-        search_zone_end = center_x + (search_zone_width / 2)
-
-        central_contours = []
-        for c in contours:
-            # Calculate the center of the contour
-            M = cv2.moments(c)
-            if M["m00"] > 0:
-                cx = int(M["m10"] / M["m00"])
-                # Keep the contour if its center is within the search zone
-                if search_zone_start <= cx <= search_zone_end:
-                    central_contours.append(c)
-        
-        if not central_contours:
-            return None
-
-        # Find the largest contour among the central ones
-        largest_contour = max(central_contours, key=cv2.contourArea)
+        # --- Find the largest contour in the ROI ---
+        # The central filter was removed because it was preventing the detection
+        # of wide T-junctions, which are essential for cornering. By considering
+        # all contours, we can correctly identify the full shape of an intersection.
+        largest_contour = max(contours, key=cv2.contourArea)
 
         if cv2.contourArea(largest_contour) < self.min_line_area:
             return None
 
-        # --- Proceed with the largest central contour ---
+        # --- Proceed with the largest contour ---
         M = cv2.moments(largest_contour)
         if M["m00"] == 0:
             return None
@@ -632,17 +614,18 @@ class CameraLineFollower:
         # Calculate confidence based on contour properties
         roi_height, roi_width = binary_roi.shape
         area_ratio = cv2.contourArea(largest_contour) / (roi_width * roi_height)
-        aspect_ratio = w / max(h, 1)
+        aspect_ratio = w / float(h) if h > 0 else 0
         
         # Higher confidence for larger, more line-like contours
         confidence = min(1.0, area_ratio * 10 + min(aspect_ratio / 3, 1.0) * 0.5)
         
         # --- Intersection Detection ---
-        # An intersection (T or L shape) is less "solid" than a straight line.
-        # We can detect this by comparing the contour area to its convex hull area.
-        hull = cv2.convexHull(largest_contour)
-        hull_area = cv2.contourArea(hull)
-        solidity = float(cv2.contourArea(largest_contour)) / hull_area if hull_area > 0 else 1.0
+        # A corner or T-junction is more "square" and less "solid" than a straight line.
+        solidity = float(cv2.contourArea(largest_contour)) / cv2.contourArea(cv2.convexHull(largest_contour)) if cv2.contourArea(cv2.convexHull(largest_contour)) > 0 else 1.0
+        
+        # Check if the shape is complex (not solid) or wide (like a T-junction)
+        is_complex_shape = solidity < self.intersection_solidity_threshold
+        is_wide_shape = aspect_ratio > self.intersection_aspect_ratio_threshold
         
         result = {
             'center': (cx, cy),
@@ -650,8 +633,9 @@ class CameraLineFollower:
             'bbox': (x, y, w, h),
             'area': cv2.contourArea(largest_contour),
             'confidence': confidence,
-            'is_at_intersection': solidity < self.intersection_solidity_threshold,
-            'solidity': solidity # For debugging
+            'is_at_intersection': is_complex_shape or is_wide_shape,
+            'solidity': solidity,
+            'aspect_ratio': aspect_ratio
         }
         
         return result
@@ -829,16 +813,21 @@ class CameraLineFollower:
             # If line is lost or confidence is too low, stop.
             return 0, 0, 0, 0
             
-        # The process variable is the line_offset.
-        turn_correction = self.pid.update(line_offset)
-
-        # Apply the correction to the motor speeds for an omni-wheel robot.
-        # This combines forward motion (base_speed) with rotation (turn_correction).
-        fl = int(base_speed - turn_correction)
-        fr = int(base_speed + turn_correction)
-        bl = int(base_speed + turn_correction)
-        br = int(base_speed - turn_correction)
+        # --- Omni-wheel control logic ---
+        # 1. Rotational correction to stay on the line (PID)
+        omega = self.pid.update(line_offset)
         
+        # 2. Sideways (strafing) correction for fine-tuning position
+        vy = self.strafe_gain * line_offset
+        
+        # Combine forward, sideways, and rotational movements using the correct
+        # kinematic model for an X-configured omni-drive.
+        # vx = base_speed (forward)
+        fl = int(base_speed - vy + omega)
+        fr = int(base_speed + vy - omega)
+        bl = int(base_speed + vy + omega)
+        br = int(base_speed - vy - omega)
+
         return fl, fr, bl, br
 
 

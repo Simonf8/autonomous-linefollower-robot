@@ -243,14 +243,16 @@ class RobotController(CameraLineFollowingMixin):
         
         # --- DEBUG LOG ---
         solidity = vision_result.get('solidity', 1.0)
-        print(f"Path Follow: Cell={current_cell}, Target={next_waypoint}, Turn={required_turn}, Intersection={is_at_intersection} (Solidity: {solidity:.2f})")
+        aspect_ratio = vision_result.get('aspect_ratio', 0.0)
+        print(f"Path Follow: Cell={current_cell}, Target={next_waypoint}, Turn={required_turn}, Intersection={is_at_intersection} (S: {solidity:.2f}, AR: {aspect_ratio:.2f})")
 
         # Decide whether to turn or go forward
         TURN_COOLDOWN_S = 2.0 # Minimum time between turns
         can_turn = (time.time() - self.last_turn_complete_time) > TURN_COOLDOWN_S
 
         if required_turn in ['left', 'right'] and is_at_intersection and can_turn:
-            print(f"Intersection detected! Preparing to turn {required_turn}.")
+            print(f"Intersection detected! Stopping to prepare for {required_turn} turn.")
+            self._stop_motors() # Stop immediately
             self.turn_to_execute = required_turn
             self.state = 'turning'
             self.turn_start_time = time.time()
@@ -260,10 +262,17 @@ class RobotController(CameraLineFollowingMixin):
             self.motor_controller.send_motor_speeds(fl, fr, bl, br)
 
     def _execute_intersection_turn(self):
-        """Executes a timed pivot turn at an intersection."""
+        """Executes a timed pivot turn at an intersection after a brief pause."""
+        PRE_TURN_PAUSE_S = 0.2 # Brief pause to stabilize before turning
         TURN_DURATION_S = 0.8  # Time in seconds for a 90-degree turn. Needs tuning.
         
-        if time.time() - self.turn_start_time < TURN_DURATION_S:
+        if time.time() - self.turn_start_time < PRE_TURN_PAUSE_S:
+            # Still in the pre-turn pause phase. Motors are already stopped.
+            return
+            
+        turn_elapsed = (time.time() - self.turn_start_time) - PRE_TURN_PAUSE_S
+        
+        if turn_elapsed < TURN_DURATION_S:
             # Still turning
             self._pivot_corner_turn(self.turn_to_execute, 0)
         else:
