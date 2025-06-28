@@ -78,18 +78,25 @@ class CameraObstacleAvoidance:
         # Convert to grayscale for processing
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Apply CLAHE for better contrast
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        enhanced = clahe.apply(gray)
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Gaussian blur
-        blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
+        # Adaptive thresholding is more robust to lighting changes
+        binary = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 11, 2
+        )
+        
+        # Erode to remove small noise, then dilate to restore line thickness
+        kernel = np.ones((3, 3), np.uint8)
+        eroded = cv2.erode(binary, kernel, iterations=1)
+        closed = cv2.dilate(eroded, kernel, iterations=1)
         
         # Detect obstacles in the upper portion of the frame
-        obstacle_result = self._detect_obstacles(blurred, width, height)
+        obstacle_result = self._detect_obstacles(closed, width, height)
         
         # Detect corners in the lower portion of the frame
-        corner_result = self._detect_corners(blurred, width, height)
+        corner_result = self._detect_corners(closed, width, height)
         
         # Combine results
         result = {
@@ -108,7 +115,7 @@ class CameraObstacleAvoidance:
             self.debug_frame_counter += 1
             if self.debug_frame_counter % (self.debug_frame_skip + 1) == 0:
                 result['processed_frame'] = self._create_debug_frame(
-                    frame, enhanced, obstacle_result, corner_result, result
+                    frame, blurred, obstacle_result, corner_result, result
                 )
             else:
                 result['processed_frame'] = frame
@@ -563,18 +570,18 @@ class CameraLineFollower:
         # Apply Gaussian blur to reduce noise
         blurred = cv2.GaussianBlur(gray, self.BLUR_SIZE, 0)
         
-        # Adaptive thresholding can be more robust to lighting changes
-        # than a fixed binary threshold.
+        # Adaptive thresholding is more robust to lighting changes
         binary = cv2.adaptiveThreshold(
             blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY_INV, 11, 2
         )
         
-        # Use morphological closing to connect broken line segments
-        kernel = np.ones((7, 7), np.uint8)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        # Erode to remove small noise, then dilate to restore line thickness
+        kernel = np.ones((3, 3), np.uint8)
+        eroded = cv2.erode(binary, kernel, iterations=1)
+        closed = cv2.dilate(eroded, kernel, iterations=1)
         
-        return binary
+        return closed
     
     def _find_line_in_roi(self, binary_roi: np.ndarray) -> Optional[Dict]:
         """

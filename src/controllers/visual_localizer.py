@@ -241,18 +241,20 @@ class PreciseMazeLocalizer:
         # Get corner coordinates from keypoints
         corner_points = [(int(kp.pt[0]), int(kp.pt[1])) for kp in keypoints]
 
-        # Draw keypoints for debugging if needed
-        # frame_with_keypoints = cv2.drawKeypoints(frame, keypoints, None, color=(0,255,0))
-        # with self.frame_lock:
-        #     self.latest_frame = frame_with_keypoints
-        
         # Analyze corner distances
         distance_analysis = self.analyze_corner_distance(corner_points, frame.shape[0])
         
         # Determine scene type based on corner patterns
         scene = self.classify_scene_precisely(corner_points, frame.shape, distance_analysis)
         scene['is_moving'] = is_moving
-        scene['distance_analysis'] = distance_analysis
+        
+        # Ensure the scene dictionary always has a 'status' key
+        scene['status'] = 'ok'
+        
+        # Draw keypoints for debugging if needed
+        # frame_with_keypoints = cv2.drawKeypoints(frame, keypoints, None, color=(0,255,0))
+        # with self.frame_lock:
+        #     self.latest_frame = frame_with_keypoints
         
         return scene
     
@@ -347,75 +349,69 @@ class PreciseMazeLocalizer:
     def localize_with_confidence(self) -> Dict:
         """Localize position with confidence tracking"""
         observed_scene = self.detect_scene_with_precision()
-        if not observed_scene:
-            return {
-                'status': 'error',
-                'confidence': 0.0,
-                'message': 'Failed to analyze scene'
-            }
+        if observed_scene['status'] in ['error', 'stationary']:
+            self.last_status.update({
+                'message': observed_scene['message'],
+                'status': 'tracking_lost'
+            })
+            return self.last_status
+
+        current_key = (self.current_pos[0], self.current_pos[1], self.current_direction)
+        expected_scene = self.corner_signatures.get(current_key)
         
-        # Handle special cases
-        if observed_scene.get('status') == 'stationary':
-            return observed_scene
+        best_match_key = current_key
+        match_confidence = 0.0
+
+        if expected_scene:
+            match_confidence = self.compare_scenes_precisely(observed_scene, expected_scene)
         
-        if observed_scene.get('status') == 'error':
-            return observed_scene
-        
-        # If corners are too far ahead, reduce confidence
-        if observed_scene.get('distance_analysis', {}).get('corner_distance') == 'far':
-            return {
-                'status': 'corners_too_far',
-                'confidence': 0.2,
-                'is_moving': observed_scene.get('is_moving', False),
-                'scene_type': observed_scene.get('scene_type', 'unknown'),
-                'message': 'Corners detected too far ahead - position uncertain'
-            }
-        
-        # Match against known signatures
-        best_matches = []
-        for (x, y, direction), expected in self.corner_signatures.items():
-            match_score = self.compare_scenes_precisely(observed_scene, expected)
-            if match_score > 0.8:
-                best_matches.append(((x, y, direction), match_score))
-        
-        if best_matches:
-            best_matches.sort(key=lambda x: x[1], reverse=True)
-            best_pos = best_matches[0][0]
-            confidence = best_matches[0][1]
-            
-            # Update position only if confidence is high enough
-            if confidence > self.min_confidence:
-                self.current_pos = (best_pos[0], best_pos[1])
-                self.current_direction = best_pos[2]
-                self.position_confidence = confidence
-                
-                return {
-                    'status': 'localized',
-                    'position': self.current_pos,
-                    'direction': self.current_direction,
-                    'confidence': confidence,
-                    'scene_type': observed_scene['scene_type'],
-                    'is_moving': observed_scene.get('is_moving', False),
-                    'message': f'Localized at ({self.current_pos[0]}, {self.current_pos[1]})'
-                }
-        
-        return {
-            'status': 'uncertain',
-            'confidence': 0.0,
+        if match_confidence < self.min_confidence:
+            # Confidence is low, try to re-localize by checking neighbors
+            neighboring_keys = self._get_neighboring_keys(current_key)
+            neighbor_matches = []
+            for key in neighboring_keys:
+                neighbor_signature = self.corner_signatures.get(key)
+                if neighbor_signature:
+                    confidence = self.compare_scenes_precisely(observed_scene, neighbor_signature)
+                    neighbor_matches.append((key, confidence))
+
+            if neighbor_matches:
+                # Find the best match among neighbors
+                best_neighbor_match = max(neighbor_matches, key=lambda x: x[1])
+                # If the best neighbor is a better match than our current low-confidence position
+                if best_neighbor_match[1] > match_confidence:
+                    best_match_key = best_neighbor_match[0]
+                    match_confidence = best_neighbor_match[1]
+
+        # Update position if we found a good match
+        if match_confidence >= self.min_confidence:
+            self.current_pos = (best_match_key[0], best_match_key[1])
+            self.current_direction = best_match_key[2]
+            self.position_confidence = match_confidence
+        else:
+            # If confidence is still low, don't update position, just decay confidence
+            self.position_confidence *= 0.9
+
+        self.last_status.update({
+            'status': 'tracking' if match_confidence >= self.min_confidence else 'tracking_lost',
+            'position': self.current_pos,
+            'direction': self.current_direction,
+            'confidence': self.position_confidence,
             'scene_type': observed_scene.get('scene_type', 'unknown'),
             'is_moving': observed_scene.get('is_moving', False),
-            'message': 'Cannot confidently determine position'
-        }
+            'message': f"Match confidence: {match_confidence:.2f}"
+        })
+        
+        return self.last_status
     
     def compare_scenes_precisely(self, observed: Dict, expected: Dict) -> float:
-        """Precisely compare observed scene with expected signature"""
-        score = 0.0
-        total_weight = 0.0
+        """Compare observed scene with an expected signature with higher precision."""
+        scene_match = 0.0
+        feature_match = 0.0
         
         # Scene type match (high weight)
         if observed.get('scene_type') == expected.get('scene_type'):
-            score += 3.0
-        total_weight += 3.0
+            scene_match = 1.0
         
         # Specific feature matches
         features = ['corner_ahead_left', 'corner_ahead_right', 'wall_ahead', 
@@ -423,15 +419,33 @@ class PreciseMazeLocalizer:
         
         for feature in features:
             if observed.get(feature) == expected.get(feature):
-                score += 1.0
-            total_weight += 1.0
+                feature_match += 1.0
         
         # Intersection type match
         if observed.get('intersection_type') == expected.get('intersection_type'):
-            score += 2.0
-        total_weight += 2.0
+            scene_match += 1.0
         
-        return score / total_weight if total_weight > 0 else 0.0
+        confidence = (scene_match * 0.6) + (feature_match * 0.4)
+        return confidence
+
+    def _get_neighboring_keys(self, current_key: Tuple[int, int, str]) -> List[Tuple[int, int, str]]:
+        """Get all valid signature keys for the current cell and its adjacent cells."""
+        x, y, current_direction = current_key
+        neighbor_keys = []
+
+        # Add all directions for the current cell
+        for d in ['N', 'S', 'E', 'W']:
+            neighbor_keys.append((x, y, d))
+
+        # Add all directions for all valid adjacent cells
+        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            nx, ny = x + dx, y + dy
+            # Check if the new position is within bounds and is a path
+            if 0 <= ny < len(self.maze) and 0 <= nx < len(self.maze[0]) and self.maze[ny][nx] == 0:
+                for d in ['N', 'S', 'E', 'W']:
+                    neighbor_keys.append((nx, ny, d))
+        
+        return list(set(neighbor_keys)) # Use set to remove duplicates
     
     def start_localization(self):
         """Start the localization thread."""

@@ -40,9 +40,9 @@ FEATURES = {
 # ROBOT CONFIGURATION
 # ================================
 CELL_SIZE_M = 0.11
-BASE_SPEED = 40
-TURN_SPEED = 25
-CORNER_SPEED = 30
+BASE_SPEED = 90
+TURN_SPEED = 35
+CORNER_SPEED = 40
 
 # Maze and Mission Configuration
 MAZE_GRID = [
