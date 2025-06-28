@@ -39,6 +39,12 @@ class PreciseMazeLocalizer:
         self.position_confidence = 1.0
         self.min_confidence = 0.6
         
+        # New: Stability tracking for position
+        self.position_candidate = None
+        self.candidate_confidence = 0.0
+        self.candidate_stability_counter = 0
+        self.STABILITY_THRESHOLD = 3 # Require 3 consecutive good frames
+        
         # Status tracking
         self.last_status = {
             'status': 'initialized',
@@ -405,7 +411,7 @@ class PreciseMazeLocalizer:
         return self.last_status
     
     def compare_scenes_precisely(self, observed: Dict, expected: Dict) -> float:
-        """Compare observed scene with an expected signature with higher precision."""
+        """Compare observed scene with expected signature for a more detailed confidence score."""
         scene_score = 0
         if observed.get('scene_type') == expected.get('scene_type'):
             scene_score += 1
@@ -472,49 +478,57 @@ class PreciseMazeLocalizer:
             self.cap.release()
     
     def _localization_loop(self):
-        """Main loop for the localization thread."""
+        """The main loop for the localization thread."""
         while self.running:
             if self.initialization_frames > 0:
-                if self.cap:
-                    frame = self.cap.capture_array()
-                    if frame is not None:
-                        with self.frame_lock:
-                            self.latest_frame = frame.copy()
                 self.initialization_frames -= 1
                 time.sleep(1 / self.camera_fps)
                 continue
 
-            result = self.localize_with_confidence()
+            localization_result = self.localize_with_confidence()
+            
+            if localization_result:
+                # New Stability Logic:
+                # Check if the new result matches the current candidate.
+                if (self.position_candidate and 
+                    localization_result['position'] == self.position_candidate and
+                    localization_result['direction'] == self.last_status['direction']): # Ensure direction is also stable
+                    
+                    self.candidate_stability_counter += 1
+                else:
+                    # New candidate found, reset counter.
+                    self.position_candidate = localization_result['position']
+                    self.candidate_stability_counter = 1
 
-            # Update status based on result
-            if result and result.get('status') == 'success':
-                with self.frame_lock:
-                    self.current_pos = result['position']
-                    self.current_direction = result['direction']
-                    self.position_confidence = result['confidence']
+                # If the candidate has been stable for long enough, update the official position.
+                if self.candidate_stability_counter >= self.STABILITY_THRESHOLD:
+                    if self.current_pos != self.position_candidate:
+                        print(f"Position lock updated: {self.current_pos} -> {self.position_candidate}")
+                        self.current_pos = self.position_candidate
+                    
+                    # Also update direction if it has changed and is stable
+                    if self.current_direction != localization_result['direction']:
+                         self.current_direction = localization_result['direction']
 
+                    # Update confidence and other status info from the latest good result
+                    self.position_confidence = localization_result['confidence']
+
+                # Always update the last_status for real-time feedback, but don't change the official position
+                # until it's stable.
                 self.last_status.update({
-                    'status': 'tracking',
-                    'position': self.current_pos,
-                    'direction': self.current_direction,
-                    'confidence': self.position_confidence,
-                    'scene_type': result.get('scene', {}).get('scene_type', 'unknown'),
-                    'message': 'Position updated'
-                })
-            elif result:
-                # Handle other statuses like 'stationary', 'error', 'blurry'
-                self.last_status.update({
-                    'status': result.get('status', 'unknown'),
-                    'position': self.current_pos,
-                    'direction': self.current_direction,
-                    'confidence': result.get('confidence', self.position_confidence),
-                    'message': result.get('message', 'No message')
+                    'status': localization_result.get('status', 'unknown'),
+                    'confidence': localization_result.get('confidence', 0),
+                    'position': self.current_pos, # Report the STABLE position
+                    'direction': self.current_direction, # Report the STABLE direction
+                    'scene_type': localization_result.get('scene_type', 'unknown'),
+                    'is_moving': localization_result.get('is_moving', False),
+                    'message': localization_result.get('message', '')
                 })
 
-            time.sleep(1 / self.camera_fps) # Control loop rate
-    
+            time.sleep(1 / self.camera_fps)
+            
     def get_status(self) -> Dict:
-        """Get the current status of the localizer."""
+        """Get the latest status of the localizer."""
         with self.frame_lock:
             status = self.last_status.copy()
             status.update({

@@ -72,9 +72,9 @@ MAZE_GRID = [
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 13
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0]  # Row 14
 ]
-START_CELL = (20, 5) # Start position (col, row)
-END_CELL = (0, 0)   # End position (col, row)
-START_DIRECTION = 'F' # Use 'F'(North), 'B'(South), 'L'(West), 'R'(East)
+START_CELL = (0, 12) # Start position (col, row)
+END_CELL = (20, 12)   # End position (col, row)
+START_DIRECTION = 'R' # Use 'F'(North), 'B'(South), 'L'(West), 'R'(East)
 
 # Corner turning configuration
 CORNER_TURN_MODES = {
@@ -130,6 +130,7 @@ class RobotController(CameraLineFollowingMixin):
         self.turn_to_execute = None # Stores the next turn ('left' or 'right')
         self.turn_start_time = 0
         self.last_turn_complete_time = 0 # Cooldown timer for turns
+        self.is_straight_corridor = False
 
         self.line_pid = PIDController(kp=0.5, ki=0.01, kd=0.1, output_limits=(-100, 100))
         self.state = "idle"
@@ -210,9 +211,18 @@ class RobotController(CameraLineFollowingMixin):
             self.path = path_nodes
             self.current_target_index = 0
             self.state = "path_following"
-            path_message = f"Path planned with {len(self.path)} waypoints"
+            
+            # New: Check if the path is a straight line for simpler following
+            self.is_straight_corridor = self._is_path_straight(self.path)
+
+            path_message = f"Path planned with {len(self.path)} waypoints."
             print(path_message)
             self.audio_feedback.speak(path_message)
+            
+            if self.is_straight_corridor:
+                print("Engaging simple corridor following mode.")
+                self.audio_feedback.speak("Following straight corridor.")
+
         else:
             print(f"Failed to plan path from {current_cell} to {END_CELL}")
             self.audio_feedback.speak("Path planning failed")
@@ -225,8 +235,29 @@ class RobotController(CameraLineFollowingMixin):
             self._stop_motors()
             return
 
-        # Update waypoint if reached
         current_cell = self.position_tracker.get_current_cell()
+
+        # Check for mission completion first
+        if current_cell == self.path[-1]:
+            print(f"Reached final destination: {current_cell}")
+            self.state = "mission_complete"
+            self._stop_motors()
+            return
+            
+        # If in a straight corridor, use simplified line following logic
+        if self.is_straight_corridor:
+            print(f"Corridor Following: At {current_cell}, moving towards {self.path[-1]}")
+            frame = self.position_tracker.get_camera_frame()
+            if frame is None:
+                self._stop_motors()
+                return
+            vision_result = self.camera_line_follower.detect_line(frame)
+            fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(vision_result, base_speed=BASE_SPEED)
+            self.motor_controller.send_motor_speeds(fl, fr, bl, br)
+            return # Bypass the complex waypoint and turning logic below
+
+        # --- Original Waypoint and Turning Logic for complex paths ---
+        # Update waypoint if reached
         if current_cell == self.path[self.current_target_index]:
             print(f"Reached waypoint {self.current_target_index}: {current_cell}")
             self.current_target_index += 1
@@ -507,6 +538,16 @@ class RobotController(CameraLineFollowingMixin):
         br = int(vx - vy - turn_omega)
 
         self.motor_controller.send_motor_speeds(fl, fr, bl, br)
+
+    def _is_path_straight(self, path: List[Tuple[int, int]]) -> bool:
+        """Checks if a path is a straight line (either horizontal or vertical)."""
+        if len(path) < 2:
+            return True
+        
+        is_straight_x = all(p[0] == path[0][0] for p in path)
+        is_straight_y = all(p[1] == path[0][1] for p in path)
+        
+        return is_straight_x or is_straight_y
 
 
 def print_feature_status():
