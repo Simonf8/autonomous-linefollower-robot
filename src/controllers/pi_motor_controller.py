@@ -9,6 +9,9 @@ class PiMotorController:
     Controller for a 4-wheel omni-drive robot using the Raspberry Pi's GPIO.
     Uses the gpiozero library, which is compatible with the Raspberry Pi 5.
     """
+    # Encoders produce ~960 steps per wheel revolution.
+    STEPS_PER_REVOLUTION = 960
+
     def __init__(self, trims: dict = None):
         # GPIO pin numbers (BCM mode) for the motor driver.
         self.motor_pins = {
@@ -20,13 +23,15 @@ class PiMotorController:
         
         # GPIO pin numbers for the wheel encoders (A and B phases)
         self.encoder_pins = {
-            'fl': {'A': 5, 'B': 6},    # Front Left
-            'fr': {'A': 13, 'B': 19},  # Front Right
-            'bl': {'A': 12, 'B': 18},  # Back Left
-            'br': {'A': 24, 'B': 25},  # Back Right
+            'fl': {'A': 13, 'B': 19},    # Front Left
+            'fr': {'A': 24, 'B': 2},  # Front Right
+            'bl': {'A': 6, 'B': 5},  # Back Left
+            'br': {'A': 3, 'B': 4},  # Back Right
         }
         
-        # Apply motor trims if provided
+        # Apply motor trims if provided. These are used to calibrate for motor speed
+        # differences. If a motor is too fast (e.g., the back-right), lower its
+        # trim value below 1.0.
         self.trims = trims if trims else {'fl': 1.0, 'fr': 1.0, 'bl': 1.0, 'br': 1.0}
         
         self.motors = {}
@@ -101,9 +106,8 @@ class PiMotorController:
                 encoder.close()
             self.encoders.clear()
             
-            # Reset the pin factory to release all pins
-            from gpiozero import Device
-            Device.pin_factory.reset()
+            # The .close() calls on individual devices are sufficient.
+            # The 'reset()' method is not available on the LGPIOFactory.
             print("GPIO cleanup completed.")
         except Exception as e:
             print(f"Warning during GPIO cleanup: {e}")

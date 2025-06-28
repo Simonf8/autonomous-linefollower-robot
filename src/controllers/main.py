@@ -17,7 +17,7 @@ from pathfinder import Pathfinder
 from box import BoxHandler
 from pid import PIDController
 from camera_line_follower import CameraLineFollower, CameraLineFollowingMixin
-from visual_localizer import PreciseMazeLocalizer
+from encoder_position_tracker import EncoderPositionTracker
 from pi_motor_controller import PiMotorController
 from audio_feedback import AudioFeedback
 
@@ -28,9 +28,9 @@ from audio_feedback import AudioFeedback
 FEATURES = {
     'OBJECT_DETECTION_ENABLED': False,
     'OBSTACLE_AVOIDANCE_ENABLED': False,
-    'VISION_SYSTEM_ENABLED': True,
+    'VISION_SYSTEM_ENABLED': False, # Disabled to use encoders
     'CAMERA_LINE_FOLLOWING_ENABLED': True, 
-    'POSITION_CORRECTION_ENABLED': True,
+    'POSITION_CORRECTION_ENABLED': False, # N/A for encoder-based tracking
     'PERFORMANCE_LOGGING_ENABLED': False,    # Disabled to reduce log spam
     'DEBUG_VISUALIZATION_ENABLED': True,
     'SMOOTH_CORNERING_ENABLED': True,
@@ -84,8 +84,8 @@ END_CELL = (20, 8)   # End position (col, row)
 START_DIRECTION = 'E'
 
 # Time in seconds it takes for the robot to cross one 12cm cell at BASE_SPEED.
-# This is used for dead reckoning in long, straight corridors.
-CELL_CROSSING_TIME_S = 0.14  # Reduced from 0.8 to make position updates faster
+# This is now primarily used as a timeout.
+CELL_CROSSING_TIME_S = 1.5  # Increased to act as a safeguard timeout
 
 # Corner turning configuration
 CORNER_TURN_MODES = {
@@ -128,14 +128,13 @@ class RobotController(CameraLineFollowingMixin):
         self.detections = {}
         self.last_intersection_time = 0
 
-        # Position tracking using Visual Localizer
-        self.position_tracker = PreciseMazeLocalizer(
+        # Position tracking using Encoders
+        self.position_tracker = EncoderPositionTracker(
             maze=MAZE_GRID,
             start_pos=START_CELL,
-            camera_width=CAMERA_WIDTH,
-            camera_height=CAMERA_HEIGHT,
-            camera_fps=CAMERA_FPS,
-            start_direction=START_DIRECTION # Use the configured start direction
+            motor_controller=self.motor_controller,
+            start_direction=START_DIRECTION,
+            cell_size_m=CELL_SIZE_M
         )
 
         # Pathfinder setup
@@ -152,31 +151,29 @@ class RobotController(CameraLineFollowingMixin):
         self.line_pid = PIDController(kp=0.5, ki=0.01, kd=0.1, output_limits=(-100, 100))
         self.state = "idle"
 
-        if FEATURES['VISION_SYSTEM_ENABLED']:
-            self._setup_vision()
-            
+        # Vision setup is now minimal, only for line following
         if FEATURES['CAMERA_LINE_FOLLOWING_ENABLED']:
-            self.init_camera_line_following()
+            self.init_camera_line_following(
+                camera_index=WEBCAM_INDEX,
+                width=CAMERA_WIDTH,
+                height=CAMERA_HEIGHT,
+                fps=CAMERA_FPS,
+                debug=FEATURES['DEBUG_VISUALIZATION_ENABLED']
+            )
 
     def _setup_vision(self):
         """Initialize vision systems if enabled."""
-        if not FEATURES['VISION_SYSTEM_ENABLED']:
-            print("Vision system is disabled.")
-            return
-
-        print("Initializing vision system...")
-        if FEATURES['OBJECT_DETECTION_ENABLED']:
-            self.object_detector = ObjectDetector()
+        # This is now handled by the CameraLineFollowingMixin's init method
+        pass
 
     def run(self):
         """Main control loop."""
-        # Initialize the camera.
-        if FEATURES['VISION_SYSTEM_ENABLED']:
-            if isinstance(self.position_tracker, PreciseMazeLocalizer):
-                if not self.position_tracker.initialize_camera():
-                    print("CRITICAL: Camera failed to initialize. Aborting mission.")
-                    self.running = False
-                    return
+        # Initialize the camera for line following if enabled.
+        if FEATURES['CAMERA_LINE_FOLLOWING_ENABLED']:
+            if not self.camera_line_follower.initialize_camera():
+                print("CRITICAL: Camera for line following failed to initialize. Aborting mission.")
+                self.running = False
+                return
 
         # The PiMotorController is initialized in the constructor. No connect() needed.
         while self.running:
@@ -197,29 +194,18 @@ class RobotController(CameraLineFollowingMixin):
         # Reset timers and state for the new mission
         self.last_cell_update_time = time.time()
 
-        # Start localizer only when mission begins
-        if isinstance(self.position_tracker, PreciseMazeLocalizer) and not self.position_tracker.running:
-            self.position_tracker.start_localization()
+        # Start position tracker only when mission begins
+        if not self.position_tracker.running:
+            self.position_tracker.start()
             
-        # Pose is now managed by the visual localizer
+        # Pose is now managed by the encoder localizer
         self.state = "planning"
 
     def _process_vision(self):
         """Process the latest camera frame for events."""
-        if not FEATURES['VISION_SYSTEM_ENABLED'] or self.frame is None:
-            return
-
-        with self.frame_lock:
-            frame_copy = self.frame.copy()
-
-        processed_frame = frame_copy
-        
-        # Visual localization is handled by its own thread, no need to call it here.
-        # The intersection logic below can be used to augment or validate.
-        
-        # Store the processed frame for the video feed
-        with self.frame_lock:
-            self.processed_frame = processed_frame
+        # This function is now OBSOLETE as vision processing is tied
+        # directly to the line following logic.
+        pass
 
     def _plan_path_to_target(self):
         """Plan the path to the target cell."""
@@ -236,13 +222,6 @@ class RobotController(CameraLineFollowingMixin):
             # Check if the path is a straight line to determine the following strategy.
             self.is_straight_corridor = self._is_path_straight(self.path)
             
-            # Set the appropriate search mode on the localizer
-            if self.is_straight_corridor:
-                self.position_tracker.set_search_mode('corridor')
-                self.audio_feedback.speak("Following straight corridor.")
-            else:
-                self.position_tracker.set_search_mode('normal')
-
             path_message = f"Path planned with {len(self.path)} waypoints."
             print(path_message)
             self.audio_feedback.speak(path_message)
@@ -253,7 +232,7 @@ class RobotController(CameraLineFollowingMixin):
             self.state = "error"
 
     def _follow_path(self):
-        """Follow the planned path using smart, vision-based navigation."""
+        """Follow the planned path using encoder-based cell transitions and camera-based line centering."""
         if not self.path or self.current_target_index >= len(self.path):
             self.state = "mission_complete"
             self._stop_motors()
@@ -267,87 +246,59 @@ class RobotController(CameraLineFollowingMixin):
             self.state = "mission_complete"
             self._stop_motors()
             return
-            
-        # If the entire path is a straight line, use simplified logic that ignores turns.
-        if self.is_straight_corridor:
-            # Use dead reckoning to prevent getting stuck visually.
-            if time.time() - self.last_cell_update_time > CELL_CROSSING_TIME_S:
-                self.position_tracker.nudge_position_forward()
-                self.last_cell_update_time = time.time()
-            
-            current_cell_for_log = self.position_tracker.get_current_cell()
-            print(f"Corridor Following: At {current_cell_for_log}, moving towards {self.path[-1]}")
-            
-            # Simple line following, no turning logic needed.
-            frame = self.position_tracker.get_camera_frame()
-            if frame is None:
-                self._stop_motors()
-                return
-            vision_result = self.camera_line_follower.detect_line(frame)
-            fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(vision_result, base_speed=BASE_SPEED)
-            if self.motor_controller:
-                self.motor_controller.send_motor_speeds(fl, fr, bl, br)
-            
-            # Force movement detection since robot is actively moving
-            self.position_tracker.force_movement_detection()
-            return # Bypass the complex logic below.
 
-        # --- This logic is for complex paths WITH turns ---
+        # --- Waypoint Arrival Logic (Encoder-based) ---
+        # Check if the robot has arrived at the next waypoint in its path.
         if current_cell == self.path[self.current_target_index]:
             print(f"Reached waypoint {self.current_target_index}: {current_cell}")
-            self.current_target_index += 1
             self.last_cell_update_time = time.time()
+            self.current_target_index += 1
             if self.current_target_index >= len(self.path):
                 self.state = "mission_complete"
                 self._stop_motors()
                 return
 
-        # Add dead reckoning for complex paths too
-        # If robot has been moving forward for a while, assume it reached the next cell
-        time_since_last_update = time.time() - self.last_cell_update_time
-        if time_since_last_update > CELL_CROSSING_TIME_S:  # Use normal crossing time, not 1.5x
-            print(f"Dead reckoning: Advancing position after {time_since_last_update:.1f}s")
-            self.position_tracker.nudge_position_forward()
-            self.last_cell_update_time = time.time()
-
-        # Determine required action for the next waypoint
+        # --- Turn Determination Logic ---
+        # Based on the *next* waypoint, determine if a turn is needed *now*.
         current_dir = self.position_tracker.current_direction
         next_waypoint = self.path[self.current_target_index]
         required_turn = self._get_required_turn(current_cell, current_dir, next_waypoint)
         
-        # Get vision data
-        frame = self.position_tracker.get_camera_frame()
-        if frame is None:
-            self._stop_motors()
-            return
-        vision_result = self.camera_line_follower.detect_line(frame)
-        is_at_intersection = vision_result.get('is_at_intersection', False)
-        
-        # --- DEBUG LOG ---
-        solidity = vision_result.get('solidity', 1.0)
-        aspect_ratio = vision_result.get('aspect_ratio', 0.0)
-        print(f"Path Follow: Cell={current_cell}, Target={next_waypoint}, Turn={required_turn}, Intersection={is_at_intersection} (S: {solidity:.2f}, AR: {aspect_ratio:.2f})")
+        print(f"Path Follow: Cell={current_cell}, Target={next_waypoint}, Required Turn={required_turn}")
 
-        # Decide whether to turn or go forward
-        TURN_COOLDOWN_S = 2.0 # Minimum time between turns
+        # If a turn is required, change state to 'turning'.
+        # This is triggered by the cell change from the encoder tracker.
+        TURN_COOLDOWN_S = 2.0
         can_turn = (time.time() - self.last_turn_complete_time) > TURN_COOLDOWN_S
 
-        if required_turn in ['left', 'right'] and is_at_intersection and can_turn:
-            turn_message = f"Intersection detected. Turning {required_turn}."
+        if required_turn in ['left', 'right'] and can_turn:
+            turn_message = f"Waypoint reached. Turning {required_turn} towards {next_waypoint}."
             print(turn_message)
             self.audio_feedback.speak(turn_message)
-            # Don't stop, transition directly into the turn
+            
+            # Stop briefly before turning to make it more precise
+            self._stop_motors()
+            time.sleep(0.2) 
+
             self.turn_to_execute = required_turn
             self.state = 'turning'
             self.turn_start_time = time.time()
-        else:
-            # Default action: follow the line forward using the vision result
-            fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(vision_result, base_speed=BASE_SPEED)
+            return # Exit to let the 'turning' state take over
+        
+        # --- Default Action: Line Following ---
+        # If no turn is needed, or if on cooldown, continue following the line forward.
+        frame = self.camera_line_follower.get_camera_frame()
+        if frame is None:
+            # If camera fails, maybe we should stop or rely on blind forward movement
+            print("WARN: No camera frame for line following. Moving forward blindly for a moment.")
             if self.motor_controller:
-                self.motor_controller.send_motor_speeds(fl, fr, bl, br)
-            
-            # Force movement detection since robot is actively moving
-            self.position_tracker.force_movement_detection()
+                self.motor_controller.send_motor_speeds(BASE_SPEED, BASE_SPEED, BASE_SPEED, BASE_SPEED)
+            return
+
+        vision_result = self.camera_line_follower.detect_line(frame)
+        fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(vision_result, base_speed=BASE_SPEED)
+        if self.motor_controller:
+            self.motor_controller.send_motor_speeds(fl, fr, bl, br)
 
     def _execute_arcing_turn(self):
         """
@@ -360,7 +311,7 @@ class RobotController(CameraLineFollowingMixin):
         STRAIGHT_LINE_ASPECT_RATIO_THRESHOLD = 0.5 # A re-acquired line should be tall and thin
 
         # Get the latest camera frame and analyze it for the line
-        frame = self.position_tracker.get_camera_frame()
+        frame = self.camera_line_follower.get_camera_frame()
         if frame is None:
             self._stop_motors()
             return
@@ -402,20 +353,28 @@ class RobotController(CameraLineFollowingMixin):
 
     def _run_state_machine(self):
         """Run the robot's state machine."""
+        # Update position from encoders at the start of each cycle.
+        self.position_tracker.update_position()
+
         if self.state == "idle":
             self._stop_motors()
+            self.position_tracker.set_moving(False)
         elif self.state == "planning":
             self._plan_path_to_target()
         elif self.state == "path_following":
+            self.position_tracker.set_moving(True)
             self._follow_path()
         elif self.state == "turning":
+            self.position_tracker.set_moving(True)
             self._execute_arcing_turn()
         elif self.state == "mission_complete":
             self.audio_feedback.speak("Mission complete.")
             self._stop_motors()
+            self.position_tracker.set_moving(False)
         elif self.state == "error":
             self.audio_feedback.speak("Error state reached.")
             self._stop_motors()
+            self.position_tracker.set_moving(False)
             self.running = False
             
     def _follow_line_with_sensor(self):
@@ -536,8 +495,14 @@ class RobotController(CameraLineFollowingMixin):
         print("Stopping robot...")
         self.running = False
         self._stop_motors()
-        if isinstance(self.position_tracker, PreciseMazeLocalizer):
-            self.position_tracker.stop_localization()
+        
+        # Stop the position tracker
+        self.position_tracker.stop()
+
+        # Stop camera line follower resources
+        if FEATURES['CAMERA_LINE_FOLLOWING_ENABLED'] and hasattr(self, 'camera_line_follower'):
+            self.camera_line_follower.release_camera()
+
         if self.motor_controller:
             self.motor_controller.stop()
 
@@ -646,7 +611,7 @@ def main():
         x, y, heading_rad = robot.position_tracker.get_pose()
         heading_deg = math.degrees(heading_rad)
         
-        # Get visual localizer status
+        # Get localizer status from the active tracker
         localizer_status = robot.position_tracker.get_status()
 
         data = {
@@ -673,15 +638,16 @@ def main():
 
     @app.route('/video_feed')
     def video_feed():
-        """Video streaming route. Returns a placeholder since camera is disabled."""
-        if not FEATURES['VISION_SYSTEM_ENABLED']:
+        """Video streaming route. Returns a placeholder if camera is disabled."""
+        if not FEATURES['CAMERA_LINE_FOLLOWING_ENABLED']:
             return Response(status=204) # No content
 
         def generate_frames():
             while robot.running:
                 frame = None
-                if isinstance(robot.position_tracker, PreciseMazeLocalizer):
-                    frame = robot.position_tracker.get_camera_frame()
+                # Get frame from the line follower camera
+                if hasattr(robot, 'camera_line_follower'):
+                    frame = robot.camera_line_follower.get_camera_frame()
 
                 if frame is None:
                     # If no frame, send a placeholder or just wait
@@ -689,9 +655,10 @@ def main():
                     continue
                 
                 # Add camera line following debug overlay if available
-                if (hasattr(robot, 'camera_line_result') and 
-                    robot.camera_line_result.get('processed_frame') is not None):
-                    frame = robot.camera_line_result['processed_frame']
+                # In the new structure, detect_line is called inside _follow_path,
+                # but the result isn't stored on the robot object.
+                # For debugging, we might want to call it here or store the result.
+                # For now, we just show the raw frame.
                 
                 _, buffer = cv2.imencode('.jpg', frame)
                 yield (b'--frame\r\n'
@@ -782,10 +749,6 @@ def main():
         
         return grid_img
     
-    # Start the camera capture thread if vision is enabled
-    if FEATURES['VISION_SYSTEM_ENABLED']:
-        print("Vision system enabled. Camera is managed by PreciseMazeLocalizer.")
-
     # Start the robot controller in a separate thread
     robot_thread = threading.Thread(target=robot.run, daemon=True)
     robot_thread.start()

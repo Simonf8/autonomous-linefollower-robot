@@ -7,6 +7,12 @@ import math
 from typing import Tuple, Optional, Dict, List
 from collections import deque
 
+try:
+    from picamera2 import Picamera2
+except ImportError:
+    print("Warning: picamera2 library not found. Camera functionality will be limited.")
+    Picamera2 = None
+
 # This is needed by the mixin
 from pid import PIDController 
 
@@ -448,7 +454,7 @@ class CameraLineFollower:
     Detects black lines and provides steering corrections for line following.
     """
     
-    def __init__(self, debug=False):
+    def __init__(self, camera_index=1, width=320, height=240, fps=30, debug=False):
         self.debug = debug
         
         # Line detection parameters
@@ -506,31 +512,81 @@ class CameraLineFollower:
         # Line detection parameters
         self.min_line_area = 100  # Minimum contour area to be considered a line
         
-    def detect_line(self, frame: np.ndarray) -> Dict:
-        """
-        Detect line in the camera frame and return line following information.
+        # Camera properties
+        self.camera_index = camera_index
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.cap = None
+        self.camera_initialized = False
+        self.frames_processed = 0
+
+    def initialize_camera(self) -> bool:
+        """Initializes the camera using picamera2."""
+        if not Picamera2:
+            print("ERROR: Cannot initialize camera, picamera2 library not available.")
+            return False
+        if self.camera_initialized:
+            return True
         
-        Args:
-            frame: Input camera frame (BGR)
-            
-        Returns:
-            Dictionary containing:
-            - line_detected: bool
-            - line_center_x: int (pixel position of line center)
-            - line_offset: float (-1.0 to 1.0, normalized offset from center)
-            - line_confidence: float (0.0 to 1.0)
-            - corner_detected: bool
-            - corner_direction: str ('left', 'right', None)
-            - corner_confidence: float
-            - turn_angle: float (suggested turn angle in degrees)
-            - processed_frame: frame with debug overlay (if debug=True)
+        try:
+            print("Initializing camera for line following...")
+            self.cap = Picamera2()
+            config = self.cap.create_preview_configuration(
+                main={"size": (self.width, self.height), "format": "RGB888"}
+            )
+            self.cap.configure(config)
+            self.cap.start()
+            self.camera_initialized = True
+            print("Camera initialized successfully.")
+            # Allow some time for sensor to warm up
+            time.sleep(1.0)
+            return True
+        except Exception as e:
+            print(f"CRITICAL: Failed to initialize camera: {e}")
+            self.cap = None
+            self.camera_initialized = False
+            return False
+
+    def release_camera(self):
+        """Releases the camera resource."""
+        if self.cap and self.camera_initialized:
+            try:
+                print("Releasing camera...")
+                self.cap.stop()
+                self.cap.close()
+                print("Camera released.")
+            except Exception as e:
+                print(f"Error releasing camera: {e}")
+        self.cap = None
+        self.camera_initialized = False
+    
+    def get_camera_frame(self) -> Optional[np.ndarray]:
+        """Captures and returns a single frame from the camera."""
+        if not self.camera_initialized or not self.cap:
+            return None
+        
+        try:
+            frame = self.cap.capture_array()
+            return frame
+        except Exception as e:
+            print(f"Error capturing frame: {e}")
+            return None
+
+    def detect_line(self, frame: Optional[np.ndarray] = None) -> Dict:
         """
-        start_time = time.time()
+        Analyzes a camera frame to find the line, its offset, and intersections.
+        If a frame is provided, it's used. Otherwise, captures a new frame.
+        """
+        if frame is None:
+            frame = self.get_camera_frame()
         
         if frame is None:
+            # If still no frame, return an empty result
             return self._empty_result()
-        
-        height, width = frame.shape[:2]
+            
+        height, width, _ = frame.shape
+        self.frames_processed += 1
         
         # Define ROI for line detection (focus on lower portion of frame)
         roi_start_y = int(height * self.ROI_START_RATIO)
@@ -780,14 +836,23 @@ class CameraLineFollower:
 
 class CameraLineFollowingMixin:
     """
-    Mixin class to add camera-based line following capabilities to a robot controller.
-    It assumes the controller has a 'motor_controller' and a 'frame' attribute.
+    A mixin class to add camera-based line following capabilities to a robot controller.
     """
-    def init_camera_line_following(self, debug=True):
-        """Initialize the line follower."""
-        print("Initializing camera-based line follower...")
-        self.camera_line_follower = CameraLineFollower(debug=debug)
-        self.camera_line_pid = self.camera_line_follower.pid
+    def init_camera_line_following(self, camera_index=1, width=320, height=240, fps=30, debug=True):
+        """
+        Initializes the camera line follower system.
+        Note: This creates the object, but the camera must be initialized separately
+        by calling self.camera_line_follower.initialize_camera() in the main run loop.
+        """
+        print("Initializing Camera Line Following Mixin...")
+        self.camera_line_follower = CameraLineFollower(
+            camera_index=camera_index,
+            width=width,
+            height=height,
+            fps=fps,
+            debug=debug
+        )
+        self.line_pid = PIDController(kp=0.4, ki=0.01, kd=0.1, output_limits=(-LINE_FOLLOW_SPEED, LINE_FOLLOW_SPEED))
         self.camera_line_result = {}
 
     def follow_line_with_camera(self, frame, base_speed=LINE_FOLLOW_SPEED):
