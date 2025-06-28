@@ -40,9 +40,18 @@ FEATURES = {
 # ROBOT CONFIGURATION
 # ================================
 CELL_SIZE_M = 0.11
-BASE_SPEED = 90
-TURN_SPEED = 35
-CORNER_SPEED = 40
+BASE_SPEED = 40
+TURN_SPEED = 60
+CORNER_SPEED = 70
+
+# Hardware-specific trims to account for motor differences.
+# Values are multipliers (1.0 = no change, 0.9 = 10% slower).
+MOTOR_TRIMS = {
+    'fl': 1.0,
+    'fr': 1.0,
+    'bl': 1.0,
+    'br': 0.75  # Back-right motor is a bit faster, slow it down by 5%
+}
 
 # Maze and Mission Configuration
 MAZE_GRID = [
@@ -89,7 +98,7 @@ class RobotController(CameraLineFollowingMixin):
         self.running = True
         
         # Initialize motor controller directly
-        self.motor_controller = PiMotorController()
+        self.motor_controller = PiMotorController(trims=MOTOR_TRIMS)
 
         self.object_detector = None
         self.frame = None
@@ -114,6 +123,9 @@ class RobotController(CameraLineFollowingMixin):
 
         self.path = []
         self.current_target_index = 0
+        self.turn_to_execute = None # Stores the next turn ('left' or 'right')
+        self.turn_start_time = 0
+        self.last_turn_complete_time = 0 # Cooldown timer for turns
 
         self.line_pid = PIDController(kp=0.5, ki=0.01, kd=0.1, output_limits=(-100, 100))
         self.state = "idle"
@@ -199,39 +211,70 @@ class RobotController(CameraLineFollowingMixin):
             self.state = "error"
 
     def _follow_path(self):
-        """Follow the planned path using either camera or sensor."""
+        """Follow the planned path using smart, vision-based navigation."""
         if not self.path or self.current_target_index >= len(self.path):
-            print("Mission complete!")
             self.state = "mission_complete"
             self._stop_motors()
             return
 
+        # Update waypoint if reached
         current_cell = self.position_tracker.get_current_cell()
-        target_cell = self.path[self.current_target_index]
-        
-        if current_cell == target_cell:
-            print(f"Reached waypoint {self.current_target_index}: {target_cell}")
+        if current_cell == self.path[self.current_target_index]:
+            print(f"Reached waypoint {self.current_target_index}: {current_cell}")
             self.current_target_index += 1
-            # If we reached the target, we might need a short pause or turn logic here.
-            # For now, we continue to the next waypoint.
             if self.current_target_index >= len(self.path):
-                print("Final waypoint reached. Mission complete!")
                 self.state = "mission_complete"
                 self._stop_motors()
                 return
 
-        if FEATURES['CAMERA_LINE_FOLLOWING_ENABLED']:
-            # Get the latest frame from the visual localizer
-            frame = self.position_tracker.get_camera_frame()
-            if frame is not None:
-                # The mixin method handles detection and motor control
-                self.follow_line_with_camera(frame)
-            else:
-                print("Waiting for camera frame...")
-                self._stop_motors() # Stop if we don't have a frame
-        else:
-            print("No line following method enabled.")
+        # Determine required action to reach the next waypoint
+        current_dir = self.position_tracker.current_direction
+        next_waypoint = self.path[self.current_target_index]
+        required_turn = self._get_required_turn(current_cell, current_dir, next_waypoint)
+
+        # Get the latest camera frame and analyze it for the line and intersections
+        frame = self.position_tracker.get_camera_frame()
+        if frame is None:
             self._stop_motors()
+            return
+
+        vision_result = self.camera_line_follower.detect_line(frame)
+        is_at_intersection = vision_result.get('is_at_intersection', False)
+        
+        # --- DEBUG LOG ---
+        solidity = vision_result.get('solidity', 1.0)
+        print(f"Path Follow: Cell={current_cell}, Target={next_waypoint}, Turn={required_turn}, Intersection={is_at_intersection} (Solidity: {solidity:.2f})")
+
+        # Decide whether to turn or go forward
+        TURN_COOLDOWN_S = 2.0 # Minimum time between turns
+        can_turn = (time.time() - self.last_turn_complete_time) > TURN_COOLDOWN_S
+
+        if required_turn in ['left', 'right'] and is_at_intersection and can_turn:
+            print(f"Intersection detected! Preparing to turn {required_turn}.")
+            self.turn_to_execute = required_turn
+            self.state = 'turning'
+            self.turn_start_time = time.time()
+        else:
+            # Default action: follow the line forward using the vision result
+            fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(vision_result, base_speed=BASE_SPEED)
+            self.motor_controller.send_motor_speeds(fl, fr, bl, br)
+
+    def _execute_intersection_turn(self):
+        """Executes a timed pivot turn at an intersection."""
+        TURN_DURATION_S = 0.8  # Time in seconds for a 90-degree turn. Needs tuning.
+        
+        if time.time() - self.turn_start_time < TURN_DURATION_S:
+            # Still turning
+            self._pivot_corner_turn(self.turn_to_execute, 0)
+        else:
+            # Turn finished
+            print("Turn complete.")
+            self._stop_motors()
+            self.position_tracker.update_direction_after_turn(self.turn_to_execute)
+            self.turn_to_execute = None
+            self.state = 'path_following'
+            self.last_turn_complete_time = time.time() # Start cooldown
+            time.sleep(0.5) # Pause to stabilize before next move
 
     def _run_state_machine(self):
         """Run the robot's state machine."""
@@ -241,6 +284,8 @@ class RobotController(CameraLineFollowingMixin):
             self._plan_path_to_target()
         elif self.state == "path_following":
             self._follow_path()
+        elif self.state == "turning":
+            self._execute_intersection_turn()
         elif self.state == "mission_complete":
             self._stop_motors()
         elif self.state == "error":
@@ -361,6 +406,33 @@ class RobotController(CameraLineFollowingMixin):
         if isinstance(self.position_tracker, PreciseMazeLocalizer):
             self.position_tracker.stop_localization()
         self.motor_controller.stop()
+
+    def _get_required_turn(self, current_pos: Tuple[int, int], current_dir: str, target_pos: Tuple[int, int]) -> str:
+        """Determines the turn required to move from the current pose to the target position."""
+        dx = target_pos[0] - current_pos[0]
+        dy = target_pos[1] - current_pos[1]
+
+        if dx == 0 and dy == 0:
+            return 'stop'
+
+        # Determine target direction
+        target_dir = ''
+        if dx > 0: target_dir = 'E'
+        elif dx < 0: target_dir = 'W'
+        elif dy > 0: target_dir = 'S'
+        elif dy < 0: target_dir = 'N'
+
+        if current_dir == target_dir:
+            return 'forward'
+
+        # Defines clockwise turns
+        turn_logic = {'N': 'E', 'E': 'S', 'S': 'W', 'W': 'N'}
+        if turn_logic[current_dir] == target_dir:
+            return 'right'
+        else:
+            # If it's not forward and not right, it must be left (or reverse)
+            # This simple logic assumes no reverse moves are in the path plan.
+            return 'left'
 
 
 def print_feature_status():

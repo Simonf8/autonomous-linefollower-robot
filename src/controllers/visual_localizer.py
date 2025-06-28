@@ -37,7 +37,7 @@ class PreciseMazeLocalizer:
         
         # Confidence tracking
         self.position_confidence = 1.0
-        self.min_confidence = 0.85
+        self.min_confidence = 0.6
         
         # Status tracking
         self.last_status = {
@@ -406,26 +406,24 @@ class PreciseMazeLocalizer:
     
     def compare_scenes_precisely(self, observed: Dict, expected: Dict) -> float:
         """Compare observed scene with an expected signature with higher precision."""
-        scene_match = 0.0
-        feature_match = 0.0
-        
-        # Scene type match (high weight)
+        scene_score = 0
         if observed.get('scene_type') == expected.get('scene_type'):
-            scene_match = 1.0
-        
-        # Specific feature matches
-        features = ['corner_ahead_left', 'corner_ahead_right', 'wall_ahead', 
-                   'opening_left', 'opening_right']
-        
+            scene_score += 1
+        if observed.get('intersection_type') == expected.get('intersection_type'):
+            scene_score += 1
+
+        feature_score = 0
+        features = ['wall_ahead', 'opening_left', 'opening_right']
         for feature in features:
             if observed.get(feature) == expected.get(feature):
-                feature_match += 1.0
+                feature_score += 1
         
-        # Intersection type match
-        if observed.get('intersection_type') == expected.get('intersection_type'):
-            scene_match += 1.0
-        
-        confidence = (scene_match * 0.6) + (feature_match * 0.4)
+        # Normalize scores (max scene_score=2, max feature_score=3)
+        normalized_scene = scene_score / 2.0
+        normalized_feature = feature_score / 3.0
+
+        # Combine with weighting
+        confidence = (normalized_scene * 0.6) + (normalized_feature * 0.4)
         return confidence
 
     def _get_neighboring_keys(self, current_key: Tuple[int, int, str]) -> List[Tuple[int, int, str]]:
@@ -447,6 +445,16 @@ class PreciseMazeLocalizer:
         
         return list(set(neighbor_keys)) # Use set to remove duplicates
     
+    def update_direction_after_turn(self, turn_direction: str):
+        """Manually update the robot's direction after a pivot turn."""
+        if turn_direction == 'left':
+            turn_map = {'N': 'W', 'W': 'S', 'S': 'E', 'E': 'N'}
+            self.current_direction = turn_map[self.current_direction]
+        elif turn_direction == 'right':
+            turn_map = {'N': 'E', 'E': 'S', 'S': 'W', 'W': 'N'}
+            self.current_direction = turn_map[self.current_direction]
+        print(f"Direction updated after turn. New direction: {self.current_direction}")
+
     def start_localization(self):
         """Start the localization thread."""
         if not self.running:

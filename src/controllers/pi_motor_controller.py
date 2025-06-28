@@ -6,7 +6,7 @@ class PiMotorController:
     Controller for a 4-wheel omni-drive robot using the Raspberry Pi's GPIO.
     Uses the gpiozero library, which is compatible with the Raspberry Pi 5.
     """
-    def __init__(self):
+    def __init__(self, trims: dict = None):
         # GPIO pin numbers (BCM mode) for the motor driver.
         self.motor_pins = {
             'fl': {'p1': 20, 'p2': 21},  # Front Left
@@ -14,6 +14,9 @@ class PiMotorController:
             'bl': {'p1': 17, 'p2': 27},  # Back Left
             'br': {'p1': 23, 'p2': 22},   # Back Right
         }
+        
+        # Apply motor trims if provided
+        self.trims = trims if trims else {'fl': 1.0, 'fr': 1.0, 'bl': 1.0, 'br': 1.0}
         
         self.motors = {}
         self._setup_motors()
@@ -39,13 +42,16 @@ class PiMotorController:
         """Set speed for a single motor."""
         speed = max(-100, min(100, speed))
         
+        # Apply the trim for this specific motor
+        trimmed_speed = speed * self.trims.get(wheel, 1.0)
+        
         # gpiozero uses a speed range of 0 to 1.
-        motor_speed = abs(speed) / 100.0
+        motor_speed = abs(trimmed_speed) / 100.0
         motor = self.motors[wheel]
         
-        if speed > 0:
+        if trimmed_speed > 0:
             motor.forward(speed=motor_speed)
-        elif speed < 0:
+        elif trimmed_speed < 0:
             motor.backward(speed=motor_speed)
         else:
             motor.stop()

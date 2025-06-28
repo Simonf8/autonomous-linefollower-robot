@@ -486,7 +486,7 @@ class CameraLineFollower:
         self.detection_fps = 0
         
         # PID controller for smooth line following
-        self.pid = PIDController(kp=0.4, ki=0.01, kd=0.05, output_limits=(-100, 100))
+        self.pid = PIDController(kp=1.2, ki=0.1, kd=0.8, output_limits=(-100, 100))
         
         # Detection history for smoothing
         self.line_offset_history = deque(maxlen=5)
@@ -496,9 +496,10 @@ class CameraLineFollower:
         self.last_result = None
         
         self.max_line_width = 0.8 # Max line width as a ratio of ROI width
+        self.intersection_solidity_threshold = 0.85 # Lower value means more complex shape
         
         self.canny_high = 150
-        self.binary_threshold = 100
+        self.binary_threshold = 70
         
         # Line detection parameters
         self.min_line_area = 100  # Minimum contour area to be considered a line
@@ -570,8 +571,8 @@ class CameraLineFollower:
         
         # Use a simple global binary threshold. This is more effective for
         # detecting a solid black line on a lighter background.
-        # Pixels darker than 100 will be considered the line.
-        _, binary = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
+        # Pixels darker than 70 will be considered the line.
+        _, binary = cv2.threshold(blurred, 70, 255, cv2.THRESH_BINARY_INV)
 
         # Use morphological closing to connect any small gaps in the line
         kernel = np.ones((5, 5), np.uint8)
@@ -636,13 +637,24 @@ class CameraLineFollower:
         # Higher confidence for larger, more line-like contours
         confidence = min(1.0, area_ratio * 10 + min(aspect_ratio / 3, 1.0) * 0.5)
         
-        return {
+        # --- Intersection Detection ---
+        # An intersection (T or L shape) is less "solid" than a straight line.
+        # We can detect this by comparing the contour area to its convex hull area.
+        hull = cv2.convexHull(largest_contour)
+        hull_area = cv2.contourArea(hull)
+        solidity = float(cv2.contourArea(largest_contour)) / hull_area if hull_area > 0 else 1.0
+        
+        result = {
             'center': (cx, cy),
             'contour': largest_contour,
             'bbox': (x, y, w, h),
             'area': cv2.contourArea(largest_contour),
-            'confidence': confidence
+            'confidence': confidence,
+            'is_at_intersection': solidity < self.intersection_solidity_threshold,
+            'solidity': solidity # For debugging
         }
+        
+        return result
     
     def _calculate_line_following_params(self, line_info: Optional[Dict], 
                                        frame_width: int, roi_start_y: int) -> Dict:
@@ -817,17 +829,15 @@ class CameraLineFollower:
             # If line is lost or confidence is too low, stop.
             return 0, 0, 0, 0
             
-        # The setpoint for the PID is 0 (center of the image).
         # The process variable is the line_offset.
         turn_correction = self.pid.update(line_offset)
 
-        # Apply the correction to the motor speeds for differential steering.
-        left_speed = int(base_speed - turn_correction)
-        right_speed = int(base_speed + turn_correction)
-
-        # For an omni-wheel setup moving forward, all wheels on one side
-        # will have similar speeds.
-        fl, fr, bl, br = left_speed, right_speed, left_speed, right_speed
+        # Apply the correction to the motor speeds for an omni-wheel robot.
+        # This combines forward motion (base_speed) with rotation (turn_correction).
+        fl = int(base_speed - turn_correction)
+        fr = int(base_speed + turn_correction)
+        bl = int(base_speed + turn_correction)
+        br = int(base_speed - turn_correction)
         
         return fl, fr, bl, br
 
