@@ -542,13 +542,10 @@ class CameraLineFollower:
         # Detect line in the ROI
         line_info = self._find_line_in_roi(processed_roi)
         
-        # Calculate line following parameters
+        # Calculate line following parameters and merge results
         result = self._calculate_line_following_params(line_info, width, roi_start_y)
-        
-        # Detect corners if line is found
-        if result['line_detected']:
-            corner_info = self._detect_corner(line_info, processed_roi, width)
-            result.update(corner_info)
+        if line_info:
+            result.update(line_info) # Add solidity, aspect_ratio etc. to the main result
         
         # Add debug visualization if enabled
         if self.debug:
@@ -577,9 +574,13 @@ class CameraLineFollower:
         # Create a mask that isolates the black parts of the image
         mask = cv2.inRange(hsv, lower_black, upper_black)
         
-        # The morphological close was removed as it was smoothing out the corners,
-        # preventing the solidity/aspect ratio detection from working correctly.
-        return mask
+        # A gentle morphological closing is re-introduced. This helps connect
+        # broken parts of the line (e.g., at a T-junction) into a single contour
+        # without overly smoothing the corners, which was the previous issue.
+        kernel = np.ones((3, 3), np.uint8)
+        closed_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        
+        return closed_mask
     
     def _find_line_in_roi(self, binary_roi: np.ndarray) -> Optional[Dict]:
         """
@@ -645,29 +646,14 @@ class CameraLineFollower:
         """Calculate line following parameters."""
         if line_info is None:
             self.line_lost_counter += 1
-            
-            # Try to recover line
-            if self.line_lost_counter <= self.MAX_LINE_LOST_FRAMES:
-                # Use last known good position for brief line loss
-                last_offset = self.center_offset_history[-1] if self.center_offset_history else 0.0
-                return {
-                    'line_detected': False,
-                    'line_center_x': int(frame_width // 2 + last_offset * frame_width // 2),
-                    'line_offset': last_offset,
-                    'line_confidence': 0.0,
-                    'turn_angle': last_offset * 30,  # Convert to angle
-                    'status': 'line_lost_recovering'
-                }
-            else:
-                # Line is truly lost
-                return {
-                    'line_detected': False,
-                    'line_center_x': frame_width // 2,
-                    'line_offset': 0.0,
-                    'line_confidence': 0.0,
-                    'turn_angle': 0.0,
-                    'status': 'line_lost'
-                }
+            return {
+                'line_detected': False,
+                'line_center_x': frame_width // 2,
+                'line_offset': 0.0,
+                'line_confidence': 0.0,
+                'is_at_intersection': False,
+                'status': 'line_lost'
+            }
         
         # Line found - reset lost counter
         self.line_lost_counter = 0
@@ -695,93 +681,54 @@ class CameraLineFollower:
             'line_center_x': line_center_x,
             'line_offset': smoothed_offset,
             'line_confidence': line_info['confidence'],
-            'turn_angle': turn_angle,
             'status': 'line_following'
-        }
-    
-    def _detect_corner(self, line_info: Dict, binary_roi: np.ndarray, frame_width: int) -> Dict:
-        """Detect if the robot is approaching a corner."""
-        line_offset = abs((line_info['center'][0] - frame_width // 2) / (frame_width // 2))
-        
-        corner_detected = False
-        corner_direction = None
-        corner_confidence = 0.0
-        
-        if line_offset > self.CORNER_THRESHOLD:
-            corner_detected = True
-            corner_direction = 'left' if line_info['center'][0] < frame_width // 2 else 'right'
-            
-            # Calculate corner confidence based on line offset
-            if line_offset > self.SHARP_CORNER_THRESHOLD:
-                corner_confidence = 1.0  # Sharp corner
-            else:
-                corner_confidence = (line_offset - self.CORNER_THRESHOLD) / (self.SHARP_CORNER_THRESHOLD - self.CORNER_THRESHOLD)
-        
-        return {
-            'corner_detected': corner_detected,
-            'corner_direction': corner_direction,
-            'corner_confidence': corner_confidence
         }
     
     def _draw_debug_overlay(self, frame: np.ndarray, result: Dict, 
                           roi_start_y: int, binary_roi: np.ndarray) -> np.ndarray:
-        """Draw debug overlay on the frame."""
-        debug_frame = frame.copy()
+        """
+        Draw debug overlay on the frame.
+        MODIFIED: Now shows the binary ROI view for better debugging of line detection.
+        """
         height, width = frame.shape[:2]
+
+        # Create a BGR version of the binary ROI to draw colored lines on
+        binary_roi_bgr = cv2.cvtColor(binary_roi, cv2.COLOR_GRAY2BGR)
         
-        # Draw ROI boundary
-        cv2.rectangle(debug_frame, (0, roi_start_y), (width, height), (255, 255, 0), 2)
-        cv2.putText(debug_frame, "LINE DETECTION ROI", (10, roi_start_y - 10), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        # Create a full-size black frame
+        debug_frame = np.zeros((height, width, 3), dtype=np.uint8)
         
-        # Draw frame center line
+        # Place the binary ROI onto the full-size frame in the correct position
+        debug_frame[roi_start_y:height, :] = binary_roi_bgr
+
+        # Draw frame center line for reference
         center_x = width // 2
-        cv2.line(debug_frame, (center_x, 0), (center_x, height), (0, 255, 255), 1)
-        
-        if result['line_detected']:
-            # Draw detected line center
-            line_x = result['line_center_x']
-            cv2.line(debug_frame, (line_x, roi_start_y), (line_x, height), (0, 255, 0), 3)
-            cv2.circle(debug_frame, (line_x, roi_start_y + 50), 8, (0, 255, 0), -1)
-            
-            # Draw offset arrow
-            arrow_y = roi_start_y + 30
-            cv2.arrowedLine(debug_frame, (center_x, arrow_y), (line_x, arrow_y), (0, 0, 255), 3)
-            
-            # Corner detection overlay
-            if result.get('corner_detected', False):
-                corner_color = (0, 0, 255) if result['corner_confidence'] > 0.7 else (0, 165, 255)
-                cv2.putText(debug_frame, f"CORNER {result['corner_direction'].upper()}", 
-                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, corner_color, 2)
-        else:
-            # Line lost
-            cv2.putText(debug_frame, "LINE LOST", (10, 40), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-        
+        cv2.line(debug_frame, (center_x, roi_start_y), (center_x, height), (0, 0, 255), 1) # Red line
+
+        if result.get('line_detected') and result.get('contour') is not None:
+            # Draw the detected contour in blue
+            contour = result['contour']
+            cv2.drawContours(debug_frame, [contour], -1, (255, 0, 0), 2, offset=(0, roi_start_y))
+
+            # Draw detected line center in green
+            if result.get('center'):
+                line_x, line_y = result['center']
+                cv2.circle(debug_frame, (line_x, line_y + roi_start_y), 8, (0, 255, 0), -1)
+
         # Display detection info
-        try:
-            turn_angle_str = f"Turn Angle: {result.get('turn_angle', 0.0):.2f}"
-        except (ValueError, TypeError):
-            turn_angle_str = "Turn Angle: ERR"
-            
+        solidity = result.get('solidity', -1.0)
+        aspect_ratio = result.get('aspect_ratio', -1.0)
         stats_text = [
             f"Offset: {result.get('line_offset', 0.0):.3f}",
-            f"Confidence: {result.get('line_confidence', 0.0):.3f}",
-            turn_angle_str,
-            f"FPS: {self.detection_fps:.1f}",
+            f"S: {solidity:.2f}",
+            f"AR: {aspect_ratio:.2f}",
+            f"Intersection: {result.get('is_at_intersection', False)}",
             f"Status: {result.get('status', 'unknown')}"
         ]
 
         for i, text in enumerate(stats_text):
-            cv2.putText(debug_frame, text, (10, height - 120 + i * 25), 
+            cv2.putText(debug_frame, text, (10, height - 120 + i * 20),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # Show binary ROI in corner
-        roi_display = cv2.resize(binary_roi, (200, 100))
-        roi_display_bgr = cv2.cvtColor(roi_display, cv2.COLOR_GRAY2BGR)
-        debug_frame[10:110, width-210:width-10] = roi_display_bgr
-        cv2.putText(debug_frame, "BINARY ROI", (width-200, 130), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         
         return debug_frame
     

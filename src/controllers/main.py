@@ -19,6 +19,7 @@ from pid import PIDController
 from camera_line_follower import CameraLineFollower, CameraLineFollowingMixin
 from visual_localizer import PreciseMazeLocalizer
 from pi_motor_controller import PiMotorController
+from audio_feedback import AudioFeedback
 
 # ================================
 # FEATURE CONFIGURATION
@@ -50,7 +51,7 @@ MOTOR_TRIMS = {
     'fl': 1.0,
     'fr': 1.0,
     'bl': 1.0,
-    'br': 0.75  # Back-right motor is a bit faster, slow it down by 5%
+    'br': 0.75  # Back-right motor is a bit faster
 }
 
 # Maze and Mission Configuration
@@ -99,6 +100,9 @@ class RobotController(CameraLineFollowingMixin):
         
         # Initialize motor controller directly
         self.motor_controller = PiMotorController(trims=MOTOR_TRIMS)
+
+        # Initialize audio feedback system
+        self.audio_feedback = AudioFeedback()
 
         self.object_detector = None
         self.frame = None
@@ -170,6 +174,7 @@ class RobotController(CameraLineFollowingMixin):
             return
 
         print("Starting mission...")
+        self.audio_feedback.speak("Starting mission")
         # Start localizer only when mission begins
         if isinstance(self.position_tracker, PreciseMazeLocalizer) and not self.position_tracker.running:
             self.position_tracker.start_localization()
@@ -205,9 +210,12 @@ class RobotController(CameraLineFollowingMixin):
             self.path = path_nodes
             self.current_target_index = 0
             self.state = "path_following"
-            print(f"Path planned: {len(self.path)} waypoints")
+            path_message = f"Path planned with {len(self.path)} waypoints"
+            print(path_message)
+            self.audio_feedback.speak(path_message)
         else:
             print(f"Failed to plan path from {current_cell} to {END_CELL}")
+            self.audio_feedback.speak("Path planning failed")
             self.state = "error"
 
     def _follow_path(self):
@@ -251,8 +259,10 @@ class RobotController(CameraLineFollowingMixin):
         can_turn = (time.time() - self.last_turn_complete_time) > TURN_COOLDOWN_S
 
         if required_turn in ['left', 'right'] and is_at_intersection and can_turn:
-            print(f"Intersection detected! Stopping to prepare for {required_turn} turn.")
-            self._stop_motors() # Stop immediately
+            turn_message = f"Intersection detected. Turning {required_turn}."
+            print(turn_message)
+            self.audio_feedback.speak(turn_message)
+            # Don't stop, transition directly into the turn
             self.turn_to_execute = required_turn
             self.state = 'turning'
             self.turn_start_time = time.time()
@@ -261,29 +271,56 @@ class RobotController(CameraLineFollowingMixin):
             fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(vision_result, base_speed=BASE_SPEED)
             self.motor_controller.send_motor_speeds(fl, fr, bl, br)
 
-    def _execute_intersection_turn(self):
-        """Executes a timed pivot turn at an intersection after a brief pause."""
-        PRE_TURN_PAUSE_S = 0.2 # Brief pause to stabilize before turning
-        TURN_DURATION_S = 0.8  # Time in seconds for a 90-degree turn. Needs tuning.
-        
-        if time.time() - self.turn_start_time < PRE_TURN_PAUSE_S:
-            # Still in the pre-turn pause phase. Motors are already stopped.
+    def _execute_arcing_turn(self):
+        """
+        Executes a smart, arcing turn, continuing until the line is re-centered and straight.
+        """
+        # Define turn parameters
+        TURN_TIMEOUT_S = 2.5          # Max duration for a turn to prevent getting stuck
+        MIN_TURN_DURATION_S = 0.5     # Increased slightly to ensure it commits to the turn
+        LINE_CENTERED_THRESHOLD = 0.15 # How close to center the line must be
+        STRAIGHT_LINE_ASPECT_RATIO_THRESHOLD = 0.5 # A re-acquired line should be tall and thin
+
+        # Get the latest camera frame and analyze it for the line
+        frame = self.position_tracker.get_camera_frame()
+        if frame is None:
+            self._stop_motors()
             return
-            
-        turn_elapsed = (time.time() - self.turn_start_time) - PRE_TURN_PAUSE_S
+
+        vision_result = self.camera_line_follower.detect_line(frame)
+        line_offset = vision_result.get('line_offset', 1.0) # Default to a large offset
+        aspect_ratio = vision_result.get('aspect_ratio', 1.0) # Default to a wide shape
+
+        is_line_centered = abs(line_offset) < LINE_CENTERED_THRESHOLD
+        is_line_straight = aspect_ratio < STRAIGHT_LINE_ASPECT_RATIO_THRESHOLD
         
-        if turn_elapsed < TURN_DURATION_S:
-            # Still turning
-            self._pivot_corner_turn(self.turn_to_execute, 0)
-        else:
-            # Turn finished
-            print("Turn complete.")
+        time_in_turn = time.time() - self.turn_start_time
+        
+        # --- DEBUG LOG ---
+        print(f"Turning: Offset={line_offset:.2f}, AR={aspect_ratio:.2f}, Centered={is_line_centered}, Straight={is_line_straight}, Time={time_in_turn:.2f}s")
+        
+        # Check for completion conditions
+        # The robot must have been turning for a minimum duration AND see a centered, straight line.
+        turn_complete = is_line_centered and is_line_straight and (time_in_turn > MIN_TURN_DURATION_S)
+        turn_timed_out = time_in_turn > TURN_TIMEOUT_S
+
+        if turn_complete or turn_timed_out:
+            if turn_complete:
+                print("Turn complete: Line re-acquired and is straight.")
+                self.audio_feedback.speak("Turn complete.")
+            else: # Timed out
+                print(f"WARN: Turn timed out after {TURN_TIMEOUT_S}s. Proceeding anyway.")
+                self.audio_feedback.speak("Turn timed out.")
+                
             self._stop_motors()
             self.position_tracker.update_direction_after_turn(self.turn_to_execute)
             self.turn_to_execute = None
             self.state = 'path_following'
             self.last_turn_complete_time = time.time() # Start cooldown
-            time.sleep(0.5) # Pause to stabilize before next move
+            time.sleep(0.25) # Short pause to stabilize
+        else:
+            # Condition not met, continue turning
+            self._perform_arcing_turn(self.turn_to_execute)
 
     def _run_state_machine(self):
         """Run the robot's state machine."""
@@ -294,10 +331,12 @@ class RobotController(CameraLineFollowingMixin):
         elif self.state == "path_following":
             self._follow_path()
         elif self.state == "turning":
-            self._execute_intersection_turn()
+            self._execute_arcing_turn()
         elif self.state == "mission_complete":
+            self.audio_feedback.speak("Mission complete.")
             self._stop_motors()
         elif self.state == "error":
+            self.audio_feedback.speak("Error state reached.")
             self._stop_motors()
             self.running = False
             
@@ -442,6 +481,32 @@ class RobotController(CameraLineFollowingMixin):
             # If it's not forward and not right, it must be left (or reverse)
             # This simple logic assumes no reverse moves are in the path plan.
             return 'left'
+
+    def _perform_arcing_turn(self, direction: str):
+        """
+        Commands motor speeds for a smooth, car-like arcing turn.
+        This uses omni-wheel kinematics for combined forward and rotational motion.
+        """
+        vx = BASE_SPEED * 0.8  # Forward speed during the turn
+        omega = TURN_SPEED     # Rotational speed for the turn
+
+        # Based on the kinematic model in camera_line_follower, a left
+        # turn requires a negative omega to make the right wheels spin faster.
+        if direction == 'left':
+            turn_omega = -omega
+        else: # 'right'
+            turn_omega = omega
+
+        # vy (strafing) is zero for a pure arcing turn.
+        vy = 0
+        
+        # Kinematic model from camera_line_follower.py
+        fl = int(vx - vy + turn_omega)
+        fr = int(vx + vy - turn_omega)
+        bl = int(vx + vy + turn_omega)
+        br = int(vx - vy - turn_omega)
+
+        self.motor_controller.send_motor_speeds(fl, fr, bl, br)
 
 
 def print_feature_status():
