@@ -73,8 +73,19 @@ MAZE_GRID = [
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0]  # Row 14
 ]
 START_CELL = (0, 12) # Start position (col, row)
-END_CELL = (20, 12)   # End position (col, row)
-START_DIRECTION = 'R' # Use 'F'(North), 'B'(South), 'L'(West), 'R'(East)
+END_CELL = (20, 8)   # End position (col, row)
+
+# START_DIRECTION must be a cardinal direction: 'N', 'S', 'E', or 'W'.
+# This tells the robot its initial orientation on the map grid.
+#  - 'N': Faces towards smaller row numbers (Up on the map)
+#  - 'S': Faces towards larger row numbers (Down on the map)
+#  - 'E': Faces towards larger column numbers (Right on the map)
+#  - 'W': Faces towards smaller column numbers (Left on the map)
+START_DIRECTION = 'E'
+
+# Time in seconds it takes for the robot to cross one 12cm cell at BASE_SPEED.
+# This is used for dead reckoning in long, straight corridors.
+CELL_CROSSING_TIME_S = 0.8 
 
 # Corner turning configuration
 CORNER_TURN_MODES = {
@@ -119,7 +130,7 @@ class RobotController(CameraLineFollowingMixin):
             camera_width=CAMERA_WIDTH,
             camera_height=CAMERA_HEIGHT,
             camera_fps=CAMERA_FPS,
-            start_direction='N' # Default, will be updated from main
+            start_direction=START_DIRECTION # Use the configured start direction
         )
 
         # Pathfinder setup
@@ -131,6 +142,7 @@ class RobotController(CameraLineFollowingMixin):
         self.turn_start_time = 0
         self.last_turn_complete_time = 0 # Cooldown timer for turns
         self.is_straight_corridor = False
+        self.last_cell_update_time = 0
 
         self.line_pid = PIDController(kp=0.5, ki=0.01, kd=0.1, output_limits=(-100, 100))
         self.state = "idle"
@@ -176,6 +188,10 @@ class RobotController(CameraLineFollowingMixin):
 
         print("Starting mission...")
         self.audio_feedback.speak("Starting mission")
+        
+        # Reset timers and state for the new mission
+        self.last_cell_update_time = time.time()
+
         # Start localizer only when mission begins
         if isinstance(self.position_tracker, PreciseMazeLocalizer) and not self.position_tracker.running:
             self.position_tracker.start_localization()
@@ -212,17 +228,20 @@ class RobotController(CameraLineFollowingMixin):
             self.current_target_index = 0
             self.state = "path_following"
             
-            # New: Check if the path is a straight line for simpler following
+            # Check if the path is a straight line to determine the following strategy.
             self.is_straight_corridor = self._is_path_straight(self.path)
+            
+            # Set the appropriate search mode on the localizer
+            if self.is_straight_corridor:
+                self.position_tracker.set_search_mode('corridor')
+                self.audio_feedback.speak("Following straight corridor.")
+            else:
+                self.position_tracker.set_search_mode('normal')
 
             path_message = f"Path planned with {len(self.path)} waypoints."
             print(path_message)
             self.audio_feedback.speak(path_message)
             
-            if self.is_straight_corridor:
-                print("Engaging simple corridor following mode.")
-                self.audio_feedback.speak("Following straight corridor.")
-
         else:
             print(f"Failed to plan path from {current_cell} to {END_CELL}")
             self.audio_feedback.speak("Path planning failed")
@@ -237,16 +256,24 @@ class RobotController(CameraLineFollowingMixin):
 
         current_cell = self.position_tracker.get_current_cell()
 
-        # Check for mission completion first
+        # The primary goal is to reach the final destination.
         if current_cell == self.path[-1]:
             print(f"Reached final destination: {current_cell}")
             self.state = "mission_complete"
             self._stop_motors()
             return
             
-        # If in a straight corridor, use simplified line following logic
+        # If the entire path is a straight line, use simplified logic that ignores turns.
         if self.is_straight_corridor:
-            print(f"Corridor Following: At {current_cell}, moving towards {self.path[-1]}")
+            # Use dead reckoning to prevent getting stuck visually.
+            if time.time() - self.last_cell_update_time > CELL_CROSSING_TIME_S:
+                self.position_tracker.nudge_position_forward()
+                self.last_cell_update_time = time.time()
+            
+            current_cell_for_log = self.position_tracker.get_current_cell()
+            print(f"Corridor Following: At {current_cell_for_log}, moving towards {self.path[-1]}")
+            
+            # Simple line following, no turning logic needed.
             frame = self.position_tracker.get_camera_frame()
             if frame is None:
                 self._stop_motors()
@@ -254,29 +281,28 @@ class RobotController(CameraLineFollowingMixin):
             vision_result = self.camera_line_follower.detect_line(frame)
             fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(vision_result, base_speed=BASE_SPEED)
             self.motor_controller.send_motor_speeds(fl, fr, bl, br)
-            return # Bypass the complex waypoint and turning logic below
+            return # Bypass the complex logic below.
 
-        # --- Original Waypoint and Turning Logic for complex paths ---
-        # Update waypoint if reached
+        # --- This logic is for complex paths WITH turns ---
         if current_cell == self.path[self.current_target_index]:
             print(f"Reached waypoint {self.current_target_index}: {current_cell}")
             self.current_target_index += 1
+            self.last_cell_update_time = time.time()
             if self.current_target_index >= len(self.path):
                 self.state = "mission_complete"
                 self._stop_motors()
                 return
 
-        # Determine required action to reach the next waypoint
+        # Determine required action for the next waypoint
         current_dir = self.position_tracker.current_direction
         next_waypoint = self.path[self.current_target_index]
         required_turn = self._get_required_turn(current_cell, current_dir, next_waypoint)
-
-        # Get the latest camera frame and analyze it for the line and intersections
+        
+        # Get vision data
         frame = self.position_tracker.get_camera_frame()
         if frame is None:
             self._stop_motors()
             return
-
         vision_result = self.camera_line_follower.detect_line(frame)
         is_at_intersection = vision_result.get('is_at_intersection', False)
         
@@ -566,27 +592,17 @@ def main():
     """Main entry point for the robot controller."""
     print_feature_status()
     
-    # --- Direction Mapping ---
-    # Translate intuitive directions to the system's cardinal directions
-    direction_map = {
-        'F': 'N',  # Forward -> North
-        'B': 'S',  # Backward -> South
-        'L': 'W',  # Left -> West
-        'R': 'E'   # Right -> East
-    }
-    # Also allow cardinal directions to be used directly
-    direction_map.update({ 'N': 'N', 'S': 'S', 'E': 'E', 'W': 'W' })
-
-    # Get the system-compatible direction
-    try:
-        system_start_direction = direction_map[START_DIRECTION.upper()]
-    except KeyError:
-        print(f"ERROR: Invalid START_DIRECTION '{START_DIRECTION}'. Using 'N' as default.")
+    # --- Direction Validation ---
+    # Ensure start direction is a valid cardinal direction.
+    valid_directions = ['N', 'S', 'E', 'W']
+    system_start_direction = START_DIRECTION.upper()
+    
+    if system_start_direction not in valid_directions:
+        print(f"ERROR: Invalid START_DIRECTION '{START_DIRECTION}'. Must be one of {valid_directions}.")
+        print("Defaulting to 'N'.")
         system_start_direction = 'N'
     
     robot = RobotController()
-    # Manually set the start direction for the localizer
-    robot.position_tracker.current_direction = system_start_direction
     
     app = Flask(__name__, template_folder='../../templates', static_folder='../../static')
     

@@ -21,11 +21,11 @@ class PreciseMazeLocalizer:
         self.camera_fps = camera_fps
         self.latest_frame = None
         
-        # Movement detection
+        # Movement detection - adjusted for line following
         self.prev_frame = None
-        self.movement_threshold = 50
+        self.movement_threshold = 30  # Lower threshold
         self.stationary_frames = 0
-        self.max_stationary_frames = 10
+        self.max_stationary_frames = 30  # Allow more stationary frames
         self.blur_threshold = 100.0 # New: tunable threshold for blur detection
         
         # Corner distance detection
@@ -38,6 +38,7 @@ class PreciseMazeLocalizer:
         # Confidence tracking
         self.position_confidence = 1.0
         self.min_confidence = 0.6
+        self.search_mode = 'normal' # 'normal' or 'corridor'
         
         # New: Stability tracking for position
         self.position_candidate = None
@@ -198,7 +199,7 @@ class PreciseMazeLocalizer:
         return laplacian_var < self.blur_threshold
 
     def detect_scene_with_precision(self) -> Optional[Dict]:
-        """Precisely detect current scene with movement and distance awareness"""
+        """Precisely detect current scene using line detection instead of 3D corners"""
         if not self.cap:
             return {
                 'status': 'error',
@@ -229,9 +230,10 @@ class PreciseMazeLocalizer:
                 'message': 'Robot stationary - no position update'
             }
         
+        # Convert to grayscale for line detection
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # New: Blur detection
+        # Check for blur
         if self.detect_blur(gray):
             return {
                 'status': 'error',
@@ -240,172 +242,136 @@ class PreciseMazeLocalizer:
                 'message': 'Frame is too blurry for localization'
             }
 
-        # Use FAST for faster corner detection
-        fast = cv2.FastFeatureDetector_create(threshold=25, nonmaxSuppression=True)
-        keypoints = fast.detect(gray, None)
-        
-        # Get corner coordinates from keypoints
-        corner_points = [(int(kp.pt[0]), int(kp.pt[1])) for kp in keypoints]
-
-        # Analyze corner distances
-        distance_analysis = self.analyze_corner_distance(corner_points, frame.shape[0])
-        
-        # Determine scene type based on corner patterns
-        scene = self.classify_scene_precisely(corner_points, frame.shape, distance_analysis)
+        # Detect lines instead of corners
+        scene = self.classify_scene_by_lines(gray)
         scene['is_moving'] = is_moving
-        
-        # Ensure the scene dictionary always has a 'status' key
         scene['status'] = 'ok'
-        
-        # Draw keypoints for debugging if needed
-        # frame_with_keypoints = cv2.drawKeypoints(frame, keypoints, None, color=(0,255,0))
-        # with self.frame_lock:
-        #     self.latest_frame = frame_with_keypoints
         
         return scene
     
-    def analyze_corner_distance(self, corner_points: List[Tuple[int, int]], frame_height: int) -> Dict:
-        """Analyze if corners are close (immediate) or far (ahead)"""
-        if not corner_points:
-            return {'close_corners': 0, 'far_corners': 0, 'corner_distance': 'none'}
+    def classify_scene_by_lines(self, gray_frame: np.ndarray) -> Dict:
+        """Classify scene based on line detection for 2D line following"""
+        height, width = gray_frame.shape
         
-        close_threshold = frame_height * self.close_corner_threshold
-        far_threshold = frame_height * self.far_corner_threshold
+        # Focus on the bottom half of the image where lines are most visible
+        roi_start = height // 2
+        roi = gray_frame[roi_start:, :]
         
-        close_corners = sum(1 for _, y in corner_points if y > close_threshold)
-        far_corners = sum(1 for _, y in corner_points if y < far_threshold)
+        # Threshold to detect black lines on white background
+        # THRESH_BINARY_INV makes black lines appear as white in binary image
+        _, binary = cv2.threshold(roi, 100, 255, cv2.THRESH_BINARY_INV)
         
-        if close_corners > far_corners:
-            distance = 'close'
-        elif far_corners > close_corners:
-            distance = 'far'
-        else:
-            distance = 'medium'
-            
-        return {
-            'close_corners': close_corners,
-            'far_corners': far_corners,
-            'corner_distance': distance
-        }
-    
-    def classify_scene_precisely(self, corner_points: List[Tuple[int, int]], 
-                                frame_shape: Tuple[int, int], 
-                                distance_analysis: Dict) -> Dict:
-        """Precisely classify the scene based on corner distribution"""
-        height, width = frame_shape[:2]
+        # Clean up the binary image
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
         
+        # Find contours (lines)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return {
+                'scene_type': 'corridor',
+                'wall_ahead': False,
+                'opening_left': False,
+                'opening_right': False,
+                'intersection_type': 'none',
+                'confidence': 0.3
+            }
+        
+        # Analyze the largest contour (main line)
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        # Get bounding rectangle
+        x, y, w, h = cv2.boundingRect(largest_contour)
+        
+        # Calculate line properties
+        roi_height, roi_width = roi.shape
+        line_width_ratio = w / roi_width
+        line_height_ratio = h / roi_height
+        
+        # Determine scene type based on line shape
         scene = {
-            'scene_type': 'unknown',
+            'scene_type': 'corridor',
             'corner_ahead_left': False,
             'corner_ahead_right': False,
             'wall_ahead': False,
             'opening_left': False,
             'opening_right': False,
             'intersection_type': 'none',
-            'confidence': 0.0
+            'confidence': 0.8
         }
         
-        if not corner_points:
-            scene['scene_type'] = 'corridor'
-            scene['confidence'] = 0.8
-            return scene
-        
-        # Divide frame into precise regions
-        left_third = width // 3
-        right_third = 2 * width // 3
-        top_half = height // 2
-        
-        # Count corners in each region
-        corners_left = [(x, y) for x, y in corner_points if x < left_third]
-        corners_right = [(x, y) for x, y in corner_points if x > right_third]
-        corners_center = [(x, y) for x, y in corner_points if left_third <= x <= right_third]
-        corners_top = [(x, y) for x, y in corner_points if y < top_half]
-        
-        # Adjust confidence based on corner distance
-        if distance_analysis['corner_distance'] == 'far':
-            scene['confidence'] = 0.4
-        else:
-            scene['confidence'] = 0.9
-        
-        # Classification logic
-        if len(corners_center) > 4 and len(corners_top) > 3:
-            scene['scene_type'] = 'dead_end'
-            scene['wall_ahead'] = True
-        elif len(corner_points) < 3:
+        # If line is very wide, it might be an intersection
+        if line_width_ratio > 0.7:
             scene['scene_type'] = 'intersection'
             scene['intersection_type'] = '4way'
-        elif len(corners_left) > 2 and len(corners_center) > 2:
-            scene['scene_type'] = 'L_turn'
-            scene['corner_ahead_left'] = True
-            scene['opening_right'] = True
-        elif len(corners_right) > 2 and len(corners_center) > 2:
-            scene['scene_type'] = 'L_turn'
-            scene['corner_ahead_right'] = True
             scene['opening_left'] = True
-        elif len(corners_center) > 2 and (len(corners_left) > 1 or len(corners_right) > 1):
+            scene['opening_right'] = True
+        # If line is moderately wide, might be T-junction
+        elif line_width_ratio > 0.5:
             scene['scene_type'] = 'T_junction'
             scene['intersection_type'] = 'T'
-            scene['opening_left'] = len(corners_left) < 2
-            scene['opening_right'] = len(corners_right) < 2
-        else:
-            scene['scene_type'] = 'corridor'
-            
+            # Determine which side has opening based on line position
+            line_center_x = x + w // 2
+            if line_center_x < roi_width // 3:
+                scene['opening_right'] = True
+            elif line_center_x > 2 * roi_width // 3:
+                scene['opening_left'] = True
+            else:
+                scene['opening_left'] = True  # Default assumption
+        # If line is very short in height, might be approaching dead end
+        elif line_height_ratio < 0.3:
+            scene['scene_type'] = 'dead_end'
+            scene['wall_ahead'] = True
+        
         return scene
     
     def localize_with_confidence(self) -> Dict:
-        """Localize position with confidence tracking"""
+        """Simplified localization for line following - focus on movement detection"""
         observed_scene = self.detect_scene_with_precision()
-        if observed_scene['status'] in ['error', 'stationary']:
+        if observed_scene['status'] in ['error']:
             self.last_status.update({
                 'message': observed_scene['message'],
                 'status': 'tracking_lost'
             })
             return self.last_status
 
+        # If robot is stationary, don't change position but still report status
+        if observed_scene['status'] == 'stationary':
+            self.last_status.update({
+                'message': 'Robot stationary - maintaining position',
+                'status': 'stationary',
+                'scene_type': observed_scene.get('scene_type', 'unknown'),
+                'is_moving': False
+            })
+            return self.last_status
+
+        # For line following, we'll be less strict about exact scene matching
+        # Just use the detected scene type for navigation decisions
         current_key = (self.current_pos[0], self.current_pos[1], self.current_direction)
-        expected_scene = self.corner_signatures.get(current_key)
         
-        best_match_key = current_key
-        match_confidence = 0.0
+        # Simple confidence based on scene detection quality
+        if observed_scene.get('scene_type') == 'corridor':
+            match_confidence = 0.8
+        elif observed_scene.get('scene_type') in ['T_junction', 'intersection']:
+            match_confidence = 0.9
+        else:
+            match_confidence = 0.6
 
-        if expected_scene:
-            match_confidence = self.compare_scenes_precisely(observed_scene, expected_scene)
-        
-        if match_confidence < self.min_confidence:
-            # Confidence is low, try to re-localize by checking neighbors
-            neighboring_keys = self._get_neighboring_keys(current_key)
-            neighbor_matches = []
-            for key in neighboring_keys:
-                neighbor_signature = self.corner_signatures.get(key)
-                if neighbor_signature:
-                    confidence = self.compare_scenes_precisely(observed_scene, neighbor_signature)
-                    neighbor_matches.append((key, confidence))
-
-            if neighbor_matches:
-                # Find the best match among neighbors
-                best_neighbor_match = max(neighbor_matches, key=lambda x: x[1])
-                # If the best neighbor is a better match than our current low-confidence position
-                if best_neighbor_match[1] > match_confidence:
-                    best_match_key = best_neighbor_match[0]
-                    match_confidence = best_neighbor_match[1]
-
-        # Update position if we found a good match
-        if match_confidence >= self.min_confidence:
-            self.current_pos = (best_match_key[0], best_match_key[1])
-            self.current_direction = best_match_key[2]
+        # Always maintain reasonable confidence for line following
+        if match_confidence >= 0.5:  # Lower threshold for line following
             self.position_confidence = match_confidence
         else:
-            # If confidence is still low, don't update position, just decay confidence
-            self.position_confidence *= 0.9
+            self.position_confidence *= 0.95  # Slow decay
 
         self.last_status.update({
-            'status': 'tracking' if match_confidence >= self.min_confidence else 'tracking_lost',
+            'status': 'tracking' if match_confidence >= 0.5 else 'tracking_lost',
             'position': self.current_pos,
             'direction': self.current_direction,
             'confidence': self.position_confidence,
             'scene_type': observed_scene.get('scene_type', 'unknown'),
             'is_moving': observed_scene.get('is_moving', False),
-            'message': f"Match confidence: {match_confidence:.2f}"
+            'message': f"Line following mode - confidence: {match_confidence:.2f}"
         })
         
         return self.last_status
@@ -475,7 +441,8 @@ class PreciseMazeLocalizer:
         if self.localization_thread:
             self.localization_thread.join()
         if self.cap:
-            self.cap.release()
+            self.cap.stop()
+            self.cap.close()
     
     def _localization_loop(self):
         """The main loop for the localization thread."""
@@ -545,6 +512,15 @@ class PreciseMazeLocalizer:
         with self.frame_lock:
             if self.latest_frame is not None:
                 return self.latest_frame.copy()
+        
+        # If no frame is available from the localization thread, capture one directly
+        if self.cap:
+            try:
+                frame = self.cap.capture_array()
+                return frame
+            except Exception as e:
+                print(f"Failed to capture camera frame: {e}")
+        
         return None
 
     def get_current_cell(self):
@@ -560,3 +536,56 @@ class PreciseMazeLocalizer:
         heading_rad = math.radians(heading_deg)
 
         return (x, y, heading_rad)
+
+    def nudge_position_forward(self):
+        """Manually advance the current position by one cell based on the current direction."""
+        
+        dx, dy = 0, 0
+        if self.current_direction == 'N': dy = -1
+        elif self.current_direction == 'S': dy = 1
+        elif self.current_direction == 'E': dx = 1
+        elif self.current_direction == 'W': dx = -1
+
+        new_pos = (self.current_pos[0] + dx, self.current_pos[1] + dy)
+        
+        # Boundary check to ensure we don't go off the map
+        if (0 <= new_pos[1] < len(self.maze) and 
+            0 <= new_pos[0] < len(self.maze[0]) and
+            self.maze[new_pos[1]][new_pos[0]] == 0):
+            
+            self.current_pos = new_pos
+            
+            # Reset the stability filter to prevent it from getting stuck on the old cell
+            self.position_candidate = self.current_pos
+            self.candidate_stability_counter = 0
+
+            print(f"Dead reckoning nudge: Position updated to {self.current_pos}")
+            self.last_status['message'] = "Position nudged by dead reckoning"
+        else:
+            print(f"WARN: Dead reckoning nudge to {new_pos} ignored; out of bounds or wall.")
+
+    def set_search_mode(self, mode: str):
+        """Set the localization search mode to 'normal' or 'corridor'."""
+        if mode in ['normal', 'corridor']:
+            if self.search_mode != mode:
+                print(f"Localizer search mode set to: {mode}")
+                self.search_mode = mode
+        else:
+            print(f"WARN: Invalid search mode '{mode}' requested.")
+            
+    def _get_key_ahead(self, current_key: Tuple[int, int, str]) -> Optional[Tuple[int, int, str]]:
+        """Calculates the grid key for the cell directly in front of the current key."""
+        x, y, direction = current_key
+        dx, dy = 0, 0
+        if direction == 'N': dy = -1
+        elif direction == 'S': dy = 1
+        elif direction == 'E': dx = 1
+        elif direction == 'W': dx = -1
+        
+        next_pos = (x + dx, y + dy)
+
+        # Check bounds
+        if (0 <= next_pos[1] < len(self.maze) and 
+            0 <= next_pos[0] < len(self.maze[0])):
+            return (next_pos[0], next_pos[1], direction)
+        return None
