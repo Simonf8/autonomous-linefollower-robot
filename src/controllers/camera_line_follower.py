@@ -7,6 +7,12 @@ import math
 from typing import Tuple, Optional, Dict, List
 from collections import deque
 
+# This is needed by the mixin
+from pid import PIDController 
+
+# Shared configuration
+LINE_FOLLOW_SPEED = 25
+
 class CameraObstacleAvoidance:
     """
     Camera-based obstacle avoidance and corner detection system.
@@ -474,6 +480,24 @@ class CameraLineFollower:
         self.last_detection_time = 0
         self.detection_fps = 0
         
+        # PID controller for smooth line following
+        self.pid = PIDController(kp=0.4, ki=0.01, kd=0.05, output_limits=(-100, 100))
+        
+        # Detection history for smoothing
+        self.line_offset_history = deque(maxlen=5)
+        
+        # Result cache to avoid re-computation
+        self.last_frame_hash = None
+        self.last_result = None
+        
+        self.max_line_width = 0.8 # Max line width as a ratio of ROI width
+        
+        self.canny_high = 150
+        self.binary_threshold = 100
+        
+        # Line detection parameters
+        self.min_line_area = 100  # Minimum contour area to be considered a line
+        
     def detect_line(self, frame: np.ndarray) -> Dict:
         """
         Detect line in the camera frame and return line following information.
@@ -522,59 +546,75 @@ class CameraLineFollower:
         if self.debug:
             result['processed_frame'] = self._draw_debug_overlay(frame, result, roi_start_y, processed_roi)
         
-        # Update performance metrics
-        self.last_detection_time = time.time() - start_time
-        self.detection_fps = 1.0 / max(self.last_detection_time, 0.001)
+        # Update FPS calculation based on actual processing time
+        current_time = time.time()
+        if self.last_detection_time > 0:
+            time_diff = current_time - self.last_detection_time
+            if time_diff > 0:
+                self.detection_fps = 1.0 / time_diff
+        self.last_detection_time = current_time
         
         return result
     
     def _preprocess_roi(self, roi: np.ndarray) -> np.ndarray:
-        """Preprocess the ROI for line detection."""
-        # Convert to grayscale
+        """Applies a series of filters to the ROI to isolate the line."""
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
         # Apply Gaussian blur to reduce noise
         blurred = cv2.GaussianBlur(gray, self.BLUR_SIZE, 0)
         
-        # Apply binary threshold to detect black lines
-        _, binary = cv2.threshold(blurred, self.BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+        # Adaptive thresholding can be more robust to lighting changes
+        # than a fixed binary threshold.
+        binary = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 11, 2
+        )
         
-        # Apply morphological operations to clean up the binary image
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self.morph_kernel)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, self.morph_kernel)
+        # Use morphological closing to connect broken line segments
+        kernel = np.ones((7, 7), np.uint8)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
         
         return binary
     
     def _find_line_in_roi(self, binary_roi: np.ndarray) -> Optional[Dict]:
-        """Find the main line in the binary ROI."""
-        # Find contours
+        """
+        Finds the largest contour in the binary ROI that is near the center, 
+        treating it as the line. This helps ignore distraction lines on the edges.
+        """
         contours, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+
         if not contours:
             return None
+
+        # --- Filter contours to only consider those near the center ---
+        roi_width = binary_roi.shape[1]
+        center_x = roi_width / 2
+        # Define a search zone in the middle 60% of the ROI
+        search_zone_width = roi_width * 0.6
+        search_zone_start = center_x - (search_zone_width / 2)
+        search_zone_end = center_x + (search_zone_width / 2)
+
+        central_contours = []
+        for c in contours:
+            # Calculate the center of the contour
+            M = cv2.moments(c)
+            if M["m00"] > 0:
+                cx = int(M["m10"] / M["m00"])
+                # Keep the contour if its center is within the search zone
+                if search_zone_start <= cx <= search_zone_end:
+                    central_contours.append(c)
         
-        # Filter contours by area and shape
-        valid_contours = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < self.MIN_CONTOUR_AREA:
-                continue
-            
-            # Check if contour resembles a line
-            x, y, w, h = cv2.boundingRect(contour)
-            if w < self.MIN_LINE_WIDTH or w > self.MAX_LINE_WIDTH:
-                continue
-            
-            valid_contours.append((contour, area))
-        
-        if not valid_contours:
+        if not central_contours:
             return None
-        
-        # Select the largest valid contour as the main line
-        main_contour, main_area = max(valid_contours, key=lambda x: x[1])
-        
-        # Calculate line properties
-        M = cv2.moments(main_contour)
+
+        # Find the largest contour among the central ones
+        largest_contour = max(central_contours, key=cv2.contourArea)
+
+        if cv2.contourArea(largest_contour) < self.min_line_area:
+            return None
+
+        # --- Proceed with the largest central contour ---
+        M = cv2.moments(largest_contour)
         if M["m00"] == 0:
             return None
         
@@ -583,11 +623,11 @@ class CameraLineFollower:
         cy = int(M["m01"] / M["m00"])
         
         # Bounding rectangle
-        x, y, w, h = cv2.boundingRect(main_contour)
+        x, y, w, h = cv2.boundingRect(largest_contour)
         
         # Calculate confidence based on contour properties
         roi_height, roi_width = binary_roi.shape
-        area_ratio = main_area / (roi_width * roi_height)
+        area_ratio = cv2.contourArea(largest_contour) / (roi_width * roi_height)
         aspect_ratio = w / max(h, 1)
         
         # Higher confidence for larger, more line-like contours
@@ -595,9 +635,9 @@ class CameraLineFollower:
         
         return {
             'center': (cx, cy),
-            'contour': main_contour,
+            'contour': largest_contour,
             'bbox': (x, y, w, h),
-            'area': main_area,
+            'area': cv2.contourArea(largest_contour),
             'confidence': confidence
         }
     
@@ -720,16 +760,21 @@ class CameraLineFollower:
                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
         
         # Display detection info
-        info_lines = [
-            f"Offset: {result['line_offset']:.3f}",
-            f"Confidence: {result['line_confidence']:.3f}",
-            f"Turn Angle: {result['turn_angle']:.1f}°",
+        try:
+            turn_angle_str = f"Turn Angle: {result.get('turn_angle', 0.0):.2f}"
+        except (ValueError, TypeError):
+            turn_angle_str = "Turn Angle: ERR"
+            
+        stats_text = [
+            f"Offset: {result.get('line_offset', 0.0):.3f}",
+            f"Confidence: {result.get('line_confidence', 0.0):.3f}",
+            turn_angle_str,
             f"FPS: {self.detection_fps:.1f}",
-            f"Status: {result['status']}"
+            f"Status: {result.get('status', 'unknown')}"
         ]
-        
-        for i, line in enumerate(info_lines):
-            cv2.putText(debug_frame, line, (10, height - 120 + i * 25), 
+
+        for i, text in enumerate(stats_text):
+            cv2.putText(debug_frame, text, (10, height - 120 + i * 25), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         # Show binary ROI in corner
@@ -757,140 +802,70 @@ class CameraLineFollower:
     
     def get_motor_speeds(self, result: Dict, base_speed: int = 60) -> Tuple[int, int, int, int]:
         """
-        Convert line detection result to motor speeds for differential drive.
-        
-        Args:
-            result: Line detection result from detect_line()
-            base_speed: Base forward speed
-            
-        Returns:
-            Tuple of (front_left, front_right, back_left, back_right) motor speeds
+        Calculates motor speeds based on the line detection result.
+        'line_offset' is the key parameter used for PID control.
+        A positive offset means the line is to the right of center.
+        A negative offset means the line is to the left of center.
         """
-        if not result['line_detected']:
-            # Line lost - stop or search
-            if result['status'] == 'line_lost_recovering':
-                # Brief stop while recovering
-                return (0, 0, 0, 0)
-            else:
-                # Search for line - reduced speed for slower, more controlled search
-                search_speed = base_speed // 3  # Reduced from base_speed // 2 for slower searching
-                if self.search_direction == 0:
-                    # Determine search direction from last known offset
-                    last_offset = self.center_offset_history[-1] if self.center_offset_history else 0.0
-                    self.search_direction = 1 if last_offset > 0 else -1
-                
-                if self.search_direction > 0:
-                    # Search right
-                    return (-search_speed, search_speed, -search_speed, search_speed)
-                else:
-                    # Search left
-                    return (search_speed, -search_speed, search_speed, -search_speed)
-        
-        # Reset search direction when line is found
-        self.search_direction = 0
-        
-        # Calculate turn correction - reduced for gentler steering
-        turn_correction = int(result['line_offset'] * base_speed * 0.5)  # Reduced from 0.8 to 0.5 for gentler turning
-        
-        # Apply corner-specific adjustments
-        if result.get('corner_detected', False):
-            corner_speed = int(base_speed * 0.6)  # Slower for corners (reduced from 0.7)
-            corner_turn = int(turn_correction * 1.2)  # Less aggressive turning (reduced from 1.5)
+        line_offset = result.get('line_offset', 0.0)
+        line_confidence = result.get('line_confidence', 0.0)
+
+        if result.get('status') == 'line_lost' or line_confidence < 0.2:
+            # If line is lost or confidence is too low, stop.
+            return 0, 0, 0, 0
             
-            left_speed = corner_speed - corner_turn
-            right_speed = corner_speed + corner_turn
-        else:
-            # Normal line following
-            left_speed = base_speed - turn_correction
-            right_speed = base_speed + turn_correction
+        # The setpoint for the PID is 0 (center of the image).
+        # The process variable is the line_offset.
+        turn_correction = self.pid.update(line_offset)
+
+        # Apply the correction to the motor speeds for differential steering.
+        left_speed = int(base_speed - turn_correction)
+        right_speed = int(base_speed + turn_correction)
+
+        # For an omni-wheel setup moving forward, all wheels on one side
+        # will have similar speeds.
+        fl, fr, bl, br = left_speed, right_speed, left_speed, right_speed
         
-        # Clamp speeds to valid range
-        left_speed = max(-100, min(100, left_speed))
-        right_speed = max(-100, min(100, right_speed))
-        
-        # For 2-wheel robot, back wheels follow front wheels
-        return (left_speed, right_speed, left_speed, right_speed)
+        return fl, fr, bl, br
 
 
 class CameraLineFollowingMixin:
     """
-    Mixin class to add camera line following capabilities to the robot controller.
+    Mixin class to add camera-based line following capabilities to a robot controller.
+    It assumes the controller has a 'motor_controller' and a 'frame' attribute.
     """
-    
-    def init_camera_line_following(self):
-        """Initialize camera line following system."""
-        # Get debug setting from the current object's FEATURES if available
-        debug_enabled = False
-        if hasattr(self, '__class__') and hasattr(self.__class__, '__module__'):
-            try:
-                import sys
-                main_module = sys.modules.get('__main__')
-                if main_module and hasattr(main_module, 'FEATURES'):
-                    debug_enabled = main_module.FEATURES.get('DEBUG_VISUALIZATION_ENABLED', False)
-            except:
-                debug_enabled = False
-            
-        self.camera_line_follower = CameraLineFollower(debug=debug_enabled)
+    def init_camera_line_following(self, debug=True):
+        """Initialize the line follower."""
+        print("Initializing camera-based line follower...")
+        self.camera_line_follower = CameraLineFollower(debug=debug)
+        self.camera_line_pid = self.camera_line_follower.pid
         self.camera_line_result = {}
-        self.using_camera_line_following = True
-        print("Camera line following system initialized")
-    
-    def follow_line_with_camera(self):
-        """Follow line using camera vision instead of hardware sensors."""
-        if not hasattr(self, 'camera_line_follower'):
-            print("Camera line follower not initialized!")
+
+    def follow_line_with_camera(self, frame, base_speed=LINE_FOLLOW_SPEED):
+        """
+        Detects the line in the given frame and sends motor commands.
+        
+        Args:
+            frame: The camera frame to process.
+            base_speed: The base speed for the robot.
+        """
+        if frame is None or not hasattr(self, 'camera_line_follower'):
             return
+
+        # Detect the line and get parameters
+        self.camera_line_result = self.camera_line_follower.detect_line(frame)
         
-        # Get current camera frame
-        with self.frame_lock:
-            if self.frame is None:
-                print("No camera frame available for line following")
-                self._stop_motors()
-                return
-            current_frame = self.frame.copy()
-        
-        # Detect line in the frame
-        self.camera_line_result = self.camera_line_follower.detect_line(current_frame)
-        
-        # Get motor speeds based on line detection
-        base_speed = 25  # Default speed - reduced for slower movement
-        if hasattr(self, '__class__') and hasattr(self.__class__, '__module__'):
-            try:
-                import sys
-                main_module = sys.modules.get('__main__')
-                if main_module and hasattr(main_module, 'LINE_FOLLOW_SPEED'):
-                    base_speed = main_module.LINE_FOLLOW_SPEED
-            except:
-                pass
-            
-        motor_speeds = self.camera_line_follower.get_motor_speeds(
-            self.camera_line_result, 
+        # Get motor speeds based on detection result
+        fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(
+            self.camera_line_result,
             base_speed=base_speed
         )
         
-        # Send motor commands
-        fl_speed, fr_speed, bl_speed, br_speed = motor_speeds
-        self.motor_controller.send_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
-        
-        # Log status if enabled
-        performance_logging = True  # Default to enabled
-        if hasattr(self, '__class__') and hasattr(self.__class__, '__module__'):
-            try:
-                import sys
-                main_module = sys.modules.get('__main__')
-                if main_module and hasattr(main_module, 'FEATURES'):
-                    performance_logging = main_module.FEATURES.get('PERFORMANCE_LOGGING_ENABLED', False)
-            except:
-                pass
-            
-        if performance_logging:
-            status = self.camera_line_result.get('status', 'unknown')
-            offset = self.camera_line_result.get('line_offset', 0.0)
-            confidence = self.camera_line_result.get('line_confidence', 0.0)
-            print(f"Camera Line Following - Status: {status}, Offset: {offset:.3f}, Confidence: {confidence:.3f}, Motors: FL={fl_speed}, FR={fr_speed}")
-    
+        # Send motor speeds
+        self.motor_controller.send_motor_speeds(fl, fr, bl, br)
+
     def get_camera_line_status(self) -> Dict:
-        """Get current camera line following status for web interface."""
+        """Return the latest line detection result."""
         if not hasattr(self, 'camera_line_result'):
             return {
                 'line_detected': False,

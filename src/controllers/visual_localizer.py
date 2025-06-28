@@ -434,15 +434,15 @@ class PreciseMazeLocalizer:
         return score / total_weight if total_weight > 0 else 0.0
     
     def start_localization(self):
-        """Start the localization thread"""
+        """Start the localization thread."""
         if not self.running:
             self.running = True
-            self.localization_thread = threading.Thread(target=self._localization_loop)
-            self.localization_thread.daemon = True
+            self.localization_thread = threading.Thread(target=self._localization_loop, daemon=True)
             self.localization_thread.start()
+            print("Visual localization thread started.")
     
     def stop_localization(self):
-        """Stop the localization thread"""
+        """Stop the localization thread."""
         self.running = False
         if self.localization_thread:
             self.localization_thread.join()

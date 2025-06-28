@@ -2,6 +2,7 @@ import time
 import network
 import socket
 import math
+import uerrno
 from machine import Pin, PWM, ADC
 
 # WiFi Configuration
@@ -160,8 +161,8 @@ class OmniwheelRobot:
         self.motors = {
             'fl': {'p1': PWM(Pin(5), freq=50), 'p2': PWM(Pin(4), freq=50)},
             'fr': {'p1': PWM(Pin(6), freq=50), 'p2': PWM(Pin(7), freq=50)},
-            'bl': {'p1': PWM(Pin(16), freq=50), 'p2': PWM(Pin(15), freq=50)},
-            'br': {'p1': PWM(Pin(17), freq=50), 'p2': PWM(Pin(18), freq=50)}
+            'bl': {'p1': PWM(Pin(15), freq=50), 'p2': PWM(Pin(16), freq=50)},
+            'br': {'p1': PWM(Pin(18), freq=50), 'p2': PWM(Pin(17), freq=50)}
         }
         
         # Encoder pin setup
@@ -345,9 +346,12 @@ def run_server(robot):
                     line_data = f"LINE,{line_pos},{line_err},{','.join(map(str, sensor_vals))}\n"
                     conn.send(line_data.encode())
 
-                except socket.timeout:
-                    # No command received, continue loop
-                    pass
+                except OSError as e:
+                    # In MicroPython, a timeout on a socket is an OSError. We'll only ignore timeouts.
+                    if e.args[0] in (uerrno.ETIMEDOUT, uerrno.EAGAIN):
+                        pass # This is a timeout, just means no data received.
+                    else:
+                        raise e # Re-raise other OSErrors
                 except Exception as e:
                     print(f"Error during communication: {e}")
                     break
