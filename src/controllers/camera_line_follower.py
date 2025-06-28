@@ -81,16 +81,14 @@ class CameraObstacleAvoidance:
         # Apply Gaussian blur to reduce noise
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Adaptive thresholding is more robust to lighting changes
-        binary = cv2.adaptiveThreshold(
-            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, 11, 2
-        )
-        
-        # Erode to remove small noise, then dilate to restore line thickness
-        kernel = np.ones((3, 3), np.uint8)
-        eroded = cv2.erode(binary, kernel, iterations=1)
-        closed = cv2.dilate(eroded, kernel, iterations=1)
+        # Use a simple global binary threshold. This is more effective for
+        # detecting a solid black line on a lighter background.
+        # Pixels darker than 100 will be considered the line.
+        _, binary = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
+
+        # Use morphological closing to connect any small gaps in the line
+        kernel = np.ones((5, 5), np.uint8)
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
         
         # Detect obstacles in the upper portion of the frame
         obstacle_result = self._detect_obstacles(closed, width, height)
@@ -568,18 +566,16 @@ class CameraLineFollower:
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
         # Apply Gaussian blur to reduce noise
-        blurred = cv2.GaussianBlur(gray, self.BLUR_SIZE, 0)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Adaptive thresholding is more robust to lighting changes
-        binary = cv2.adaptiveThreshold(
-            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, 11, 2
-        )
-        
-        # Erode to remove small noise, then dilate to restore line thickness
-        kernel = np.ones((3, 3), np.uint8)
-        eroded = cv2.erode(binary, kernel, iterations=1)
-        closed = cv2.dilate(eroded, kernel, iterations=1)
+        # Use a simple global binary threshold. This is more effective for
+        # detecting a solid black line on a lighter background.
+        # Pixels darker than 100 will be considered the line.
+        _, binary = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
+
+        # Use morphological closing to connect any small gaps in the line
+        kernel = np.ones((5, 5), np.uint8)
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
         
         return closed
     
