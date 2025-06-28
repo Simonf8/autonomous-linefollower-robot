@@ -5,4 +5,5 @@ Flask
 Pillow
 filterpy
 requests
-RPi.GPIO 
+RPi.GPIO
+picamera2 

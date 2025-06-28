@@ -39,7 +39,7 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-ESP32_IP = "192.168.2.115"  # IMPORTANT: Set this to your ESP32's IP address
+ESP32_IP = "192.168.2.39"  # IMPORTANT: Set this to your ESP32's IP address
 CELL_SIZE_M = 0.11
 BASE_SPEED = 25
 TURN_SPEED = 20
@@ -253,10 +253,8 @@ class RobotController(CameraLineFollowingMixin):
             print("WARNING: Motor controller failed to connect. Running in simulation mode.")
         
         if isinstance(self.position_tracker, PreciseMazeLocalizer):
-            # Try to initialize camera with different indices
-            for i in range(4): # Try first 4 indices
-                if self.position_tracker.initialize_camera(i):
-                    break
+            # Initialize the PiCamera
+            self.position_tracker.initialize_camera()
             # Localization will be started by _start_mission()
 
         while self.running:

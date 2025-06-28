@@ -4,6 +4,7 @@ import threading
 import time
 from typing import Tuple, Optional, Dict, List
 import math
+from picamera2 import Picamera2
 
 class PreciseMazeLocalizer:
     def __init__(self, maze, start_pos: Tuple[int, int], camera_width: int, camera_height: int, camera_fps: int, start_direction: str = 'N'):
@@ -14,7 +15,7 @@ class PreciseMazeLocalizer:
         self.current_direction = start_direction
         
         # Initialize camera
-        self.cap = None # Will be initialized in initialize_camera
+        self.cap = None # Will be Picamera2 instance
         self.camera_width = camera_width
         self.camera_height = camera_height
         self.camera_fps = camera_fps
@@ -55,21 +56,24 @@ class PreciseMazeLocalizer:
         self.frame_lock = threading.Lock()
         self.initialization_frames = camera_fps # Grace period before localizing
         
-    def initialize_camera(self, camera_index=0):
-        """Initializes the camera with a given index."""
+    def initialize_camera(self):
+        """Initializes the Raspberry Pi Camera Module."""
         if self.cap is None:
-            self.cap = cv2.VideoCapture(camera_index)
-            if not self.cap.isOpened():
-                print(f"Warning: Could not open camera at index {camera_index}")
+            try:
+                self.cap = Picamera2()
+                config = self.cap.create_preview_configuration(
+                    main={"size": (self.camera_width, self.camera_height), "format": "RGB888"}
+                )
+                self.cap.configure(config)
+                self.cap.start()
+                # Allow the camera to warm up
+                time.sleep(1.0) 
+                print(f"Successfully opened PiCamera with {self.camera_width}x{self.camera_height} resolution.")
+                return True
+            except Exception as e:
+                print(f"Error: Could not open PiCamera. {e}")
                 self.cap = None
                 return False
-            
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.camera_width)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.camera_height)
-            self.cap.set(cv2.CAP_PROP_FPS, self.camera_fps)
-            
-            print(f"Successfully opened camera at index {camera_index} with {self.camera_width}x{self.camera_height} resolution at {self.camera_fps} FPS")
-            return True
         return True
 
     def create_precise_signatures(self) -> Dict:
@@ -189,15 +193,15 @@ class PreciseMazeLocalizer:
 
     def detect_scene_with_precision(self) -> Optional[Dict]:
         """Precisely detect current scene with movement and distance awareness"""
-        if not self.cap or not self.cap.isOpened():
+        if not self.cap:
             return {
                 'status': 'error',
                 'confidence': 0.0,
                 'message': 'Camera not available'
             }
         
-        ret, frame = self.cap.read()
-        if not ret:
+        frame = self.cap.capture_array()
+        if frame is None:
             return {
                 'status': 'error',
                 'confidence': 0.0,
@@ -449,9 +453,9 @@ class PreciseMazeLocalizer:
         """Main loop for the localization thread."""
         while self.running:
             if self.initialization_frames > 0:
-                if self.cap and self.cap.isOpened():
-                    ret, frame = self.cap.read()
-                    if ret:
+                if self.cap:
+                    frame = self.cap.capture_array()
+                    if frame is not None:
                         with self.frame_lock:
                             self.latest_frame = frame.copy()
                 self.initialization_frames -= 1
