@@ -6,4 +6,19 @@ Pillow
 filterpy
 requests
 RPi.GPIO
-picamera2 
+picamera2
+
+# Enhanced TTS Audio Feedback Dependencies (optional)
+# Install with: pip install -r requirements.txt
+# For best results, also install system packages:
+# sudo apt-get install espeak espeak-data libespeak-dev ffmpeg
+
+# Microsoft Edge TTS (free, high quality, no API key needed)
+edge-tts>=6.1.0
+
+# Google Text-to-Speech (free, requires internet)
+gtts>=2.3.0
+
+# Additional audio players for better compatibility
+# Note: mpv and ffmpeg should be installed via system package manager:
+# sudo apt-get install mpv ffmpeg 

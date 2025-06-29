@@ -471,6 +471,33 @@ class CameraLineFollower:
         self.ROI_HEIGHT_RATIO = 0.4  # Use bottom 40% of frame for line detection
         self.ROI_START_RATIO = 0.6   # Start ROI at 60% down from top
         
+        # ARM FILTERING CONFIGURATION
+        # Enable/disable purple arm filtering
+        self.ARM_FILTERING_ENABLED = True
+        
+        # Purple color range in HSV for arm detection and filtering
+        # These values should be tuned based on your specific purple arm color
+        self.ARM_PURPLE_LOWER = np.array([120, 50, 50])   # Lower HSV bound for purple
+        self.ARM_PURPLE_UPPER = np.array([160, 255, 255]) # Upper HSV bound for purple
+        
+        # Alternative purple ranges (you can enable multiple ranges if needed)
+        self.ARM_PURPLE_RANGES = [
+            (np.array([120, 50, 50]), np.array([160, 255, 255])),   # Primary purple range
+            (np.array([140, 30, 30]), np.array([170, 255, 200])),   # Extended purple range
+        ]
+        
+        # Minimum area for arm detection (pixels)
+        self.ARM_MIN_AREA = 200
+        
+        # Maximum area ratio for arm (to avoid filtering large purple obstacles)
+        self.ARM_MAX_AREA_RATIO = 0.3  # Max 30% of ROI area
+        
+        # Arm position constraints (where we expect the arm to appear)
+        self.ARM_EXPECTED_REGION = {
+            'bottom_ratio': 0.3,    # Arm typically appears in bottom 30% of ROI
+            'center_tolerance': 0.4  # Arm typically appears within 40% of center
+        }
+        
         # Line following parameters
         self.center_offset_history = []
         self.history_size = 5  # Smooth over last 5 measurements
@@ -510,7 +537,7 @@ class CameraLineFollower:
         self.binary_threshold = 70
         
         # Line detection parameters
-        self.min_line_area = 100  # Minimum contour area to be considered a line
+        self.min_line_area = 30  # Minimum contour area to be considered a line (reduced for better sensitivity)
         
         # Camera properties
         self.camera_index = camera_index
@@ -618,7 +645,10 @@ class CameraLineFollower:
         return result
     
     def _preprocess_roi(self, roi: np.ndarray) -> np.ndarray:
-        """Applies a series of filters to the ROI to isolate the line using color masking."""
+        """
+        Applies a series of filters to the ROI to isolate the line using color masking.
+        Now includes purple arm filtering to prevent interference with line detection.
+        """
         # Convert to HSV color space, which is better for color detection
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         
@@ -628,15 +658,131 @@ class CameraLineFollower:
         upper_black = np.array([180, 255, 50])
         
         # Create a mask that isolates the black parts of the image
-        mask = cv2.inRange(hsv, lower_black, upper_black)
+        black_mask = cv2.inRange(hsv, lower_black, upper_black)
         
-        # A gentle morphological closing is re-introduced. This helps connect
-        # broken parts of the line (e.g., at a T-junction) into a single contour
-        # without overly smoothing the corners, which was the previous issue.
-        kernel = np.ones((3, 3), np.uint8)
-        closed_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        # ARM FILTERING: Remove purple arm regions from the black mask
+        if self.ARM_FILTERING_ENABLED:
+            black_mask = self._filter_purple_arm(hsv, black_mask, roi.shape)
         
-        return closed_mask
+        # Enhanced morphological operations to better connect broken line segments
+        # 1. First, do a small opening to remove noise
+        small_kernel = np.ones((2, 2), np.uint8)
+        opened_mask = cv2.morphologyEx(black_mask, cv2.MORPH_OPEN, small_kernel)
+        
+        # 2. Then do a closing to connect nearby segments
+        close_kernel = np.ones((5, 5), np.uint8)
+        closed_mask = cv2.morphologyEx(opened_mask, cv2.MORPH_CLOSE, close_kernel)
+        
+        # 3. Finally, do a small dilation to ensure line segments are thick enough
+        dilate_kernel = np.ones((3, 3), np.uint8)
+        final_mask = cv2.dilate(closed_mask, dilate_kernel, iterations=1)
+        
+        return final_mask
+    
+    def _filter_purple_arm(self, hsv_roi: np.ndarray, black_mask: np.ndarray, roi_shape: tuple) -> np.ndarray:
+        """
+        Filters out purple arm regions from the black mask to prevent interference.
+        
+        Args:
+            hsv_roi: HSV version of the ROI
+            black_mask: Current black line mask
+            roi_shape: Shape of the ROI (height, width, channels)
+            
+        Returns:
+            Filtered black mask with arm regions removed
+        """
+        roi_height, roi_width = roi_shape[:2]
+        
+        # Create combined purple mask from all defined ranges
+        purple_mask = np.zeros((roi_height, roi_width), dtype=np.uint8)
+        
+        for lower_purple, upper_purple in self.ARM_PURPLE_RANGES:
+            range_mask = cv2.inRange(hsv_roi, lower_purple, upper_purple)
+            purple_mask = cv2.bitwise_or(purple_mask, range_mask)
+        
+        # Find purple contours (potential arm regions)
+        purple_contours, _ = cv2.findContours(purple_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Filter purple contours to identify likely arm regions
+        arm_regions = []
+        for contour in purple_contours:
+            area = cv2.contourArea(contour)
+            
+            # Skip if too small or too large
+            if area < self.ARM_MIN_AREA:
+                continue
+            if area > (roi_width * roi_height * self.ARM_MAX_AREA_RATIO):
+                continue
+            
+            # Get contour properties
+            x, y, w, h = cv2.boundingRect(contour)
+            center_x = x + w // 2
+            center_y = y + h // 2
+            
+            # Check if in expected arm region (bottom portion, near center)
+            expected_bottom_y = roi_height * (1.0 - self.ARM_EXPECTED_REGION['bottom_ratio'])
+            center_tolerance = roi_width * self.ARM_EXPECTED_REGION['center_tolerance']
+            roi_center_x = roi_width // 2
+            
+            is_in_bottom_region = center_y >= expected_bottom_y
+            is_near_center = abs(center_x - roi_center_x) <= center_tolerance
+            
+            # Consider it an arm if it meets position criteria
+            if is_in_bottom_region and is_near_center:
+                arm_regions.append({
+                    'contour': contour,
+                    'bbox': (x, y, w, h),
+                    'area': area,
+                    'center': (center_x, center_y)
+                })
+        
+        # Remove arm regions from the black mask
+        filtered_mask = black_mask.copy()
+        
+        for arm_region in arm_regions:
+            # Create a mask for this arm region with some padding
+            arm_mask = np.zeros((roi_height, roi_width), dtype=np.uint8)
+            cv2.drawContours(arm_mask, [arm_region['contour']], -1, 255, -1)
+            
+            # Dilate the arm mask slightly to ensure complete removal
+            dilate_kernel = np.ones((5, 5), np.uint8)
+            arm_mask_dilated = cv2.dilate(arm_mask, dilate_kernel, iterations=1)
+            
+            # Remove this arm region from the black mask
+            filtered_mask = cv2.bitwise_and(filtered_mask, cv2.bitwise_not(arm_mask_dilated))
+            
+            if self.debug:
+                print(f"Filtered arm region: area={arm_region['area']}, center={arm_region['center']}")
+        
+        return filtered_mask
+    
+    def set_arm_filtering(self, enabled: bool):
+        """Enable or disable purple arm filtering."""
+        self.ARM_FILTERING_ENABLED = enabled
+        if self.debug:
+            status = "enabled" if enabled else "disabled"
+            print(f"Purple arm filtering {status}")
+    
+    def configure_arm_colors(self, purple_ranges: List[Tuple[np.ndarray, np.ndarray]]):
+        """
+        Configure the purple color ranges for arm detection.
+        
+        Args:
+            purple_ranges: List of (lower_hsv, upper_hsv) tuples defining purple color ranges
+        """
+        self.ARM_PURPLE_RANGES = purple_ranges
+        if self.debug:
+            print(f"Updated arm color ranges: {len(purple_ranges)} ranges configured")
+    
+    def get_arm_filtering_status(self) -> Dict:
+        """Get current arm filtering configuration and status."""
+        return {
+            'enabled': self.ARM_FILTERING_ENABLED,
+            'purple_ranges': len(self.ARM_PURPLE_RANGES),
+            'min_area': self.ARM_MIN_AREA,
+            'max_area_ratio': self.ARM_MAX_AREA_RATIO,
+            'expected_region': self.ARM_EXPECTED_REGION
+        }
     
     def _find_line_in_roi(self, binary_roi: np.ndarray) -> Optional[Dict]:
         """
@@ -645,6 +791,8 @@ class CameraLineFollower:
         contours, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
+            if self.debug:
+                print("DEBUG: No contours found in binary ROI")
             return None
 
         # --- Find the largest contour in the ROI ---
@@ -652,13 +800,70 @@ class CameraLineFollower:
         # of wide T-junctions, which are essential for cornering. By considering
         # all contours, we can correctly identify the full shape of an intersection.
         largest_contour = max(contours, key=cv2.contourArea)
+        largest_area = cv2.contourArea(largest_contour)
 
-        if cv2.contourArea(largest_contour) < self.min_line_area:
+        if self.debug:
+            print(f"DEBUG: Found {len(contours)} contours, largest area: {largest_area}, min_threshold: {self.min_line_area}")
+
+        # Lower the minimum area threshold to be more sensitive to small line segments
+        if largest_area < self.min_line_area:
+            if self.debug:
+                print(f"DEBUG: Largest contour area ({largest_area}) below threshold ({self.min_line_area})")
+            
+            # Fallback: Try to combine multiple smaller contours that might be line segments
+            valid_contours = [c for c in contours if cv2.contourArea(c) >= 10]  # Very small minimum
+            if len(valid_contours) >= 2:
+                if self.debug:
+                    print(f"DEBUG: Trying fallback with {len(valid_contours)} smaller contours")
+                
+                # Find the centroid of all valid contours combined
+                total_area = sum(cv2.contourArea(c) for c in valid_contours)
+                if total_area >= self.min_line_area:
+                    # Calculate weighted centroid
+                    total_mx = total_my = 0
+                    for contour in valid_contours:
+                        M = cv2.moments(contour)
+                        if M["m00"] > 0:
+                            total_mx += M["m10"]
+                            total_my += M["m01"]
+                    
+                    if total_mx > 0 and total_my > 0:
+                        # Use the largest contour but with combined centroid
+                        cx = int(total_mx / total_area)
+                        cy = int(total_my / total_area)
+                        
+                        # Update the largest contour center
+                        x, y, w, h = cv2.boundingRect(largest_contour)
+                        roi_height, roi_width = binary_roi.shape
+                        aspect_ratio = w / float(h) if h > 0 else 0
+                        area_ratio = total_area / (roi_width * roi_height)
+                        confidence = min(1.0, area_ratio * 10 + min(aspect_ratio / 3, 1.0) * 0.5)
+                        
+                        solidity = float(total_area) / cv2.contourArea(cv2.convexHull(largest_contour)) if cv2.contourArea(cv2.convexHull(largest_contour)) > 0 else 1.0
+                        is_complex_shape = solidity < self.intersection_solidity_threshold
+                        is_wide_shape = aspect_ratio > self.intersection_aspect_ratio_threshold
+                        
+                        if self.debug:
+                            print(f"DEBUG: Fallback successful - combined area: {total_area}, center: ({cx}, {cy})")
+                        
+                        return {
+                            'center': (cx, cy),
+                            'contour': largest_contour,
+                            'bbox': (x, y, w, h),
+                            'area': total_area,
+                            'confidence': confidence,
+                            'is_at_intersection': is_complex_shape or is_wide_shape,
+                            'solidity': solidity,
+                            'aspect_ratio': aspect_ratio
+                        }
+            
             return None
 
         # --- Proceed with the largest contour ---
         M = cv2.moments(largest_contour)
         if M["m00"] == 0:
+            if self.debug:
+                print("DEBUG: Contour has zero moments")
             return None
         
         # Line center
@@ -774,16 +979,21 @@ class CameraLineFollower:
         # Display detection info
         solidity = result.get('solidity', -1.0)
         aspect_ratio = result.get('aspect_ratio', -1.0)
+        area = result.get('area', 0)
+        confidence = result.get('line_confidence', 0.0)
         stats_text = [
             f"Offset: {result.get('line_offset', 0.0):.3f}",
             f"S: {solidity:.2f}",
             f"AR: {aspect_ratio:.2f}",
+            f"Area: {area}",
+            f"Conf: {confidence:.2f}",
             f"Intersection: {result.get('is_at_intersection', False)}",
-            f"Status: {result.get('status', 'unknown')}"
+            f"Status: {result.get('status', 'unknown')}",
+            f"Arm Filter: {'ON' if self.ARM_FILTERING_ENABLED else 'OFF'}"
         ]
 
         for i, text in enumerate(stats_text):
-            cv2.putText(debug_frame, text, (10, height - 120 + i * 20),
+            cv2.putText(debug_frame, text, (10, height - 140 + i * 20),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         return debug_frame

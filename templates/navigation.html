@@ -70,6 +70,159 @@
         .sub-panel .subsection-title {
             margin-top: 0;
         }
+        
+        /* Audio Feedback Panel Styles */
+        .audio-panel {
+            background: linear-gradient(135deg, rgba(255, 0, 255, 0.1), rgba(128, 0, 255, 0.1));
+            border: 2px solid #ff00ff;
+        }
+
+        .audio-feedback-section {
+            padding: 0 10px 10px;
+        }
+
+        .control-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .control-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .control-select {
+            flex: 1;
+            background: rgba(255, 0, 255, 0.1);
+            border: 1px solid #ff00ff;
+            color: #ff00ff;
+            padding: 8px 12px;
+            border-radius: 5px;
+            font-family: 'Orbitron', monospace;
+            font-size: 12px;
+        }
+
+        .control-select option {
+            background: #0a0a0a;
+            color: #ff00ff;
+        }
+
+        .control-input {
+            flex: 1;
+            background: rgba(255, 0, 255, 0.1);
+            border: 1px solid #ff00ff;
+            color: #ff00ff;
+            padding: 8px 12px;
+            border-radius: 5px;
+            font-family: 'Orbitron', monospace;
+            font-size: 12px;
+        }
+
+        .control-input::placeholder {
+            color: rgba(255, 0, 255, 0.5);
+        }
+
+        .control-button {
+            background: linear-gradient(45deg, #ff00ff, #8000ff);
+            border: none;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-family: 'Orbitron', monospace;
+            font-size: 11px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            min-width: 80px;
+        }
+
+        .control-button:hover {
+            background: linear-gradient(45deg, #ff33ff, #9933ff);
+            box-shadow: 0 0 10px rgba(255, 0, 255, 0.5);
+        }
+
+        .control-button:active {
+            transform: scale(0.95);
+        }
+
+        /* Camera Tab Styles */
+        .camera-tabs {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 10px;
+            padding: 0 10px;
+        }
+
+        .tab-button {
+            flex: 1;
+            background: rgba(0, 255, 255, 0.1);
+            border: 1px solid var(--cyber-cyan-translucent);
+            color: var(--cyber-cyan);
+            padding: 8px 12px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-family: 'Orbitron', monospace;
+            font-size: 10px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+        }
+
+        .tab-button:hover {
+            background: rgba(0, 255, 255, 0.2);
+            box-shadow: 0 0 5px rgba(0, 255, 255, 0.3);
+        }
+
+        .tab-button.active {
+            background: linear-gradient(45deg, var(--cyber-cyan), var(--cyber-pink));
+            color: #000;
+            box-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+        }
+
+        .camera-container {
+            position: relative;
+            overflow: hidden;
+        }
+
+        .camera-image {
+            width: 100%;
+            height: auto;
+            display: none;
+            border-radius: 5px;
+        }
+
+        .camera-image.active {
+            display: block;
+        }
+
+        .camera-info {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+            padding: 0 10px;
+        }
+
+        .info-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .info-label {
+            color: var(--cyber-cyan);
+            font-size: 10px;
+            font-weight: bold;
+            margin-bottom: 2px;
+        }
+
+        .info-value {
+            color: #ffffff;
+            font-family: 'Orbitron', monospace;
+            font-size: 12px;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
@@ -122,11 +275,28 @@
                 <!-- Camera Feed -->
                 <div class="panel camera-panel">
                     <div class="panel-header">
-                        <h2>LIVE CAMERA FEED</h2>
+                        <h2>VISION SYSTEM</h2>
                         <div class="panel-indicator"></div>
                     </div>
+                    <div class="camera-tabs">
+                        <button class="tab-button active" onclick="switchCamera('raw')">RAW FEED</button>
+                        <button class="tab-button" onclick="switchCamera('debug')">DEBUG VIEW</button>
+                        <button class="tab-button" onclick="switchCamera('binary')">BINARY MASK</button>
+                    </div>
                     <div class="camera-container">
-                        <img id="camera-feed" class="camera-image" src="{{ url_for('video_feed') }}" alt="Live Camera Feed">
+                        <img id="camera-feed-raw" class="camera-image active" src="{{ url_for('video_feed') }}" alt="Raw Camera Feed">
+                        <img id="camera-feed-debug" class="camera-image" src="{{ url_for('debug_feed') }}" alt="Debug Camera Feed">
+                        <img id="camera-feed-binary" class="camera-image" src="{{ url_for('binary_feed') }}" alt="Binary Mask Feed">
+                    </div>
+                    <div class="camera-info">
+                        <div class="info-item">
+                            <span class="info-label">ACTIVE VIEW:</span>
+                            <span id="active-camera-view" class="info-value">RAW FEED</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">ARM FILTER:</span>
+                            <span id="arm-filter-status" class="info-value">OFF</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -239,6 +409,52 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- Audio Feedback Panel -->
+                <div class="panel audio-panel">
+                    <div class="panel-header">
+                        <h2>AUDIO FEEDBACK SYSTEM</h2>
+                        <div class="panel-indicator"></div>
+                    </div>
+                    <div class="audio-feedback-section">
+                        <div class="sub-panel">
+                            <h3 class="subsection-title">SYSTEM STATUS</h3>
+                            <div class="data-grid">
+                                <div class="data-item">
+                                    <span class="label">STATUS:</span>
+                                    <span id="audio-enabled" class="value">DISABLED</span>
+                                </div>
+                                <div class="data-item">
+                                    <span class="label">PROVIDER:</span>
+                                    <span id="audio-provider" class="value">NONE</span>
+                                </div>
+                                <div class="data-item">
+                                    <span class="label">QUEUE SIZE:</span>
+                                    <span id="audio-queue" class="value">0</span>
+                                </div>
+                                <div class="data-item full-width">
+                                    <span class="label">AVAILABLE:</span>
+                                    <span id="audio-providers" class="value">--</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="sub-panel">
+                            <h3 class="subsection-title">CONTROLS</h3>
+                            <div class="control-grid">
+                                <div class="control-row">
+                                    <select id="tts-provider-select" class="control-select">
+                                        <option value="">Select Provider...</option>
+                                    </select>
+                                    <button onclick="changeTTSProvider()" class="control-button">CHANGE</button>
+                                </div>
+                                <div class="control-row">
+                                    <input type="text" id="tts-test-message" placeholder="Enter test message..." class="control-input" value="TTS system test successful">
+                                    <button onclick="testTTS()" class="control-button">TEST</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -288,6 +504,10 @@
                     const lineFollowerData = data.line_follower;
                     document.getElementById('line-offset').textContent = lineFollowerData.line_offset.toFixed(2);
                     document.getElementById('intersection-status').textContent = lineFollowerData.is_at_intersection ? 'TRUE' : 'FALSE';
+                    
+                    // Update Arm Filter status
+                    const armFilterData = lineFollowerData.arm_filtering || {};
+                    document.getElementById('arm-filter-status').textContent = armFilterData.enabled ? 'ON' : 'OFF';
 
                     // Update Motor Speeds
                     const motors = data.motors || {};
@@ -302,6 +522,24 @@
                     document.getElementById('encoder-fr').textContent = encoders.fr || 0;
                     document.getElementById('encoder-bl').textContent = encoders.bl || 0;
                     document.getElementById('encoder-br').textContent = encoders.br || 0;
+
+                    // Update Audio Feedback data
+                    const audioData = data.audio_feedback || {};
+                    document.getElementById('audio-enabled').textContent = audioData.enabled ? 'ENABLED' : 'DISABLED';
+                    document.getElementById('audio-provider').textContent = audioData.current_provider || 'NONE';
+                    document.getElementById('audio-queue').textContent = audioData.queue_size || 0;
+                    document.getElementById('audio-providers').textContent = (audioData.available_providers || []).join(', ') || '--';
+                    
+                    // Update TTS provider dropdown if not already populated
+                    const providerSelect = document.getElementById('tts-provider-select');
+                    if (providerSelect.options.length <= 1 && audioData.available_providers) {
+                        audioData.available_providers.forEach(provider => {
+                            const option = document.createElement('option');
+                            option.value = provider;
+                            option.textContent = provider.toUpperCase();
+                            providerSelect.appendChild(option);
+                        });
+                    }
 
                     const statusIndicator = document.getElementById('status-indicator');
                     const statusText = document.getElementById('status-text');
@@ -347,6 +585,102 @@
                 });
             });
         });
+
+        // TTS Control Functions
+        function changeTTSProvider() {
+            const select = document.getElementById('tts-provider-select');
+            const provider = select.value;
+            
+            if (!provider) {
+                alert('Please select a TTS provider first');
+                return;
+            }
+
+            fetch('/set_tts_provider', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ provider: provider })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert(`TTS provider changed to: ${provider.toUpperCase()}`);
+                } else {
+                    alert(`Error: ${data.message}`);
+                }
+            })
+            .catch(error => {
+                console.error('Error changing TTS provider:', error);
+                alert('Failed to change TTS provider');
+            });
+        }
+
+        function testTTS() {
+            const messageInput = document.getElementById('tts-test-message');
+            const message = messageInput.value.trim();
+            
+            if (!message) {
+                alert('Please enter a test message');
+                return;
+            }
+
+            fetch('/test_tts', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ message: message })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    console.log('TTS test sent:', data.message);
+                    // Visual feedback
+                    const button = event.target;
+                    const originalText = button.textContent;
+                    button.textContent = 'SENT';
+                    button.style.background = 'linear-gradient(45deg, #00ff00, #008000)';
+                    setTimeout(() => {
+                        button.textContent = originalText;
+                        button.style.background = '';
+                    }, 2000);
+                } else {
+                    alert(`Error: ${data.message}`);
+                }
+            })
+            .catch(error => {
+                console.error('Error testing TTS:', error);
+                alert('Failed to test TTS');
+            });
+        }
+
+        // Camera Switching Function
+        function switchCamera(viewType) {
+            // Hide all camera feeds
+            const cameras = ['raw', 'debug', 'binary'];
+            cameras.forEach(type => {
+                const img = document.getElementById(`camera-feed-${type}`);
+                const button = document.querySelector(`button[onclick="switchCamera('${type}')"]`);
+                if (img) img.classList.remove('active');
+                if (button) button.classList.remove('active');
+            });
+
+            // Show selected camera feed
+            const selectedImg = document.getElementById(`camera-feed-${viewType}`);
+            const selectedButton = document.querySelector(`button[onclick="switchCamera('${viewType}')"]`);
+            if (selectedImg) selectedImg.classList.add('active');
+            if (selectedButton) selectedButton.classList.add('active');
+
+            // Update active view indicator
+            const viewNames = {
+                'raw': 'RAW FEED',
+                'debug': 'DEBUG VIEW',
+                'binary': 'BINARY MASK'
+            };
+            document.getElementById('active-camera-view').textContent = viewNames[viewType] || 'UNKNOWN';
+        }
     </script>
 </body>
 </html> 

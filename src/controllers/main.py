@@ -40,7 +40,7 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-CELL_SIZE_M = 0.11
+CELL_SIZE_M = 0.06
 BASE_SPEED = 40
 TURN_SPEED = 60
 CORNER_SPEED = 70
@@ -616,6 +616,9 @@ def main():
 
         encoder_counts = robot.motor_controller.get_encoder_counts() if robot.motor_controller else {}
 
+        # Get audio feedback status
+        audio_status = robot.audio_feedback.get_status()
+
         data = {
             'state': robot.state,
             'x': x,
@@ -631,9 +634,16 @@ def main():
             'line_follower': {
                 'line_offset': robot.camera_line_result.get('line_offset', 0),
                 'is_at_intersection': robot.camera_line_result.get('is_at_intersection', False),
+                'arm_filtering': robot.camera_line_follower.get_arm_filtering_status() if hasattr(robot, 'camera_line_follower') else {'enabled': False},
             },
             'motors': robot.motor_speeds,
             'encoders': encoder_counts,
+            'audio_feedback': {
+                'enabled': audio_status.get('enabled', False),
+                'provider': audio_status.get('preferred_provider', 'none'),
+                'available_providers': audio_status.get('available_providers', []),
+                'queue_size': audio_status.get('queue_size', 0),
+            },
             'path': robot.path,
             'current_target_index': robot.current_target_index,
         }
@@ -641,7 +651,7 @@ def main():
 
     @app.route('/video_feed')
     def video_feed():
-        """Video streaming route. Returns a placeholder if camera is disabled."""
+        """Video streaming route. Returns raw camera feed."""
         if not FEATURES['CAMERA_LINE_FOLLOWING_ENABLED']:
             return Response(status=204) # No content
 
@@ -657,18 +667,90 @@ def main():
                     time.sleep(0.1)
                     continue
                 
-                # Add camera line following debug overlay if available
-                # In the new structure, detect_line is called inside _follow_path,
-                # but the result isn't stored on the robot object.
-                # For debugging, we might want to call it here or store the result.
-                # For now, we just show the raw frame.
-                
                 _, buffer = cv2.imencode('.jpg', frame)
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
                 time.sleep(0.05) # Limit frame rate
 
         return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+    @app.route('/debug_feed')
+    def debug_feed():
+        """Debug video streaming route showing processed frames with overlays."""
+        if not FEATURES['CAMERA_LINE_FOLLOWING_ENABLED']:
+            return Response(status=204) # No content
+
+        def generate_debug_frames():
+            while robot.running:
+                frame = None
+                debug_frame = None
+                
+                # Get frame from the line follower camera
+                if hasattr(robot, 'camera_line_follower'):
+                    frame = robot.camera_line_follower.get_camera_frame()
+
+                if frame is None:
+                    time.sleep(0.1)
+                    continue
+                
+                # Process the frame to get debug visualization
+                if hasattr(robot, 'camera_line_follower'):
+                    # Call detect_line to get the processed frame with debug overlay
+                    result = robot.camera_line_follower.detect_line(frame)
+                    debug_frame = result.get('processed_frame', frame)
+                
+                if debug_frame is None:
+                    debug_frame = frame
+                
+                _, buffer = cv2.imencode('.jpg', debug_frame)
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                time.sleep(0.05) # Limit frame rate
+
+        return Response(generate_debug_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+    @app.route('/binary_feed')
+    def binary_feed():
+        """Binary/grayscale processed feed showing just the line detection mask."""
+        if not FEATURES['CAMERA_LINE_FOLLOWING_ENABLED']:
+            return Response(status=204) # No content
+
+        def generate_binary_frames():
+            while robot.running:
+                frame = None
+                
+                # Get frame from the line follower camera
+                if hasattr(robot, 'camera_line_follower'):
+                    frame = robot.camera_line_follower.get_camera_frame()
+
+                if frame is None:
+                    time.sleep(0.1)
+                    continue
+                
+                # Get the binary processed ROI
+                if hasattr(robot, 'camera_line_follower'):
+                    height, width = frame.shape[:2]
+                    roi_start_y = int(height * robot.camera_line_follower.ROI_START_RATIO)
+                    roi = frame[roi_start_y:height, :]
+                    
+                    # Get the preprocessed binary ROI
+                    binary_roi = robot.camera_line_follower._preprocess_roi(roi)
+                    
+                    # Create a full-size frame showing just the binary ROI
+                    binary_frame = np.zeros((height, width), dtype=np.uint8)
+                    binary_frame[roi_start_y:height, :] = binary_roi
+                    
+                    # Convert to BGR for consistent encoding
+                    binary_frame_bgr = cv2.cvtColor(binary_frame, cv2.COLOR_GRAY2BGR)
+                else:
+                    binary_frame_bgr = frame
+                
+                _, buffer = cv2.imencode('.jpg', binary_frame_bgr)
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                time.sleep(0.05) # Limit frame rate
+
+        return Response(generate_binary_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
     
     @app.route('/start_mission')
     def start_mission():
@@ -686,6 +768,104 @@ def main():
         """Stop the robot's movement and all processes."""
         robot.stop()
         return jsonify({'status': 'Robot stopped'})
+
+    @app.route('/set_tts_provider', methods=['POST'])
+    def set_tts_provider():
+        """Change the TTS provider for audio feedback."""
+        data = request.get_json()
+        provider = data.get('provider', '')
+        
+        if robot.audio_feedback.set_provider(provider):
+            return jsonify({
+                'status': 'success',
+                'message': f'TTS provider changed to {provider}',
+                'current_provider': robot.audio_feedback.preferred_provider
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': f'Provider {provider} not available',
+                'available_providers': list(robot.audio_feedback.available_providers.keys())
+            }), 400
+
+    @app.route('/test_tts', methods=['POST'])
+    def test_tts():
+        """Test the current TTS provider with a sample message."""
+        data = request.get_json()
+        message = data.get('message', 'TTS test successful')
+        provider = data.get('provider', None)
+        
+        robot.audio_feedback.speak(message, force_provider=provider)
+        return jsonify({
+            'status': 'success',
+            'message': f'TTS test queued with provider: {provider or robot.audio_feedback.preferred_provider}'
+        })
+
+    @app.route('/arm_filter_status')
+    def arm_filter_status():
+        """Get current arm filtering status."""
+        if hasattr(robot, 'camera_line_follower'):
+            status = robot.camera_line_follower.get_arm_filtering_status()
+            return jsonify({
+                'status': 'success',
+                'arm_filtering': status
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'Camera line follower not available'
+            }), 400
+
+    @app.route('/set_arm_filter', methods=['POST'])
+    def set_arm_filter():
+        """Enable or disable purple arm filtering."""
+        data = request.get_json()
+        enabled = data.get('enabled', True)
+        
+        if hasattr(robot, 'camera_line_follower'):
+            robot.camera_line_follower.set_arm_filtering(enabled)
+            return jsonify({
+                'status': 'success',
+                'message': f'Arm filtering {"enabled" if enabled else "disabled"}',
+                'arm_filtering': robot.camera_line_follower.get_arm_filtering_status()
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'Camera line follower not available'
+            }), 400
+
+    @app.route('/configure_arm_colors', methods=['POST'])
+    def configure_arm_colors():
+        """Configure purple color ranges for arm detection."""
+        data = request.get_json()
+        color_ranges = data.get('color_ranges', [])
+        
+        if not hasattr(robot, 'camera_line_follower'):
+            return jsonify({
+                'status': 'error',
+                'message': 'Camera line follower not available'
+            }), 400
+        
+        try:
+            # Convert color ranges from list format to numpy arrays
+            parsed_ranges = []
+            for range_data in color_ranges:
+                lower = np.array(range_data['lower'])
+                upper = np.array(range_data['upper'])
+                parsed_ranges.append((lower, upper))
+            
+            robot.camera_line_follower.configure_arm_colors(parsed_ranges)
+            return jsonify({
+                'status': 'success',
+                'message': f'Configured {len(parsed_ranges)} color ranges',
+                'arm_filtering': robot.camera_line_follower.get_arm_filtering_status()
+            })
+        except Exception as e:
+            return jsonify({
+                'status': 'error',
+                'message': f'Failed to configure colors: {str(e)}'
+            }), 400
 
     @app.route('/grid_feed')
     def grid_feed():
