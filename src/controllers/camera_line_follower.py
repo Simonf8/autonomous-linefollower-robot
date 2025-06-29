@@ -17,7 +17,7 @@ except ImportError:
 from pid import PIDController 
 
 # Shared configuration
-LINE_FOLLOW_SPEED = 25
+LINE_FOLLOW_SPEED = 45
 
 class CameraObstacleAvoidance:
     """

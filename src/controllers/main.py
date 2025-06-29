@@ -312,27 +312,50 @@ class RobotController(CameraLineFollowingMixin):
                 self.motor_controller.send_motor_speeds(BASE_SPEED, BASE_SPEED, BASE_SPEED, BASE_SPEED)
             return
 
+        # PERFORMANCE: Skip every other frame for obstacle detection to improve speed
+        if not hasattr(self, '_frame_skip_counter'):
+            self._frame_skip_counter = 0
+        self._frame_skip_counter += 1
+        
         self.camera_line_result = self.camera_line_follower.detect_line(frame)
         
-        # Check for obstacles blocking the line
-        if FEATURES['OBSTACLE_AVOIDANCE_ENABLED'] and self.obstacle_avoidance:
+        # Check for obstacles blocking the line (skip every other frame for performance)
+        if FEATURES['OBSTACLE_AVOIDANCE_ENABLED'] and self.obstacle_avoidance and self._frame_skip_counter % 2 == 0:
             line_center_x = self.camera_line_result.get('line_center_x', frame.shape[1] // 2)
             obstacle_result = self.obstacle_avoidance.detect_line_blocking_obstacle(frame, line_center_x)
             
             if obstacle_result['is_blocking']:
                 action = obstacle_result['recommended_action']
-                print(f"OBSTACLE DETECTED! Action: {action}")
-                self.audio_feedback.speak(f"Obstacle detected, {action.replace('_', ' ')}")
+                print(f"OBSTACLE DETECTED! Executing immediate 180° turn!")
+                self.audio_feedback.speak("Obstacle blocking line, turning around")
                 
-                if action == 'turn_around':
-                    # Execute 180-degree turn
-                    self.state = 'obstacle_turn_around'
-                    self.turn_start_time = time.time()
-                    return
-                elif action == 'stop':
-                    # Stop and wait
-                    self._stop_motors()
-                    return
+                # MARK OBSTACLE IN GRID for future A* planning
+                current_cell = self.position_tracker.get_current_cell()
+                # Mark the cell ahead as an obstacle (where robot was heading)
+                current_dir = self.position_tracker.current_direction
+                if current_dir == 'N':
+                    obstacle_cell = (current_cell[0], current_cell[1] - 1)
+                elif current_dir == 'S':
+                    obstacle_cell = (current_cell[0], current_cell[1] + 1)
+                elif current_dir == 'E':
+                    obstacle_cell = (current_cell[0] + 1, current_cell[1])
+                elif current_dir == 'W':
+                    obstacle_cell = (current_cell[0] - 1, current_cell[1])
+                else:
+                    obstacle_cell = current_cell
+                
+                # Update pathfinder grid with obstacle
+                self.pathfinder.update_obstacle(obstacle_cell[0], obstacle_cell[1], True)
+                print(f"Marked obstacle at cell {obstacle_cell} in pathfinder grid")
+                
+                # IMMEDIATE 180-degree turn - no gradual turning or other actions
+                # This ensures the robot immediately starts turning when obstacle is detected
+                self._stop_motors()  # Brief stop before turning
+                time.sleep(0.1)      # Very brief pause
+                
+                self.state = 'obstacle_turn_around'
+                self.turn_start_time = time.time()
+                return
         
         # Normal line following if no obstacles
         fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(self.camera_line_result, base_speed=BASE_SPEED)
@@ -596,14 +619,32 @@ class RobotController(CameraLineFollowingMixin):
     def _execute_180_turn(self):
         """
         Execute a 180-degree turn in place when an obstacle blocks the line.
+        Keep turning until the line is found, then replan path using A*.
         """
-        TURN_180_DURATION = 3.0  # Duration for 180-degree turn
+        MAX_TURN_DURATION = 10.0  # Maximum time to prevent infinite turning
+        MIN_TURN_DURATION = 1.0   # Minimum time to ensure we turn away from obstacle
         
         time_in_turn = time.time() - self.turn_start_time
         
-        if time_in_turn < TURN_180_DURATION:
-            # Execute pivot turn (rotate in place)
-            # Turn right (clockwise) - can be changed to left if needed
+        # Get current camera frame to check for line
+        frame = self.camera_line_follower.get_camera_frame()
+        line_found = False
+        
+        if frame is not None and time_in_turn > MIN_TURN_DURATION:
+            # Check if we can see the line again
+            line_result = self.camera_line_follower.detect_line(frame)
+            line_found = line_result.get('line_detected', False)
+            
+            if line_found:
+                line_offset = line_result.get('line_offset', 1.0)
+                # Only consider line found if it's reasonably centered
+                if abs(line_offset) < 0.3:  # Line is reasonably centered
+                    line_found = True
+                else:
+                    line_found = False
+        
+        if time_in_turn < MAX_TURN_DURATION and not line_found:
+            # Continue turning - pivot turn (rotate in place)
             fl_speed = TURN_SPEED     # Front left: forward
             fr_speed = -TURN_SPEED    # Front right: reverse
             bl_speed = TURN_SPEED     # Back left: forward
@@ -612,21 +653,27 @@ class RobotController(CameraLineFollowingMixin):
             self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
             
             if self.debug and int(time_in_turn) != int(time_in_turn - 0.1):  # Print every second
-                print(f"Executing 180° turn: {time_in_turn:.1f}s / {TURN_180_DURATION}s")
+                print(f"Turning until line found: {time_in_turn:.1f}s / {MAX_TURN_DURATION}s, Line found: {line_found}")
         else:
-            # Turn complete
-            print("180-degree turn complete. Resuming line following.")
-            self.audio_feedback.speak("Turn around complete")
+            # Turn complete - either line found or timed out
+            if line_found:
+                print("180-degree turn complete. Line reacquired!")
+                self.audio_feedback.speak("Line found, replanning path")
+            else:
+                print("Turn timed out. Proceeding with path following.")
+                self.audio_feedback.speak("Turn complete, resuming")
+            
             self._stop_motors()
             
             # Update direction in position tracker (180 degrees)
-            # This is a simplified approach - in practice you might want more precise tracking
             current_dir = self.position_tracker.current_direction
             opposite_directions = {'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E'}
             new_direction = opposite_directions.get(current_dir, current_dir)
             self.position_tracker.current_direction = new_direction
             
-            self.state = 'path_following'
+            # IMPORTANT: Trigger path replanning using A* after obstacle avoidance
+            print("Replanning path after obstacle avoidance...")
+            self.state = 'planning'  # This will trigger A* replanning
             time.sleep(0.5)  # Brief pause to stabilize
 
     def _is_path_straight(self, path: List[Tuple[int, int]]) -> bool:
