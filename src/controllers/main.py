@@ -260,6 +260,7 @@ class RobotController(CameraLineFollowingMixin):
         # The primary goal is to reach the final destination.
         if current_cell == self.path[-1]:
             print(f"Reached final destination: {current_cell}")
+            self.audio_feedback.speak("Final destination reached!")
             self.state = "mission_complete"
             self._stop_motors()
             return
@@ -271,6 +272,8 @@ class RobotController(CameraLineFollowingMixin):
             self.last_cell_update_time = time.time()
             self.current_target_index += 1
             if self.current_target_index >= len(self.path):
+                print("All waypoints completed - mission complete!")
+                self.audio_feedback.speak("All waypoints completed!")
                 self.state = "mission_complete"
                 self._stop_motors()
                 return
@@ -358,16 +361,103 @@ class RobotController(CameraLineFollowingMixin):
                 return
         
         # Normal line following if no obstacles
-        fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(self.camera_line_result, base_speed=BASE_SPEED)
+        # Adjust speed based on proximity to destination
+        current_base_speed = BASE_SPEED
+        if self.path and len(self.path) > 0:
+            remaining_waypoints = len(self.path) - self.current_target_index
+            final_destination = self.path[-1]
+            distance_to_destination = abs(current_cell[0] - final_destination[0]) + abs(current_cell[1] - final_destination[1])
+            
+            # Slow down when approaching destination
+            if remaining_waypoints <= 1 or distance_to_destination <= 1:
+                current_base_speed = int(BASE_SPEED * 0.6)  # 60% speed for final approach
+                print(f"Final approach mode: speed reduced to {current_base_speed}")
+            elif remaining_waypoints <= 2 or distance_to_destination <= 2:
+                current_base_speed = int(BASE_SPEED * 0.8)  # 80% speed when close
+        
+        fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(self.camera_line_result, base_speed=current_base_speed)
         self._set_motor_speeds(fl, fr, bl, br)
 
     def _execute_arcing_turn(self):
         """
-        Executes a smart, arcing turn, continuing until the line is re-centered and straight.
+        Executes a turn - uses pivot turn for precision near destination, arcing turn otherwise.
+        """
+        # Check if we're near the destination for precision turning
+        current_cell = self.position_tracker.get_current_cell()
+        is_near_destination = False
+        
+        if self.path and len(self.path) > 0:
+            # Check if we're at the last few waypoints
+            remaining_waypoints = len(self.path) - self.current_target_index
+            is_near_destination = remaining_waypoints <= 2
+            
+            # Also check if we're close to the final destination
+            final_destination = self.path[-1]
+            distance_to_destination = abs(current_cell[0] - final_destination[0]) + abs(current_cell[1] - final_destination[1])
+            is_near_destination = is_near_destination or distance_to_destination <= 2
+
+        if is_near_destination:
+            print("Near destination - using PIVOT TURN for precision")
+            self._execute_precision_pivot_turn()
+        else:
+            print("Using ARCING TURN for general navigation")
+            self._execute_smooth_arcing_turn()
+
+    def _execute_precision_pivot_turn(self):
+        """
+        Execute a precise pivot turn in place - stops, turns until line found and centered.
+        """
+        TURN_TIMEOUT_S = 8.0          # Much longer timeout for precision turns
+        MIN_TURN_DURATION_S = 1.0     # Ensure we turn away from current line
+        LINE_CENTERED_THRESHOLD = 0.2 # More lenient for precision turns
+        
+        time_in_turn = time.time() - self.turn_start_time
+        
+        # Get the latest camera frame and analyze it for the line
+        frame = self.camera_line_follower.get_camera_frame()
+        if frame is None:
+            self._stop_motors()
+            return
+
+        self.camera_line_result = self.camera_line_follower.detect_line(frame)
+        line_detected = self.camera_line_result.get('line_detected', False)
+        line_offset = self.camera_line_result.get('line_offset', 1.0)
+        
+        is_line_centered = abs(line_offset) < LINE_CENTERED_THRESHOLD
+        
+        # --- DEBUG LOG ---
+        print(f"PIVOT TURN: Detected={line_detected}, Offset={line_offset:.2f}, Centered={is_line_centered}, Time={time_in_turn:.2f}s")
+        
+        # Check for completion conditions
+        # Must turn for minimum duration AND find a reasonably centered line
+        turn_complete = line_detected and is_line_centered and (time_in_turn > MIN_TURN_DURATION_S)
+        turn_timed_out = time_in_turn > TURN_TIMEOUT_S
+
+        if turn_complete or turn_timed_out:
+            if turn_complete:
+                print("PIVOT TURN complete: Line found and centered.")
+                self.audio_feedback.speak("Turn complete.")
+            else:
+                print(f"PIVOT TURN timed out after {TURN_TIMEOUT_S}s. Proceeding anyway.")
+                self.audio_feedback.speak("Turn timed out.")
+                
+            self._stop_motors()
+            self.position_tracker.update_direction_after_turn(self.turn_to_execute)
+            self.turn_to_execute = None
+            self.state = 'path_following'
+            self.last_turn_complete_time = time.time()
+            time.sleep(0.5)  # Longer pause for precision
+        else:
+            # Continue pivot turning (rotate in place)
+            self._perform_pivot_turn(self.turn_to_execute)
+
+    def _execute_smooth_arcing_turn(self):
+        """
+        Execute the original arcing turn for general navigation.
         """
         # Define turn parameters
-        TURN_TIMEOUT_S = 2.5          # Max duration for a turn to prevent getting stuck
-        MIN_TURN_DURATION_S = 0.5     # Increased slightly to ensure it commits to the turn
+        TURN_TIMEOUT_S = 5.0          # Increased timeout for more reliable turns
+        MIN_TURN_DURATION_S = 0.7     # Slightly longer to ensure proper turn commitment
         LINE_CENTERED_THRESHOLD = 0.15 # How close to center the line must be
         STRAIGHT_LINE_ASPECT_RATIO_THRESHOLD = 0.5 # A re-acquired line should be tall and thin
 
@@ -387,7 +477,7 @@ class RobotController(CameraLineFollowingMixin):
         time_in_turn = time.time() - self.turn_start_time
         
         # --- DEBUG LOG ---
-        print(f"Turning: Offset={line_offset:.2f}, AR={aspect_ratio:.2f}, Centered={is_line_centered}, Straight={is_line_straight}, Time={time_in_turn:.2f}s")
+        print(f"ARCING TURN: Offset={line_offset:.2f}, AR={aspect_ratio:.2f}, Centered={is_line_centered}, Straight={is_line_straight}, Time={time_in_turn:.2f}s")
         
         # Check for completion conditions
         # The robot must have been turning for a minimum duration AND see a centered, straight line.
@@ -396,10 +486,10 @@ class RobotController(CameraLineFollowingMixin):
 
         if turn_complete or turn_timed_out:
             if turn_complete:
-                print("Turn complete: Line re-acquired and is straight.")
+                print("ARCING TURN complete: Line re-acquired and is straight.")
                 self.audio_feedback.speak("Turn complete.")
             else: # Timed out
-                print(f"WARN: Turn timed out after {TURN_TIMEOUT_S}s. Proceeding anyway.")
+                print(f"ARCING TURN timed out after {TURN_TIMEOUT_S}s. Proceeding anyway.")
                 self.audio_feedback.speak("Turn timed out.")
                 
             self._stop_motors()
@@ -616,13 +706,34 @@ class RobotController(CameraLineFollowingMixin):
 
         self._set_motor_speeds(fl, fr, bl, br)
 
+    def _perform_pivot_turn(self, direction: str):
+        """
+        Commands motor speeds for a precise pivot turn in place.
+        This rotates the robot without forward motion for maximum precision.
+        """
+        # Use the same pivot logic as the existing _pivot_corner_turn method
+        if direction == "left":
+            # Rotate counter-clockwise (left turn)
+            fl_speed = -TURN_SPEED    # Front left: reverse
+            fr_speed = TURN_SPEED     # Front right: forward
+            bl_speed = -TURN_SPEED    # Back left: reverse  
+            br_speed = TURN_SPEED     # Back right: forward
+        else:  # right turn
+            # Rotate clockwise (right turn)
+            fl_speed = TURN_SPEED     # Front left: forward
+            fr_speed = -TURN_SPEED    # Front right: reverse
+            bl_speed = TURN_SPEED     # Back left: forward
+            br_speed = -TURN_SPEED    # Back right: reverse
+        
+        self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+
     def _execute_180_turn(self):
         """
         Execute a 180-degree turn in place when an obstacle blocks the line.
         Keep turning until the line is found, then replan path using A*.
         """
-        MAX_TURN_DURATION = 10.0  # Maximum time to prevent infinite turning
-        MIN_TURN_DURATION = 1.0   # Minimum time to ensure we turn away from obstacle
+        MAX_TURN_DURATION = 15.0  # Increased timeout for obstacle avoidance turns
+        MIN_TURN_DURATION = 1.5   # Longer minimum to ensure we clear the obstacle
         
         time_in_turn = time.time() - self.turn_start_time
         

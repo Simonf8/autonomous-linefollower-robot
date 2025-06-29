@@ -16,7 +16,7 @@ class PiMotorController:
         # GPIO pin numbers (BCM mode) for the motor driver.
         self.motor_pins = {
             'fl': {'p1': 20, 'p2': 21},  # Front Left
-            'fr': {'p1': 16, 'p2': 26},  # Front Right
+            'fr': {'p1': 26, 'p2': 16},  # Front Right
             'bl': {'p1': 17, 'p2': 27},  # Back Left
             'br': {'p1': 23, 'p2': 22},   # Back Right
         }
