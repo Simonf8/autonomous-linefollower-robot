@@ -656,44 +656,52 @@ class CameraLineFollower:
         # Convert to HSV color space for better color detection
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         
-        # Define range for black color in HSV - adjusted for reflections and lighting
+        # Define range for black color in HSV - balanced to detect black lines but avoid brown surfaces
         lower_black = np.array([0, 0, 0])
-        upper_black = np.array([180, 255, 180])  # Higher threshold to fill in the middle of the line
+        upper_black = np.array([180, 80, 100])  # Increased thresholds to better detect black lines
         
         # Create a mask that isolates the black parts of the image
         black_mask = cv2.inRange(hsv, lower_black, upper_black)
         
-        # Additional approach: Use adaptive thresholding on the grayscale image
+        # Additional approach: Use both adaptive and simple thresholding on grayscale
         # This helps with reflections and uneven lighting
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
-        # Apply adaptive threshold to find dark regions
+        # Apply adaptive threshold to find dark regions - balanced sensitivity
         adaptive_thresh = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 5
         )
         
-        # Combine HSV-based mask with adaptive threshold
-        # Only keep pixels that are dark in both methods
-        combined_mask = cv2.bitwise_and(black_mask, adaptive_thresh)
+        # Also apply a simple threshold to exclude brown/wooden surfaces
+        _, simple_thresh = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY_INV)
+        
+        # Combine all three methods: HSV + adaptive + simple threshold
+        # Only keep pixels that are dark in ALL methods
+        temp_mask = cv2.bitwise_and(black_mask, adaptive_thresh)
+        combined_mask = cv2.bitwise_and(temp_mask, simple_thresh)
         
         # Morphological operations to connect broken line segments
         # 1. Remove small noise
         small_kernel = np.ones((2, 2), np.uint8)
         opened_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, small_kernel)
         
-        # 2. Connect line segments with directional kernels - larger kernels to fill gaps
-        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 5))
+        # 2. Connect line segments with directional kernels - much larger kernels to fill gaps
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 7))
         horizontal_closed = cv2.morphologyEx(opened_mask, cv2.MORPH_CLOSE, horizontal_kernel)
         
-        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 11))
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 25))
         vertical_closed = cv2.morphologyEx(opened_mask, cv2.MORPH_CLOSE, vertical_kernel)
         
         # 3. Combine both directional closings
         directional_closed = cv2.bitwise_or(horizontal_closed, vertical_closed)
         
-        # 4. Additional aggressive closing to fill the middle gap
-        large_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 20))
+        # 4. Very aggressive closing to fill large gaps in the middle
+        large_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 40))
         gap_filled = cv2.morphologyEx(directional_closed, cv2.MORPH_CLOSE, large_kernel)
+        
+        # 5. Additional horizontal closing specifically for line gaps
+        line_connect_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 10))
+        gap_filled = cv2.morphologyEx(gap_filled, cv2.MORPH_CLOSE, line_connect_kernel)
         
         # 5. Final dilation to ensure line segments are thick enough
         dilate_kernel = np.ones((5, 5), np.uint8)

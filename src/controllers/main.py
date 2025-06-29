@@ -85,7 +85,7 @@ END_CELL = (20, 14)   # End position (col, row)
 START_DIRECTION = 'E'
 
 # Time in seconds it takes for the robot to cross one 12cm cell at BASE_SPEED.
-# This is now primarily used as a timeout.
+
 CELL_CROSSING_TIME_S = 1.5  # Increased to act as a safeguard timeout
 
 # Corner turning configuration
@@ -102,7 +102,7 @@ SHARP_CORNER_THRESHOLD = 0.6
 # Camera configuration
 WEBCAM_INDEX = 1
 CAMERA_WIDTH, CAMERA_HEIGHT = 320, 240
-CAMERA_FPS = 30
+CAMERA_FPS = 60
 
 class RobotController(CameraLineFollowingMixin):
     """Main robot controller integrating visual localization and direct motor control."""
@@ -305,12 +305,11 @@ class RobotController(CameraLineFollowingMixin):
             self.turn_start_time = time.time()
             return # Exit to let the 'turning' state take over
         
-        # --- Default Action: Line Following with Obstacle Detection ---
-        # If no turn is needed, or if on cooldown, continue following the line forward.
+       
         frame = self.camera_line_follower.get_camera_frame()
         if frame is None:
             # If camera fails, maybe we should stop or rely on blind forward movement
-            print("WARN: No camera frame for line following. Moving forward blindly for a moment.")
+            
             if self.motor_controller:
                 self.motor_controller.send_motor_speeds(BASE_SPEED, BASE_SPEED, BASE_SPEED, BASE_SPEED)
             return
@@ -329,7 +328,7 @@ class RobotController(CameraLineFollowingMixin):
             
             if obstacle_result['is_blocking']:
                 action = obstacle_result['recommended_action']
-                print(f"OBSTACLE DETECTED! Executing immediate 180° turn!")
+                
                 self.audio_feedback.speak("Obstacle blocking line, turning around")
                 
                 # MARK OBSTACLE IN GRID for future A* planning
@@ -349,7 +348,7 @@ class RobotController(CameraLineFollowingMixin):
                 
                 # Update pathfinder grid with obstacle
                 self.pathfinder.update_obstacle(obstacle_cell[0], obstacle_cell[1], True)
-                print(f"Marked obstacle at cell {obstacle_cell} in pathfinder grid")
+                
                 
                 # IMMEDIATE 180-degree turn - no gradual turning or other actions
                 # This ensures the robot immediately starts turning when obstacle is detected
@@ -371,7 +370,6 @@ class RobotController(CameraLineFollowingMixin):
             # Slow down when approaching destination
             if remaining_waypoints <= 1 or distance_to_destination <= 1:
                 current_base_speed = int(BASE_SPEED * 0.6)  # 60% speed for final approach
-                print(f"Final approach mode: speed reduced to {current_base_speed}")
             elif remaining_waypoints <= 2 or distance_to_destination <= 2:
                 current_base_speed = int(BASE_SPEED * 0.8)  # 80% speed when close
         
@@ -397,10 +395,9 @@ class RobotController(CameraLineFollowingMixin):
             is_near_destination = is_near_destination or distance_to_destination <= 2
 
         if is_near_destination:
-            print("Near destination - using PIVOT TURN for precision")
             self._execute_precision_pivot_turn()
         else:
-            print("Using ARCING TURN for general navigation")
+            
             self._execute_smooth_arcing_turn()
 
     def _execute_precision_pivot_turn(self):
@@ -426,7 +423,6 @@ class RobotController(CameraLineFollowingMixin):
         is_line_centered = abs(line_offset) < LINE_CENTERED_THRESHOLD
         
         # --- DEBUG LOG ---
-        print(f"PIVOT TURN: Detected={line_detected}, Offset={line_offset:.2f}, Centered={is_line_centered}, Time={time_in_turn:.2f}s")
         
         # Check for completion conditions
         # Must turn for minimum duration AND find a reasonably centered line
@@ -435,10 +431,10 @@ class RobotController(CameraLineFollowingMixin):
 
         if turn_complete or turn_timed_out:
             if turn_complete:
-                print("PIVOT TURN complete: Line found and centered.")
+        
                 self.audio_feedback.speak("Turn complete.")
             else:
-                print(f"PIVOT TURN timed out after {TURN_TIMEOUT_S}s. Proceeding anyway.")
+                
                 self.audio_feedback.speak("Turn timed out.")
                 
             self._stop_motors()
@@ -477,7 +473,7 @@ class RobotController(CameraLineFollowingMixin):
         time_in_turn = time.time() - self.turn_start_time
         
         # --- DEBUG LOG ---
-        print(f"ARCING TURN: Offset={line_offset:.2f}, AR={aspect_ratio:.2f}, Centered={is_line_centered}, Straight={is_line_straight}, Time={time_in_turn:.2f}s")
+        
         
         # Check for completion conditions
         # The robot must have been turning for a minimum duration AND see a centered, straight line.
@@ -486,10 +482,10 @@ class RobotController(CameraLineFollowingMixin):
 
         if turn_complete or turn_timed_out:
             if turn_complete:
-                print("ARCING TURN complete: Line re-acquired and is straight.")
+               
                 self.audio_feedback.speak("Turn complete.")
             else: # Timed out
-                print(f"ARCING TURN timed out after {TURN_TIMEOUT_S}s. Proceeding anyway.")
+
                 self.audio_feedback.speak("Turn timed out.")
                 
             self._stop_motors()
@@ -531,12 +527,7 @@ class RobotController(CameraLineFollowingMixin):
             self.position_tracker.set_moving(False)
             self.running = False
             
-    def _follow_line_with_sensor(self):
-        """Follow the line using hardware sensors via ESP32."""
-        # This method is no longer used, but kept for potential fallback.
-        print("ESP32 line sensor is disabled in features.")
-        self._stop_motors()
-        return
+
 
     def _execute_corner_turn(self, corner_direction: str, line_error: int):
         """Execute different types of corner turns based on the robot's location."""
@@ -555,7 +546,7 @@ class RobotController(CameraLineFollowingMixin):
 
         if is_special_zone:
             # Use a precise turn (e.g., pivot) in special zones for maneuvering
-            print("Executing PIVOT turn for precision maneuver.")
+            
             return self._pivot_corner_turn(corner_direction, line_error)
         else:
             # Use a smooth turn for general navigation
@@ -797,22 +788,8 @@ class RobotController(CameraLineFollowingMixin):
         
         return is_straight_x or is_straight_y
 
-
-def print_feature_status():
-    """Print current feature configuration for debugging."""
-    print("=" * 50)
-    print("ROBOT FEATURE CONFIGURATION")
-    print("=" * 50)
-    for feature, enabled in FEATURES.items():
-        status = "ENABLED" if enabled else "DISABLED"
-        print(f"{feature:<30} : {status}")
-    print("=" * 50)
-    print()
-
-
 def main():
     """Main entry point for the robot controller."""
-    print_feature_status()
     
     # --- Direction Validation ---
     # Ensure start direction is a valid cardinal direction.
@@ -820,8 +797,6 @@ def main():
     system_start_direction = START_DIRECTION.upper()
     
     if system_start_direction not in valid_directions:
-        print(f"ERROR: Invalid START_DIRECTION '{START_DIRECTION}'. Must be one of {valid_directions}.")
-        print("Defaulting to 'N'.")
         system_start_direction = 'N'
     
     robot = RobotController()
