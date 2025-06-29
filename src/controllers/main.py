@@ -286,18 +286,6 @@ class RobotController(CameraLineFollowingMixin):
         
         print(f"Path Follow: Cell={current_cell}, Target={next_waypoint}, Required Turn={required_turn}")
 
-        # POSITION TRACKING RELIABILITY CHECK
-        # If we detect an intersection but encoder tracking says we shouldn't be at one,
-        # there might be a position tracking error
-        is_at_intersection = self.camera_line_result.get('is_at_intersection', False)
-        encoder_says_turn_needed = required_turn in ['left', 'right']
-        
-        if is_at_intersection and not encoder_says_turn_needed:
-            print("WARNING: Camera detects intersection but encoder tracking doesn't expect one!")
-            print("This might indicate position tracking drift. Using camera-based intersection detection.")
-            # In this case, we trust the camera and force a position correction
-            self._correct_position_at_intersection()
-        
         # If a turn is required, change state to 'turning'.
         # This is triggered by the cell change from the encoder tracker.
         TURN_COOLDOWN_S = 2.0
@@ -316,34 +304,6 @@ class RobotController(CameraLineFollowingMixin):
             self.state = 'turning'
             self.turn_start_time = time.time()
             return # Exit to let the 'turning' state take over
-        
-        # FALLBACK: If camera detects intersection but encoder doesn't think we need to turn,
-        # and we've been moving for a while without reaching expected waypoint, trigger turn anyway
-        time_since_last_cell = time.time() - self.last_cell_update_time
-        if (is_at_intersection and 
-            time_since_last_cell > CELL_CROSSING_TIME_S * 2 and  # Been moving for 2x expected time
-            can_turn):
-            print("FALLBACK: Camera intersection detected with position tracking uncertainty!")
-            print("Forcing turn based on camera detection to recover from tracking drift.")
-            self.audio_feedback.speak("Position uncertain, using camera guidance")
-            
-            # Use simple heuristic: if we're supposed to go generally east/west, turn based on path direction
-            if self.path and self.current_target_index < len(self.path):
-                target = self.path[self.current_target_index]
-                dx = target[0] - current_cell[0]
-                dy = target[1] - current_cell[1]
-                
-                # Determine most likely turn direction based on target
-                if abs(dx) > abs(dy):  # Primarily horizontal movement needed
-                    fallback_turn = 'right' if dx > 0 else 'left'
-                else:  # Primarily vertical movement needed  
-                    fallback_turn = 'left' if dy < 0 else 'right'
-                
-                print(f"Fallback turn direction: {fallback_turn} (based on target {target})")
-                self.turn_to_execute = fallback_turn
-                self.state = 'turning'
-                self.turn_start_time = time.time()
-                return
         
         # --- Default Action: Line Following with Obstacle Detection ---
         # If no turn is needed, or if on cooldown, continue following the line forward.
@@ -836,56 +796,6 @@ class RobotController(CameraLineFollowingMixin):
         is_straight_y = all(p[1] == path[0][1] for p in path)
         
         return is_straight_x or is_straight_y
-
-    def _correct_position_at_intersection(self):
-        """
-        Correct the robot's position when camera detects intersection but encoder tracking is off.
-        This helps recover from encoder drift or wheel slip.
-        """
-        current_cell = self.position_tracker.get_current_cell()
-        current_dir = self.position_tracker.current_direction
-        
-        print(f"Position correction: Currently at {current_cell}, facing {current_dir}")
-        
-        # Look ahead in the expected direction to find the next intersection
-        # This helps us figure out if we're actually at a different cell than we think
-        dx, dy = 0, 0
-        if current_dir == 'N': dy = -1
-        elif current_dir == 'S': dy = 1
-        elif current_dir == 'E': dx = 1
-        elif current_dir == 'W': dx = -1
-        
-        # Check if there should be an intersection ahead
-        expected_next_cell = (current_cell[0] + dx, current_cell[1] + dy)
-        
-        # If we have a path, check if the next waypoint matches what we expect
-        if self.path and self.current_target_index < len(self.path):
-            expected_waypoint = self.path[self.current_target_index]
-            
-            # If the camera sees an intersection and we're supposed to reach the next waypoint,
-            # assume we've actually reached it (encoder drift correction)
-            if expected_waypoint == expected_next_cell:
-                print(f"Correcting position: Advancing to expected waypoint {expected_waypoint}")
-                self.position_tracker.current_pos = expected_waypoint
-                self.last_cell_update_time = time.sleep(0.5)
-                self.current_target_index += 1
-                
-                # Check if we've completed the mission
-                if self.current_target_index >= len(self.path):
-                    print("Mission completed after position correction!")
-                    self.state = "mission_complete"
-                    self._stop_motors()
-                    return
-                
-                self.audio_feedback.speak("Position corrected")
-            else:
-                print(f"Position correction: Expected {expected_next_cell} but waypoint is {expected_waypoint}")
-                # Reset encoder distance to prevent further drift
-                self.position_tracker.distance_since_last_cell = 0.0
-        else:
-            print("Position correction: No path available for reference")
-            # Reset encoder distance as a basic correction
-            self.position_tracker.distance_since_last_cell = 0.0
 
 
 def print_feature_status():
