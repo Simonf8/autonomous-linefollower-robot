@@ -467,16 +467,17 @@ class CameraLineFollower:
         # Morphological operations kernel
         self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         
-        # Region of Interest (ROI) settings
-        self.ROI_HEIGHT_RATIO = 0.4  # Use bottom 40% of frame for line detection
-        self.ROI_START_RATIO = 0.6   # Start ROI at 60% down from top
+        # Region of Interest (ROI) settings - ignore bottom 25% where arm is
+        self.ROI_HEIGHT_RATIO = 0.5  # Use middle 50% of frame for line detection
+        self.ROI_START_RATIO = 0.25   # Start ROI at 25% down from top (ignore top 25%)
+        self.ARM_EXCLUSION_RATIO = 0.75  # Bottom 25% is arm area - completely ignored
         
         # ARM FILTERING CONFIGURATION
         # Enable/disable purple arm filtering
         self.ARM_FILTERING_ENABLED = True
         
         # Purple color range in HSV for arm detection and filtering
-        # These values should be tuned based on your specific purple arm color
+        # Expanded ranges to better catch the bright purple arm
         self.ARM_PURPLE_LOWER = np.array([120, 50, 50])   # Lower HSV bound for purple
         self.ARM_PURPLE_UPPER = np.array([160, 255, 255]) # Upper HSV bound for purple
         
@@ -484,18 +485,20 @@ class CameraLineFollower:
         self.ARM_PURPLE_RANGES = [
             (np.array([120, 50, 50]), np.array([160, 255, 255])),   # Primary purple range
             (np.array([140, 30, 30]), np.array([170, 255, 200])),   # Extended purple range
+            (np.array([140, 80, 100]), np.array([170, 255, 255])),  # Bright magenta range
+            (np.array([145, 100, 150]), np.array([165, 255, 255])), # Very bright purple
         ]
         
-        # Minimum area for arm detection (pixels)
-        self.ARM_MIN_AREA = 200
+        # Minimum area for arm detection (pixels) - reduced to catch smaller arm regions
+        self.ARM_MIN_AREA = 50
         
         # Maximum area ratio for arm (to avoid filtering large purple obstacles)
-        self.ARM_MAX_AREA_RATIO = 0.3  # Max 30% of ROI area
+        self.ARM_MAX_AREA_RATIO = 0.5  # Max 50% of ROI area
         
-        # Arm position constraints (where we expect the arm to appear)
+        # Arm position constraints (where we expect the arm to appear) - expanded
         self.ARM_EXPECTED_REGION = {
-            'bottom_ratio': 0.3,    # Arm typically appears in bottom 30% of ROI
-            'center_tolerance': 0.4  # Arm typically appears within 40% of center
+            'bottom_ratio': 0.5,    # Arm typically appears in bottom 50% of ROI
+            'center_tolerance': 0.6  # Arm typically appears within 60% of center
         }
         
         # Line following parameters
@@ -615,9 +618,10 @@ class CameraLineFollower:
         height, width, _ = frame.shape
         self.frames_processed += 1
         
-        # Define ROI for line detection (focus on lower portion of frame)
+        # Define ROI for line detection (exclude bottom 25% where arm is)
         roi_start_y = int(height * self.ROI_START_RATIO)
-        roi = frame[roi_start_y:height, :]
+        roi_end_y = int(height * self.ARM_EXCLUSION_RATIO)  # Stop before arm area
+        roi = frame[roi_start_y:roi_end_y, :]
         
         # Preprocess the ROI
         processed_roi = self._preprocess_roi(roi)
@@ -647,35 +651,53 @@ class CameraLineFollower:
     def _preprocess_roi(self, roi: np.ndarray) -> np.ndarray:
         """
         Applies a series of filters to the ROI to isolate the line using color masking.
-        Now includes purple arm filtering to prevent interference with line detection.
+        Simplified approach since arm area is completely excluded from ROI.
         """
-        # Convert to HSV color space, which is better for color detection
+        # Convert to HSV color space for better color detection
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         
-        # Define range for black color in HSV
-        # These values might need tuning for your specific lighting conditions
+        # Define range for black color in HSV - adjusted for reflections and lighting
         lower_black = np.array([0, 0, 0])
-        upper_black = np.array([180, 255, 50])
+        upper_black = np.array([180, 255, 180])  # Higher threshold to fill in the middle of the line
         
         # Create a mask that isolates the black parts of the image
         black_mask = cv2.inRange(hsv, lower_black, upper_black)
         
-        # ARM FILTERING: Remove purple arm regions from the black mask
-        if self.ARM_FILTERING_ENABLED:
-            black_mask = self._filter_purple_arm(hsv, black_mask, roi.shape)
+        # Additional approach: Use adaptive thresholding on the grayscale image
+        # This helps with reflections and uneven lighting
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
-        # Enhanced morphological operations to better connect broken line segments
-        # 1. First, do a small opening to remove noise
+        # Apply adaptive threshold to find dark regions
+        adaptive_thresh = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+        )
+        
+        # Combine HSV-based mask with adaptive threshold
+        # Only keep pixels that are dark in both methods
+        combined_mask = cv2.bitwise_and(black_mask, adaptive_thresh)
+        
+        # Morphological operations to connect broken line segments
+        # 1. Remove small noise
         small_kernel = np.ones((2, 2), np.uint8)
-        opened_mask = cv2.morphologyEx(black_mask, cv2.MORPH_OPEN, small_kernel)
+        opened_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, small_kernel)
         
-        # 2. Then do a closing to connect nearby segments
-        close_kernel = np.ones((5, 5), np.uint8)
-        closed_mask = cv2.morphologyEx(opened_mask, cv2.MORPH_CLOSE, close_kernel)
+        # 2. Connect line segments with directional kernels - larger kernels to fill gaps
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 5))
+        horizontal_closed = cv2.morphologyEx(opened_mask, cv2.MORPH_CLOSE, horizontal_kernel)
         
-        # 3. Finally, do a small dilation to ensure line segments are thick enough
-        dilate_kernel = np.ones((3, 3), np.uint8)
-        final_mask = cv2.dilate(closed_mask, dilate_kernel, iterations=1)
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 11))
+        vertical_closed = cv2.morphologyEx(opened_mask, cv2.MORPH_CLOSE, vertical_kernel)
+        
+        # 3. Combine both directional closings
+        directional_closed = cv2.bitwise_or(horizontal_closed, vertical_closed)
+        
+        # 4. Additional aggressive closing to fill the middle gap
+        large_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 20))
+        gap_filled = cv2.morphologyEx(directional_closed, cv2.MORPH_CLOSE, large_kernel)
+        
+        # 5. Final dilation to ensure line segments are thick enough
+        dilate_kernel = np.ones((5, 5), np.uint8)
+        final_mask = cv2.dilate(gap_filled, dilate_kernel, iterations=2)
         
         return final_mask
     
@@ -739,14 +761,41 @@ class CameraLineFollower:
         # Remove arm regions from the black mask
         filtered_mask = black_mask.copy()
         
+        # Additional aggressive filtering: remove any purple pixels from the bottom region
+        bottom_region_start = int(roi_height * 0.7)  # Bottom 30% of ROI
+        bottom_purple_mask = purple_mask[bottom_region_start:, :]
+        
+        if np.sum(bottom_purple_mask) > 0:  # If there are purple pixels in bottom region
+            # Create a mask to remove all purple from bottom region
+            bottom_filter_mask = np.ones((roi_height, roi_width), dtype=np.uint8) * 255
+            bottom_filter_mask[bottom_region_start:, :] = cv2.bitwise_not(purple_mask[bottom_region_start:, :])
+            filtered_mask = cv2.bitwise_and(filtered_mask, bottom_filter_mask)
+            
+            if self.debug:
+                purple_pixel_count = np.sum(bottom_purple_mask > 0)
+                print(f"Filtered {purple_pixel_count} purple pixels from bottom region")
+        
+        # Additional filtering: Remove black pixels that are too close to purple regions (arm edges)
+        # Dilate the purple mask to create a "no-black-zone" around purple areas
+        purple_exclusion_kernel = np.ones((15, 15), np.uint8)
+        purple_exclusion_mask = cv2.dilate(purple_mask, purple_exclusion_kernel, iterations=1)
+        
+        # Remove any black pixels that are within the purple exclusion zone
+        filtered_mask = cv2.bitwise_and(filtered_mask, cv2.bitwise_not(purple_exclusion_mask))
+        
+        if self.debug and np.sum(purple_exclusion_mask) > 0:
+            excluded_pixels = np.sum(purple_exclusion_mask > 0)
+            print(f"Excluded {excluded_pixels} pixels near purple regions (arm edges)")
+        
+        # Process individual arm regions
         for arm_region in arm_regions:
             # Create a mask for this arm region with some padding
             arm_mask = np.zeros((roi_height, roi_width), dtype=np.uint8)
             cv2.drawContours(arm_mask, [arm_region['contour']], -1, 255, -1)
             
-            # Dilate the arm mask slightly to ensure complete removal
-            dilate_kernel = np.ones((5, 5), np.uint8)
-            arm_mask_dilated = cv2.dilate(arm_mask, dilate_kernel, iterations=1)
+            # Dilate the arm mask more aggressively to ensure complete removal
+            dilate_kernel = np.ones((7, 7), np.uint8)
+            arm_mask_dilated = cv2.dilate(arm_mask, dilate_kernel, iterations=2)
             
             # Remove this arm region from the black mask
             filtered_mask = cv2.bitwise_and(filtered_mask, cv2.bitwise_not(arm_mask_dilated))
@@ -959,12 +1008,20 @@ class CameraLineFollower:
         # Create a full-size black frame
         debug_frame = np.zeros((height, width, 3), dtype=np.uint8)
         
+        # Calculate ROI end position (excluding arm area)
+        roi_end_y = int(height * self.ARM_EXCLUSION_RATIO)
+        
         # Place the binary ROI onto the full-size frame in the correct position
-        debug_frame[roi_start_y:height, :] = binary_roi_bgr
+        debug_frame[roi_start_y:roi_end_y, :] = binary_roi_bgr
 
-        # Draw frame center line for reference
+        # Draw frame center line for reference (only in ROI area)
         center_x = width // 2
-        cv2.line(debug_frame, (center_x, roi_start_y), (center_x, height), (0, 0, 255), 1) # Red line
+        cv2.line(debug_frame, (center_x, roi_start_y), (center_x, roi_end_y), (0, 0, 255), 1) # Red line
+        
+        # Draw arm exclusion zone boundary
+        cv2.line(debug_frame, (0, roi_end_y), (width, roi_end_y), (0, 255, 255), 2) # Yellow line
+        cv2.putText(debug_frame, "ARM EXCLUSION ZONE", (10, roi_end_y + 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
         if result.get('line_detected') and result.get('contour') is not None:
             # Draw the detected contour in blue

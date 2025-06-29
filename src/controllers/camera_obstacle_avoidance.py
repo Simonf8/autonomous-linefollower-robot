@@ -18,10 +18,11 @@ class CameraObstacleAvoidance:
         # Debug frame optimization
         self.debug_frame_counter = 0
         self.debug_frame_skip = 2  
-        # Obstacle detection parameters
+        # Obstacle detection parameters - focused on line blocking
         self.depth_threshold = 50  # Depth map threshold for obstacles
-        self.min_obstacle_area = 300  # Minimum contour area to consider as obstacle
-        self.obstacle_distance_threshold = 0.3  # Distance threshold (normalized)
+        self.min_obstacle_area = 200  # Minimum contour area to consider as obstacle (reduced for smaller objects)
+        self.obstacle_distance_threshold = 0.4  # Distance threshold (normalized) - more sensitive
+        self.line_blocking_threshold = 0.6  # How much of the line area must be blocked
         
         # Corner detection parameters
         self.corner_angle_threshold = 30  # Degrees to detect corner
@@ -109,6 +110,110 @@ class CameraObstacleAvoidance:
         
         return result
     
+    def detect_line_blocking_obstacle(self, frame: np.ndarray, line_center_x: int = None) -> Dict:
+        """
+        Detect if there's an obstacle blocking the line path ahead.
+        
+        Args:
+            frame: Input camera frame (BGR)
+            line_center_x: X position of detected line center (optional)
+            
+        Returns:
+            Dictionary with:
+            - is_blocking: bool (True if obstacle blocks line)
+            - obstacle_detected: bool
+            - distance: float (0.0 to 1.0)
+            - recommended_action: str ('continue', 'turn_around', 'stop')
+        """
+        if frame is None:
+            return {'is_blocking': False, 'obstacle_detected': False, 'distance': 1.0, 'recommended_action': 'continue'}
+        
+        height, width = frame.shape[:2]
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Focus on the area where the line should be (middle section of frame)
+        line_roi_start_y = int(height * 0.3)  # Start checking from 30% down
+        line_roi_end_y = int(height * 0.7)    # Stop at 70% down (before arm area)
+        
+        # Define line corridor width
+        line_corridor_width = width // 4  # 25% of frame width
+        
+        if line_center_x is None:
+            line_center_x = width // 2  # Default to center
+        
+        # Define line corridor boundaries
+        corridor_left = max(0, line_center_x - line_corridor_width // 2)
+        corridor_right = min(width, line_center_x + line_corridor_width // 2)
+        
+        # Extract the line corridor ROI
+        line_roi = gray[line_roi_start_y:line_roi_end_y, corridor_left:corridor_right]
+        
+        # Apply edge detection to find obstacles
+        edges = cv2.Canny(line_roi, 50, 150, apertureSize=3)
+        
+        # Morphological operations to connect edges
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        
+        # Find contours (potential obstacles)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        is_blocking = False
+        obstacle_detected = False
+        distance = 1.0
+        largest_obstacle = None
+        
+        if contours:
+            # Filter contours by area
+            valid_obstacles = [c for c in contours if cv2.contourArea(c) >= self.min_obstacle_area]
+            
+            if valid_obstacles:
+                # Find the largest obstacle
+                largest_obstacle = max(valid_obstacles, key=cv2.contourArea)
+                obstacle_area = cv2.contourArea(largest_obstacle)
+                
+                # Calculate what percentage of the line corridor is blocked
+                roi_area = line_roi.shape[0] * line_roi.shape[1]
+                blocking_ratio = obstacle_area / roi_area
+                
+                # Get obstacle position
+                x, y, w, h = cv2.boundingRect(largest_obstacle)
+                
+                # Estimate distance (objects lower in ROI are closer)
+                distance_factor = (line_roi.shape[0] - y) / line_roi.shape[0]
+                distance = 1.0 - distance_factor
+                
+                obstacle_detected = True
+                
+                # Consider it blocking if it's close and covers significant area
+                if distance < self.obstacle_distance_threshold and blocking_ratio > 0.1:
+                    is_blocking = True
+                
+                if self.debug:
+                    print(f"Obstacle detected: area={obstacle_area}, blocking_ratio={blocking_ratio:.2f}, distance={distance:.2f}")
+        
+        # Determine recommended action
+        if is_blocking:
+            if distance < 0.2:  # Very close
+                recommended_action = 'turn_around'
+            elif distance < 0.3:  # Close
+                recommended_action = 'stop'
+            else:
+                recommended_action = 'turn_around'
+        else:
+            recommended_action = 'continue'
+        
+        return {
+            'is_blocking': is_blocking,
+            'obstacle_detected': obstacle_detected,
+            'distance': distance,
+            'recommended_action': recommended_action,
+            'contour': largest_obstacle,
+            'roi_bounds': (corridor_left, line_roi_start_y, corridor_right, line_roi_end_y)
+        }
+
     def _detect_obstacles(self, gray_frame: np.ndarray, width: int, height: int) -> Dict:
         """
         Detect obstacles in the forward view using edge detection and contour analysis.

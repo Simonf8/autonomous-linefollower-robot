@@ -20,6 +20,7 @@ from camera_line_follower import CameraLineFollower, CameraLineFollowingMixin
 from encoder_position_tracker import EncoderPositionTracker
 from pi_motor_controller import PiMotorController
 from audio_feedback import AudioFeedback
+from camera_obstacle_avoidance import CameraObstacleAvoidance
 
 # ================================
 # FEATURE CONFIGURATION
@@ -27,7 +28,7 @@ from audio_feedback import AudioFeedback
 # Enable/disable features for easy testing and debugging
 FEATURES = {
     'OBJECT_DETECTION_ENABLED': False,
-    'OBSTACLE_AVOIDANCE_ENABLED': False,
+    'OBSTACLE_AVOIDANCE_ENABLED': True,  # Enabled for line blocking detection
     'VISION_SYSTEM_ENABLED': False, # Disabled to use encoders
     'CAMERA_LINE_FOLLOWING_ENABLED': True, 
     'POSITION_CORRECTION_ENABLED': False, # N/A for encoder-based tracking
@@ -120,6 +121,12 @@ class RobotController(CameraLineFollowingMixin):
         # Initialize audio feedback system
         self.audio_feedback = AudioFeedback()
 
+        # Initialize obstacle avoidance for line blocking detection
+        if FEATURES['OBSTACLE_AVOIDANCE_ENABLED']:
+            self.obstacle_avoidance = CameraObstacleAvoidance(debug=FEATURES['DEBUG_VISUALIZATION_ENABLED'])
+        else:
+            self.obstacle_avoidance = None
+
         self.object_detector = None
         self.frame = None
         self.processed_frame = None
@@ -153,6 +160,7 @@ class RobotController(CameraLineFollowingMixin):
 
         self.line_pid = PIDController(kp=0.5, ki=0.01, kd=0.1, output_limits=(-100, 100))
         self.state = "idle"
+        self.debug = FEATURES['DEBUG_VISUALIZATION_ENABLED']
 
         # Vision setup is now minimal, only for line following
         if FEATURES['CAMERA_LINE_FOLLOWING_ENABLED']:
@@ -294,7 +302,7 @@ class RobotController(CameraLineFollowingMixin):
             self.turn_start_time = time.time()
             return # Exit to let the 'turning' state take over
         
-        # --- Default Action: Line Following ---
+        # --- Default Action: Line Following with Obstacle Detection ---
         # If no turn is needed, or if on cooldown, continue following the line forward.
         frame = self.camera_line_follower.get_camera_frame()
         if frame is None:
@@ -305,6 +313,28 @@ class RobotController(CameraLineFollowingMixin):
             return
 
         self.camera_line_result = self.camera_line_follower.detect_line(frame)
+        
+        # Check for obstacles blocking the line
+        if FEATURES['OBSTACLE_AVOIDANCE_ENABLED'] and self.obstacle_avoidance:
+            line_center_x = self.camera_line_result.get('line_center_x', frame.shape[1] // 2)
+            obstacle_result = self.obstacle_avoidance.detect_line_blocking_obstacle(frame, line_center_x)
+            
+            if obstacle_result['is_blocking']:
+                action = obstacle_result['recommended_action']
+                print(f"OBSTACLE DETECTED! Action: {action}")
+                self.audio_feedback.speak(f"Obstacle detected, {action.replace('_', ' ')}")
+                
+                if action == 'turn_around':
+                    # Execute 180-degree turn
+                    self.state = 'obstacle_turn_around'
+                    self.turn_start_time = time.time()
+                    return
+                elif action == 'stop':
+                    # Stop and wait
+                    self._stop_motors()
+                    return
+        
+        # Normal line following if no obstacles
         fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(self.camera_line_result, base_speed=BASE_SPEED)
         self._set_motor_speeds(fl, fr, bl, br)
 
@@ -375,6 +405,9 @@ class RobotController(CameraLineFollowingMixin):
         elif self.state == "turning":
             self.position_tracker.set_moving(True)
             self._execute_arcing_turn()
+        elif self.state == "obstacle_turn_around":
+            self.position_tracker.set_moving(True)
+            self._execute_180_turn()
         elif self.state == "mission_complete":
             self.audio_feedback.speak("Mission complete.")
             self._stop_motors()
@@ -560,6 +593,42 @@ class RobotController(CameraLineFollowingMixin):
 
         self._set_motor_speeds(fl, fr, bl, br)
 
+    def _execute_180_turn(self):
+        """
+        Execute a 180-degree turn in place when an obstacle blocks the line.
+        """
+        TURN_180_DURATION = 3.0  # Duration for 180-degree turn
+        
+        time_in_turn = time.time() - self.turn_start_time
+        
+        if time_in_turn < TURN_180_DURATION:
+            # Execute pivot turn (rotate in place)
+            # Turn right (clockwise) - can be changed to left if needed
+            fl_speed = TURN_SPEED     # Front left: forward
+            fr_speed = -TURN_SPEED    # Front right: reverse
+            bl_speed = TURN_SPEED     # Back left: forward
+            br_speed = -TURN_SPEED    # Back right: reverse
+            
+            self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+            
+            if self.debug and int(time_in_turn) != int(time_in_turn - 0.1):  # Print every second
+                print(f"Executing 180° turn: {time_in_turn:.1f}s / {TURN_180_DURATION}s")
+        else:
+            # Turn complete
+            print("180-degree turn complete. Resuming line following.")
+            self.audio_feedback.speak("Turn around complete")
+            self._stop_motors()
+            
+            # Update direction in position tracker (180 degrees)
+            # This is a simplified approach - in practice you might want more precise tracking
+            current_dir = self.position_tracker.current_direction
+            opposite_directions = {'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E'}
+            new_direction = opposite_directions.get(current_dir, current_dir)
+            self.position_tracker.current_direction = new_direction
+            
+            self.state = 'path_following'
+            time.sleep(0.5)  # Brief pause to stabilize
+
     def _is_path_straight(self, path: List[Tuple[int, int]]) -> bool:
         """Checks if a path is a straight line (either horizontal or vertical)."""
         if len(path) < 2:
@@ -635,6 +704,10 @@ def main():
                 'line_offset': robot.camera_line_result.get('line_offset', 0),
                 'is_at_intersection': robot.camera_line_result.get('is_at_intersection', False),
                 'arm_filtering': robot.camera_line_follower.get_arm_filtering_status() if hasattr(robot, 'camera_line_follower') else {'enabled': False},
+            },
+            'obstacle_avoidance': {
+                'enabled': FEATURES['OBSTACLE_AVOIDANCE_ENABLED'],
+                'status': 'active' if robot.obstacle_avoidance else 'disabled',
             },
             'motors': robot.motor_speeds,
             'encoders': encoder_counts,
@@ -731,14 +804,15 @@ def main():
                 if hasattr(robot, 'camera_line_follower'):
                     height, width = frame.shape[:2]
                     roi_start_y = int(height * robot.camera_line_follower.ROI_START_RATIO)
-                    roi = frame[roi_start_y:height, :]
+                    roi_end_y = int(height * robot.camera_line_follower.ARM_EXCLUSION_RATIO)
+                    roi = frame[roi_start_y:roi_end_y, :]
                     
                     # Get the preprocessed binary ROI
                     binary_roi = robot.camera_line_follower._preprocess_roi(roi)
                     
                     # Create a full-size frame showing just the binary ROI
                     binary_frame = np.zeros((height, width), dtype=np.uint8)
-                    binary_frame[roi_start_y:height, :] = binary_roi
+                    binary_frame[roi_start_y:roi_end_y, :] = binary_roi
                     
                     # Convert to BGR for consistent encoding
                     binary_frame_bgr = cv2.cvtColor(binary_frame, cv2.COLOR_GRAY2BGR)
@@ -866,6 +940,46 @@ def main():
                 'status': 'error',
                 'message': f'Failed to configure colors: {str(e)}'
             }), 400
+
+    @app.route('/test_obstacle_detection')
+    def test_obstacle_detection():
+        """Test obstacle detection with current camera frame."""
+        if not FEATURES['OBSTACLE_AVOIDANCE_ENABLED'] or not robot.obstacle_avoidance:
+            return jsonify({
+                'status': 'error',
+                'message': 'Obstacle avoidance not enabled'
+            }), 400
+        
+        if not hasattr(robot, 'camera_line_follower'):
+            return jsonify({
+                'status': 'error',
+                'message': 'Camera line follower not available'
+            }), 400
+        
+        frame = robot.camera_line_follower.get_camera_frame()
+        if frame is None:
+            return jsonify({
+                'status': 'error',
+                'message': 'No camera frame available'
+            }), 400
+        
+        # Get line center from current detection
+        line_center_x = robot.camera_line_result.get('line_center_x', frame.shape[1] // 2)
+        
+        # Test obstacle detection
+        obstacle_result = robot.obstacle_avoidance.detect_line_blocking_obstacle(frame, line_center_x)
+        
+        return jsonify({
+            'status': 'success',
+            'obstacle_detection': {
+                'is_blocking': obstacle_result['is_blocking'],
+                'obstacle_detected': obstacle_result['obstacle_detected'],
+                'distance': obstacle_result['distance'],
+                'recommended_action': obstacle_result['recommended_action'],
+                'line_center_x': line_center_x,
+                'frame_size': f"{frame.shape[1]}x{frame.shape[0]}"
+            }
+        })
 
     @app.route('/grid_feed')
     def grid_feed():
