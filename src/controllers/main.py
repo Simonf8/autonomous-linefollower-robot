@@ -73,7 +73,7 @@ MAZE_GRID = [
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 13
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0]  # Row 14
 ]
-START_CELL = (0, 0) # Start position (col, row)
+START_CELL = (0, 2) # Start position (col, row)
 END_CELL = (20, 14)   # End position (col, row)
 
 # START_DIRECTION must be a cardinal direction: 'N', 'S', 'E', or 'W'.
@@ -321,6 +321,9 @@ class RobotController(CameraLineFollowingMixin):
         
         self.camera_line_result = self.camera_line_follower.detect_line(frame)
         
+        # Feed camera results to position tracker for hybrid tracking
+        self.position_tracker.set_camera_line_result(self.camera_line_result)
+        
         # Check for obstacles blocking the line (skip every other frame for performance)
         if FEATURES['OBSTACLE_AVOIDANCE_ENABLED'] and self.obstacle_avoidance and self._frame_skip_counter % 2 == 0:
             line_center_x = self.camera_line_result.get('line_center_x', frame.shape[1] // 2)
@@ -417,6 +420,10 @@ class RobotController(CameraLineFollowingMixin):
             return
 
         self.camera_line_result = self.camera_line_follower.detect_line(frame)
+        
+        # Feed camera results to position tracker for hybrid tracking
+        self.position_tracker.set_camera_line_result(self.camera_line_result)
+        
         line_detected = self.camera_line_result.get('line_detected', False)
         line_offset = self.camera_line_result.get('line_offset', 1.0)
         
@@ -464,6 +471,10 @@ class RobotController(CameraLineFollowingMixin):
             return
 
         self.camera_line_result = self.camera_line_follower.detect_line(frame)
+        
+        # Feed camera results to position tracker for hybrid tracking
+        self.position_tracker.set_camera_line_result(self.camera_line_result)
+        
         line_offset = self.camera_line_result.get('line_offset', 1.0) # Default to a large offset
         aspect_ratio = self.camera_line_result.get('aspect_ratio', 1.0) # Default to a wide shape
 
@@ -836,6 +847,7 @@ def main():
             'line_follower': {
                 'line_offset': robot.camera_line_result.get('line_offset', 0),
                 'is_at_intersection': robot.camera_line_result.get('is_at_intersection', False),
+                'intersection_count': robot.position_tracker.intersection_count,
                 'arm_filtering': robot.camera_line_follower.get_arm_filtering_status() if hasattr(robot, 'camera_line_follower') else {'enabled': False},
             },
             'obstacle_avoidance': {

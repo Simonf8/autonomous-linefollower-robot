@@ -1,9 +1,9 @@
 import time
 import math
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 
 class EncoderPositionTracker:
-    """Tracks the robot's position (grid cell) and orientation using wheel encoders."""
+    """Tracks the robot's position (grid cell) and orientation using wheel encoders with camera assistance."""
 
     def __init__(self, maze: list, start_pos: Tuple[int, int], motor_controller,
                  start_direction: str = 'N', cell_size_m: float = 0.11,
@@ -31,6 +31,18 @@ class EncoderPositionTracker:
         self.running = False
         self.last_update_time = time.time()
         
+        # Camera-assisted tracking
+        self.camera_line_result: Optional[Dict] = None
+        self.last_intersection_detection = False
+        self.intersection_detection_cooldown = 0.0
+        self.INTERSECTION_COOLDOWN_S = 2.0  # Minimum time between intersection detections
+        self.expected_intersections = self._calculate_expected_intersections()
+        self.intersection_count = 0
+        
+        # Position correction parameters
+        self.position_confidence = 1.0
+        self.encoder_drift_threshold = 0.3  # Maximum allowed drift before correction
+        
         # Reset encoders at the start
         if self.motor_controller:
             self.motor_controller.reset_encoders()
@@ -38,14 +50,113 @@ class EncoderPositionTracker:
         else:
             self.last_encoder_counts = {'fl': 0, 'fr': 0, 'bl': 0, 'br': 0}
 
+    def _calculate_expected_intersections(self) -> int:
+        """Calculate expected number of intersections on the path."""
+        # This is a simplified calculation - in a real implementation,
+        # you'd calculate this based on the planned path
+        return 0
+
+    def set_camera_line_result(self, camera_result: Dict):
+        """Update the tracker with the latest camera line detection result."""
+        self.camera_line_result = camera_result
+        
+        # Check for intersection detection
+        if camera_result and camera_result.get('is_at_intersection', False):
+            current_time = time.time()
+            
+            # Only process if we're not in cooldown period
+            if current_time - self.intersection_detection_cooldown > self.INTERSECTION_COOLDOWN_S:
+                if not self.last_intersection_detection:  # Rising edge detection
+                    self._handle_intersection_detection()
+                    self.intersection_detection_cooldown = current_time
+                
+                self.last_intersection_detection = True
+            else:
+                self.last_intersection_detection = False
+        else:
+            self.last_intersection_detection = False
+
+    def _handle_intersection_detection(self):
+        """Handle when camera detects an intersection."""
+        self.intersection_count += 1
+        
+        if self.debug:
+            print(f"CAMERA: Intersection detected! Count: {self.intersection_count}")
+        
+        # Check if we're at an expected intersection position
+        expected_intersection_cells = self._get_expected_intersection_cells()
+        
+        if self.current_pos in expected_intersection_cells:
+            # We're at an expected intersection - this confirms our position
+            self.position_confidence = min(1.0, self.position_confidence + 0.2)
+            if self.debug:
+                print(f"CAMERA: Position confirmed at intersection {self.current_pos}")
+        else:
+            # We detected an intersection but encoder says we're not at one
+            # This suggests encoder drift - try to correct
+            nearest_intersection = self._find_nearest_intersection()
+            if nearest_intersection and self._is_reasonable_correction(nearest_intersection):
+                if self.debug:
+                    print(f"CAMERA: Position correction: {self.current_pos} -> {nearest_intersection}")
+                self.current_pos = nearest_intersection
+                self.distance_since_last_cell = 0.0  # Reset distance tracking
+                self.position_confidence = 0.8  # Moderate confidence after correction
+
+    def _get_expected_intersection_cells(self) -> list:
+        """Get list of cells that should have intersections."""
+        intersections = []
+        
+        for row in range(len(self.maze)):
+            for col in range(len(self.maze[0])):
+                if self.maze[row][col] == 0:  # Walkable cell
+                    # Check if this cell has multiple adjacent walkable cells
+                    adjacent_count = 0
+                    directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]  # N, S, E, W
+                    
+                    for dx, dy in directions:
+                        adj_row, adj_col = row + dy, col + dx
+                        if (0 <= adj_row < len(self.maze) and 
+                            0 <= adj_col < len(self.maze[0]) and
+                            self.maze[adj_row][adj_col] == 0):
+                            adjacent_count += 1
+                    
+                    # If more than 2 adjacent cells, it's likely an intersection
+                    if adjacent_count > 2:
+                        intersections.append((col, row))
+        
+        return intersections
+
+    def _find_nearest_intersection(self) -> Optional[Tuple[int, int]]:
+        """Find the nearest intersection cell to current position."""
+        intersections = self._get_expected_intersection_cells()
+        if not intersections:
+            return None
+        
+        min_distance = float('inf')
+        nearest = None
+        
+        for intersection in intersections:
+            distance = abs(intersection[0] - self.current_pos[0]) + abs(intersection[1] - self.current_pos[1])
+            if distance < min_distance:
+                min_distance = distance
+                nearest = intersection
+        
+        return nearest if min_distance <= 2 else None  # Only correct if within 2 cells
+
+    def _is_reasonable_correction(self, new_pos: Tuple[int, int]) -> bool:
+        """Check if the position correction is reasonable."""
+        distance = abs(new_pos[0] - self.current_pos[0]) + abs(new_pos[1] - self.current_pos[1])
+        return distance <= 1  # Only allow corrections of 1 cell
 
     def start(self):
         """Starts the position tracking."""
-        print("Encoder Position Tracker started.")
+        print("Hybrid Encoder+Camera Position Tracker started.")
         self.running = True
         self.last_update_time = time.time()
         # Reset state at the start of a mission
         self.distance_since_last_cell = 0.0
+        self.intersection_count = 0
+        self.position_confidence = 1.0
         if self.motor_controller:
             self.motor_controller.reset_encoders()
             self.last_encoder_counts = self.motor_controller.get_encoder_counts()
@@ -53,7 +164,7 @@ class EncoderPositionTracker:
     def stop(self):
         """Stops the position tracking."""
         self.running = False
-        print("Encoder Position Tracker stopped.")
+        print("Hybrid Position Tracker stopped.")
 
     def update_position(self):
         """
@@ -134,12 +245,12 @@ class EncoderPositionTracker:
     def get_status(self) -> Dict:
         """Provides status information for the UI."""
         return {
-            'status': 'OPERATIONAL' if self.running else 'IDLE',
-            'confidence': 0.9,
+            'status': 'HYBRID_TRACKING' if self.running else 'IDLE',
+            'confidence': self.position_confidence,
             'current_position': self.current_pos,
             'current_direction': self.current_direction,
-            'scene_type': 'encoder',
-            'message': f"Dist in cell: {self.distance_since_last_cell:.2f}m"
+            'scene_type': 'hybrid_encoder_camera',
+            'message': f"Dist: {self.distance_since_last_cell:.2f}m, Intersections: {self.intersection_count}, Conf: {self.position_confidence:.2f}"
         }
 
     def set_moving(self, moving: bool):
