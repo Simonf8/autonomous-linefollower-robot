@@ -41,10 +41,10 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-CELL_SIZE_M = 0.06
-BASE_SPEED = 40
-TURN_SPEED = 60
-CORNER_SPEED = 70
+CELL_SIZE_M = 0.075
+BASE_SPEED = 50
+TURN_SPEED = 55
+CORNER_SPEED = 50
 
 # Hardware-specific trims to account for motor differences.
 # Values are multipliers (1.0 = no change, 0.9 = 10% slower).
@@ -74,7 +74,7 @@ MAZE_GRID = [
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0]  # Row 14
 ]
 START_CELL = (0, 2) # Start position (col, row)
-END_CELL = (20, 14)   # End position (col, row)
+END_CELL = (3, 12)   # End position (col, row)
 
 # START_DIRECTION must be a cardinal direction: 'N', 'S', 'E', or 'W'.
 # This tells the robot its initial orientation on the map grid.
@@ -101,7 +101,7 @@ SHARP_CORNER_THRESHOLD = 0.6
 
 # Camera configuration
 WEBCAM_INDEX = 1
-CAMERA_WIDTH, CAMERA_HEIGHT = 320, 240
+CAMERA_WIDTH, CAMERA_HEIGHT = 320, 720
 CAMERA_FPS = 60
 
 class RobotController(CameraLineFollowingMixin):

@@ -38,7 +38,7 @@ class CameraObstacleAvoidance:
         self.obstacle_distance_threshold = 0.3  # Distance threshold (normalized)
         
         # Corner detection parameters
-        self.corner_angle_threshold = 30  # Degrees to detect corner
+        self.corner_angle_threshold = 60  # Degrees to detect corner
         self.corner_line_length = 50  # Minimum line length for corner detection
         self.corner_cooldown = 3.0  # Seconds between corner detections
         self.last_corner_time = 0
@@ -472,6 +472,49 @@ class CameraLineFollower:
         self.ROI_START_RATIO = 0.25   # Start ROI at 25% down from top (ignore top 25%)
         self.ARM_EXCLUSION_RATIO = 0.75  # Bottom 25% is arm area - completely ignored
         
+        # ADAPTIVE THRESHOLDING CONFIGURATION
+        # Enable/disable different thresholding methods
+        self.ADAPTIVE_THRESH_ENABLED = True
+        self.SIMPLE_THRESH_ENABLED = True  
+        self.HSV_THRESH_ENABLED = True
+        
+        # Adaptive threshold parameters - highly configurable
+        self.ADAPTIVE_METHOD = cv2.ADAPTIVE_THRESH_GAUSSIAN_C  # or cv2.ADAPTIVE_THRESH_MEAN_C
+        self.ADAPTIVE_THRESH_TYPE = cv2.THRESH_BINARY_INV     # Inverted for black lines
+        self.ADAPTIVE_BLOCK_SIZE = 11      # Size of neighborhood area (must be odd)
+        self.ADAPTIVE_C_CONSTANT = 5       # Constant subtracted from mean/gaussian
+        
+        # Alternative adaptive parameters for different lighting conditions
+        self.ADAPTIVE_PARAMS_BRIGHT = {
+            'block_size': 15,
+            'c_constant': 8,
+            'method': cv2.ADAPTIVE_THRESH_GAUSSIAN_C
+        }
+        
+        self.ADAPTIVE_PARAMS_DIM = {
+            'block_size': 9,
+            'c_constant': 3,
+            'method': cv2.ADAPTIVE_THRESH_GAUSSIAN_C
+        }
+        
+        self.ADAPTIVE_PARAMS_NORMAL = {
+            'block_size': 11,
+            'c_constant': 5,
+            'method': cv2.ADAPTIVE_THRESH_GAUSSIAN_C
+        }
+        
+        # Current adaptive parameters (can be switched dynamically)
+        self.current_adaptive_params = self.ADAPTIVE_PARAMS_NORMAL
+        
+        # Auto-adaptation based on frame brightness
+        self.AUTO_ADAPTIVE_ENABLED = True
+        self.BRIGHTNESS_THRESHOLD_BRIGHT = 120  # Average brightness above this = bright conditions
+        self.BRIGHTNESS_THRESHOLD_DIM = 80      # Average brightness below this = dim conditions
+        
+        # Simple threshold parameters
+        self.SIMPLE_THRESHOLD_VALUE = 70       # Fixed threshold value
+        self.SIMPLE_THRESH_TYPE = cv2.THRESH_BINARY_INV
+        
         # ARM FILTERING CONFIGURATION
         # Enable/disable purple arm filtering
         self.ARM_FILTERING_ENABLED = True
@@ -534,7 +577,7 @@ class CameraLineFollower:
         
         self.max_line_width = 0.8 # Max line width as a ratio of ROI width
         self.intersection_solidity_threshold = 0.85 # Lower value means more complex shape
-        self.intersection_aspect_ratio_threshold = 0.8 # If width is > 80% of height, might be a corner
+        self.intersection_aspect_ratio_threshold = 0.8
         
         self.canny_high = 150
         self.binary_threshold = 70
@@ -650,35 +693,88 @@ class CameraLineFollower:
     
     def _preprocess_roi(self, roi: np.ndarray) -> np.ndarray:
         """
-        Applies a series of filters to the ROI to isolate the line using color masking.
-        Simplified approach since arm area is completely excluded from ROI.
+        Applies enhanced adaptive thresholding to isolate the line.
+        Uses configurable adaptive thresholding with auto-adaptation for lighting conditions.
         """
-        # Convert to HSV color space for better color detection
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        
-        # Define range for black color in HSV - balanced to detect black lines but avoid brown surfaces
-        lower_black = np.array([0, 0, 0])
-        upper_black = np.array([180, 80, 100])  # Increased thresholds to better detect black lines
-        
-        # Create a mask that isolates the black parts of the image
-        black_mask = cv2.inRange(hsv, lower_black, upper_black)
-        
-        # Additional approach: Use both adaptive and simple thresholding on grayscale
-        # This helps with reflections and uneven lighting
+        # Convert to grayscale for thresholding
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
-        # Apply adaptive threshold to find dark regions - balanced sensitivity
-        adaptive_thresh = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 5
-        )
+        # Auto-adapt threshold parameters based on lighting conditions if enabled
+        if self.AUTO_ADAPTIVE_ENABLED:
+            avg_brightness = np.mean(gray)
+            if avg_brightness > self.BRIGHTNESS_THRESHOLD_BRIGHT:
+                self.current_adaptive_params = self.ADAPTIVE_PARAMS_BRIGHT
+                if self.debug and self.frames_processed % 30 == 0:  # Log every 30 frames
+                    print(f"Bright conditions detected (avg={avg_brightness:.1f}), using bright adaptive params")
+            elif avg_brightness < self.BRIGHTNESS_THRESHOLD_DIM:
+                self.current_adaptive_params = self.ADAPTIVE_PARAMS_DIM
+                if self.debug and self.frames_processed % 30 == 0:
+                    print(f"Dim conditions detected (avg={avg_brightness:.1f}), using dim adaptive params")
+            else:
+                self.current_adaptive_params = self.ADAPTIVE_PARAMS_NORMAL
+                if self.debug and self.frames_processed % 30 == 0:
+                    print(f"Normal conditions detected (avg={avg_brightness:.1f}), using normal adaptive params")
         
-        # Also apply a simple threshold to exclude brown/wooden surfaces
-        _, simple_thresh = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY_INV)
+        # Initialize masks list for combining different methods
+        masks = []
         
-        # Combine all three methods: HSV + adaptive + simple threshold
-        # Only keep pixels that are dark in ALL methods
-        temp_mask = cv2.bitwise_and(black_mask, adaptive_thresh)
-        combined_mask = cv2.bitwise_and(temp_mask, simple_thresh)
+        # 1. HSV-based thresholding (if enabled)
+        if self.HSV_THRESH_ENABLED:
+            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            # Define range for black color in HSV - balanced to detect black lines but avoid brown surfaces
+            lower_black = np.array([0, 0, 0])
+            upper_black = np.array([180, 80, 100])  # Increased thresholds to better detect black lines
+            hsv_mask = cv2.inRange(hsv, lower_black, upper_black)
+            masks.append(hsv_mask)
+        
+        # 2. Enhanced adaptive thresholding (if enabled)
+        if self.ADAPTIVE_THRESH_ENABLED:
+            # Primary adaptive threshold with current parameters
+            adaptive_mask = cv2.adaptiveThreshold(
+                gray, 
+                255, 
+                self.current_adaptive_params['method'], 
+                self.ADAPTIVE_THRESH_TYPE, 
+                self.current_adaptive_params['block_size'], 
+                self.current_adaptive_params['c_constant']
+            )
+            masks.append(adaptive_mask)
+            
+            # Additional adaptive threshold with different method for robustness
+            adaptive_mask_alt = cv2.adaptiveThreshold(
+                gray, 
+                255, 
+                cv2.ADAPTIVE_THRESH_MEAN_C,  # Different method
+                self.ADAPTIVE_THRESH_TYPE, 
+                self.current_adaptive_params['block_size'], 
+                max(2, self.current_adaptive_params['c_constant'] - 2)  # Slightly different C
+            )
+            
+            # Combine both adaptive methods with OR operation
+            combined_adaptive = cv2.bitwise_or(adaptive_mask, adaptive_mask_alt)
+            masks.append(combined_adaptive)
+        
+        # 3. Simple thresholding as fallback (if enabled)
+        if self.SIMPLE_THRESH_ENABLED:
+            _, simple_mask = cv2.threshold(gray, self.SIMPLE_THRESHOLD_VALUE, 255, self.SIMPLE_THRESH_TYPE)
+            masks.append(simple_mask)
+        
+        # Combine all enabled methods
+        if not masks:
+            # Fallback if no methods enabled
+            _, combined_mask = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY_INV)
+        elif len(masks) == 1:
+            combined_mask = masks[0]
+        else:
+            # Use AND operation for multiple masks to ensure high confidence
+            combined_mask = masks[0]
+            for mask in masks[1:]:
+                combined_mask = cv2.bitwise_and(combined_mask, mask)
+        
+        # Apply purple arm filtering if enabled
+        if self.ARM_FILTERING_ENABLED:
+            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV) if not self.HSV_THRESH_ENABLED else hsv
+            combined_mask = self._filter_purple_arm(hsv, combined_mask, roi.shape)
         
         # Morphological operations to connect broken line segments
         # 1. Remove small noise
@@ -703,7 +799,7 @@ class CameraLineFollower:
         line_connect_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 10))
         gap_filled = cv2.morphologyEx(gap_filled, cv2.MORPH_CLOSE, line_connect_kernel)
         
-        # 5. Final dilation to ensure line segments are thick enough
+        # 6. Final dilation to ensure line segments are thick enough
         dilate_kernel = np.ones((5, 5), np.uint8)
         final_mask = cv2.dilate(gap_filled, dilate_kernel, iterations=2)
         
@@ -840,6 +936,129 @@ class CameraLineFollower:
             'max_area_ratio': self.ARM_MAX_AREA_RATIO,
             'expected_region': self.ARM_EXPECTED_REGION
         }
+    
+    def get_adaptive_threshold_status(self) -> Dict:
+        """Get current adaptive thresholding configuration and status."""
+        return {
+            'adaptive_enabled': self.ADAPTIVE_THRESH_ENABLED,
+            'simple_enabled': self.SIMPLE_THRESH_ENABLED,
+            'hsv_enabled': self.HSV_THRESH_ENABLED,
+            'auto_adaptation': self.AUTO_ADAPTIVE_ENABLED,
+            'current_params': self.current_adaptive_params.copy(),
+            'brightness_thresholds': {
+                'bright': self.BRIGHTNESS_THRESHOLD_BRIGHT,
+                'dim': self.BRIGHTNESS_THRESHOLD_DIM
+            },
+            'simple_threshold': self.SIMPLE_THRESHOLD_VALUE
+        }
+    
+    def set_adaptive_threshold_params(self, 
+                                    block_size: int = None, 
+                                    c_constant: int = None, 
+                                    method: int = None,
+                                    condition: str = 'normal') -> bool:
+        """
+        Set adaptive threshold parameters for specific lighting conditions.
+        
+        Args:
+            block_size: Size of neighborhood area (must be odd, >= 3)
+            c_constant: Constant subtracted from mean/gaussian
+            method: cv2.ADAPTIVE_THRESH_GAUSSIAN_C or cv2.ADAPTIVE_THRESH_MEAN_C
+            condition: 'normal', 'bright', 'dim' - which condition to update
+            
+        Returns:
+            True if parameters were valid and set, False otherwise
+        """
+        # Validate parameters
+        if block_size is not None and (block_size < 3 or block_size % 2 == 0):
+            if self.debug:
+                print(f"Invalid block_size {block_size}, must be odd and >= 3")
+            return False
+        
+        if method is not None and method not in [cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.ADAPTIVE_THRESH_MEAN_C]:
+            if self.debug:
+                print(f"Invalid method {method}")
+            return False
+        
+        # Choose which parameter set to update
+        if condition == 'bright':
+            params = self.ADAPTIVE_PARAMS_BRIGHT
+        elif condition == 'dim':
+            params = self.ADAPTIVE_PARAMS_DIM
+        else:
+            params = self.ADAPTIVE_PARAMS_NORMAL
+        
+        # Update parameters
+        if block_size is not None:
+            params['block_size'] = block_size
+        if c_constant is not None:
+            params['c_constant'] = c_constant
+        if method is not None:
+            params['method'] = method
+        
+        if self.debug:
+            print(f"Updated {condition} adaptive threshold params: {params}")
+        
+        return True
+    
+    def set_brightness_thresholds(self, bright_threshold: int = None, dim_threshold: int = None) -> bool:
+        """
+        Set the brightness thresholds for automatic adaptation.
+        
+        Args:
+            bright_threshold: Average brightness above this = bright conditions
+            dim_threshold: Average brightness below this = dim conditions
+            
+        Returns:
+            True if thresholds were valid and set, False otherwise
+        """
+        if bright_threshold is not None and dim_threshold is not None:
+            if bright_threshold <= dim_threshold:
+                if self.debug:
+                    print(f"Invalid thresholds: bright ({bright_threshold}) must be > dim ({dim_threshold})")
+                return False
+        
+        if bright_threshold is not None:
+            self.BRIGHTNESS_THRESHOLD_BRIGHT = bright_threshold
+        if dim_threshold is not None:
+            self.BRIGHTNESS_THRESHOLD_DIM = dim_threshold
+        
+        if self.debug:
+            print(f"Updated brightness thresholds: bright={self.BRIGHTNESS_THRESHOLD_BRIGHT}, dim={self.BRIGHTNESS_THRESHOLD_DIM}")
+        
+        return True
+    
+    def enable_threshold_methods(self, adaptive: bool = None, simple: bool = None, hsv: bool = None, auto_adapt: bool = None):
+        """
+        Enable or disable different thresholding methods.
+        
+        Args:
+            adaptive: Enable/disable adaptive thresholding
+            simple: Enable/disable simple thresholding
+            hsv: Enable/disable HSV color-based thresholding
+            auto_adapt: Enable/disable automatic adaptation to lighting
+        """
+        if adaptive is not None:
+            self.ADAPTIVE_THRESH_ENABLED = adaptive
+        if simple is not None:
+            self.SIMPLE_THRESH_ENABLED = simple
+        if hsv is not None:
+            self.HSV_THRESH_ENABLED = hsv
+        if auto_adapt is not None:
+            self.AUTO_ADAPTIVE_ENABLED = auto_adapt
+        
+        if self.debug:
+            print(f"Threshold methods - Adaptive: {self.ADAPTIVE_THRESH_ENABLED}, Simple: {self.SIMPLE_THRESH_ENABLED}, HSV: {self.HSV_THRESH_ENABLED}, Auto-adapt: {self.AUTO_ADAPTIVE_ENABLED}")
+    
+    def set_simple_threshold(self, threshold_value: int):
+        """Set the simple threshold value."""
+        if 0 <= threshold_value <= 255:
+            self.SIMPLE_THRESHOLD_VALUE = threshold_value
+            if self.debug:
+                print(f"Updated simple threshold value to {threshold_value}")
+        else:
+            if self.debug:
+                print(f"Invalid threshold value {threshold_value}, must be 0-255")
     
     def _find_line_in_roi(self, binary_roi: np.ndarray) -> Optional[Dict]:
         """
