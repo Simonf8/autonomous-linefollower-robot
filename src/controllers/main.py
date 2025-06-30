@@ -43,7 +43,7 @@ FEATURES = {
 # ================================
 CELL_SIZE_M = 0.085
 BASE_SPEED = 40
-TURN_SPEED = 20     # Reduced from 25 to 20 for even slower turning
+TURN_SPEED = 30     # Reduced from 25 to 20 for even slower turning
 CORNER_SPEED = 20   # Reduced from 25 to 20 for even slower cornering
 
 # Hardware-specific trims to account for motor differences.
@@ -207,6 +207,7 @@ class RobotController(CameraLineFollowingMixin):
 
         print("Starting mission...")
         self.audio_feedback.speak("Starting mission")
+        
         
         # Reset timers and state for the new mission
         self.last_cell_update_time = time.time()

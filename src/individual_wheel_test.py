@@ -11,16 +11,12 @@ try:
     print("Using gpiozero library (Pi 5 compatible)")
     
     # Motor pins using gpiozero
-    fl_pin1 = OutputDevice(20)  # Front Left motor pin 1
-    fl_pin2 = OutputDevice(21)  # Front Left motor pin 2
-    fr_pin1 = OutputDevice(16)  # Front Right motor pin 1  
-    fr_pin2 = OutputDevice(26)  # Front Right motor pin 2
+    fl_pin1 = OutputDevice(21)  # Front Left motor pin 1
+    fl_pin2 = OutputDevice(20)  # Front Left motor pin 2
+    fr_pin1 = OutputDevice(19)  # Front Right motor pin 1  
+    fr_pin2 = OutputDevice(13)  # Front Right motor pin 2
     
-     # Motor pins using gpiozero
-    fl_pin1 = OutputDevice(17)  # Front Left motor pin 1
-    fl_pin2 = OutputDevice(27)  # Front Left motor pin 2
-    fr_pin1 = OutputDevice(22)  # Front Right motor pin 1  
-    fr_pin2 = OutputDevice(23)  # Front Right motor pin 2
+
     
     
     def stop_all():
@@ -28,8 +24,9 @@ try:
         fl_pin2.off()
         fr_pin1.off()
         fr_pin2.off()
-
     
+    
+
     def test_front_left_forward():
         print("  FL FORWARD")
         fl_pin1.on()
