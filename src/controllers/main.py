@@ -42,17 +42,17 @@ FEATURES = {
 # ROBOT CONFIGURATION
 # ================================
 CELL_SIZE_M = 0.085
-BASE_SPEED = 40
-TURN_SPEED = 30     # Reduced from 25 to 20 for even slower turning
+BASE_SPEED = 20
+TURN_SPEED = 20     # Reduced from 25 to 20 for even slower turning
 CORNER_SPEED = 20   # Reduced from 25 to 20 for even slower cornering
 
 # Hardware-specific trims to account for motor differences.
 # Values are multipliers (1.0 = no change, 0.9 = 10% slower).
-MOTOR_TRIMS = {
+MOTOR_TRIMS =  {
     'fl': 1.0,
     'fr': 1.0,
-    'bl': 1.0,
-    'br': 0.75  # Back-right motor is a bit faster
+    'bl': 0.9,
+    'br': 0.9  # Back-right motor is a bit faster
 }
 
 # Maze and Mission Configuration

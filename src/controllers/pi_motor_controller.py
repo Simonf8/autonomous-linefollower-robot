@@ -16,14 +16,14 @@ class PiMotorController:
         # GPIO pin numbers (BCM mode) for the motor driver.
         self.motor_pins = {
             'fl': {'p1': 20, 'p2': 21},  # Front Left
-            'fr': {'p1': 26, 'p2': 16},  # Front Right
+            'fr': {'p1': 13, 'p2': 19},  # Front Right
             'bl': {'p1': 17, 'p2': 27},  # Back Left
             'br': {'p1': 23, 'p2': 22},   # Back Right
         }
         
         # GPIO pin numbers for the wheel encoders (A and B phases)
         self.encoder_pins = {
-            'fl': {'A': 13, 'B': 19},    # Front Left
+            'fl': {'A': 12, 'B': 14},    # Front Left
             'fr': {'A': 24, 'B': 2},  # Front Right
             'bl': {'A': 6, 'B': 5},  # Back Left
             'br': {'A': 3, 'B': 4},  # Back Right
