@@ -40,7 +40,7 @@ class CameraObstacleAvoidance:
         # Corner detection parameters
         self.corner_angle_threshold = 60  # Degrees to detect corner
         self.corner_line_length = 50  # Minimum line length for corner detection
-        self.corner_cooldown = 3.0  # Seconds between corner detections
+        self.corner_cooldown = 2.0  # Seconds between corner detections
         self.last_corner_time = 0
         
         # ROI configuration (focus on forward view)
@@ -776,34 +776,96 @@ class CameraLineFollower:
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV) if not self.HSV_THRESH_ENABLED else hsv
             combined_mask = self._filter_purple_arm(hsv, combined_mask, roi.shape)
         
-        # Morphological operations to connect broken line segments
+        # Enhanced morphological operations to connect broken line segments and fill gaps
         # 1. Remove small noise
         small_kernel = np.ones((2, 2), np.uint8)
         opened_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, small_kernel)
         
-        # 2. Connect line segments with directional kernels - much larger kernels to fill gaps
-        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 7))
-        horizontal_closed = cv2.morphologyEx(opened_mask, cv2.MORPH_CLOSE, horizontal_kernel)
+        # 2. Moderate directional closing to connect nearby segments
+        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 7))
+        h_closed = cv2.morphologyEx(opened_mask, cv2.MORPH_CLOSE, h_kernel)
         
-        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 25))
-        vertical_closed = cv2.morphologyEx(opened_mask, cv2.MORPH_CLOSE, vertical_kernel)
+        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 35))
+        v_closed = cv2.morphologyEx(h_closed, cv2.MORPH_CLOSE, v_kernel)
         
-        # 3. Combine both directional closings
-        directional_closed = cv2.bitwise_or(horizontal_closed, vertical_closed)
+        # 3. Combine directional closings
+        directional_combined = cv2.bitwise_or(h_closed, v_closed)
         
-        # 4. Very aggressive closing to fill large gaps in the middle
-        large_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 40))
-        gap_filled = cv2.morphologyEx(directional_closed, cv2.MORPH_CLOSE, large_kernel)
+        # 4. A single, more assertive closing operation
+        square_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 20))
+        gap_filled = cv2.morphologyEx(directional_combined, cv2.MORPH_CLOSE, square_kernel)
         
-        # 5. Additional horizontal closing specifically for line gaps
-        line_connect_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 10))
-        gap_filled = cv2.morphologyEx(gap_filled, cv2.MORPH_CLOSE, line_connect_kernel)
-        
-        # 6. Final dilation to ensure line segments are thick enough
+        # 5. Final dilation to thicken the line slightly
         dilate_kernel = np.ones((5, 5), np.uint8)
         final_mask = cv2.dilate(gap_filled, dilate_kernel, iterations=2)
         
+        # 6. Intelligent gap filling using contour analysis
+        final_mask = self._contour_based_gap_filling(final_mask)
+        
         return final_mask
+    
+    def _contour_based_gap_filling(self, binary_mask: np.ndarray) -> np.ndarray:
+        """
+        Uses contour analysis to identify and fill gaps between line segments.
+        This is a more intelligent method than pure morphological operations.
+        """
+        # Find all contours that could be line segments
+        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if len(contours) < 2:
+            return binary_mask  # Not enough contours to have a gap
+
+        # Filter contours by area to remove noise
+        min_contour_area = 20
+        line_segments = [c for c in contours if cv2.contourArea(c) > min_contour_area]
+        
+        if len(line_segments) < 2:
+            return binary_mask
+
+        filled_mask = binary_mask.copy()
+        
+        # Compare all pairs of line segments to see if they should be connected
+        for i in range(len(line_segments)):
+            for j in range(i + 1, len(line_segments)):
+                contour1 = line_segments[i]
+                contour2 = line_segments[j]
+                
+                # Get bounding boxes to determine alignment and distance
+                x1, y1, w1, h1 = cv2.boundingRect(contour1)
+                x2, y2, w2, h2 = cv2.boundingRect(contour2)
+                
+                center1_y = y1 + h1 / 2
+                center2_y = y2 + h2 / 2
+                
+                # Check for vertical alignment (are they part of the same horizontal line?)
+                # Allow a small vertical drift
+                if abs(center1_y - center2_y) < 20: # Max 20 pixels vertical difference
+                    
+                    # Determine the horizontal gap between the two segments
+                    gap_left = max(x1, x2)
+                    gap_right = min(x1 + w1, x2 + w2)
+                    
+                    # This calculation is for overlap, for gap we need the space between them
+                    box1_right = x1 + w1
+                    box2_left = x2
+                    
+                    if box1_right < box2_left: # No overlap, box1 is to the left of box2
+                        horizontal_gap = box2_left - box1_right
+                        gap_start_x = box1_right
+                        gap_end_x = box2_left
+                    else: # No overlap, box2 is to the left of box1
+                        horizontal_gap = x1 - (x2 + w2)
+                        gap_start_x = x2 + w2
+                        gap_end_x = x1
+                        
+                    # Connect segments that have a reasonable gap between them
+                    if 0 < horizontal_gap < 50: # Connect if gap is between 1 and 50 pixels
+                        # Draw a rectangle to fill the gap
+                        y_top = int(min(center1_y, center2_y) - 10)
+                        y_bottom = int(max(center1_y, center2_y) + 10)
+                        cv2.rectangle(filled_mask, (gap_start_x, y_top), (gap_end_x, y_bottom), 255, -1)
+
+        return filled_mask
     
     def _filter_purple_arm(self, hsv_roi: np.ndarray, black_mask: np.ndarray, roi_shape: tuple) -> np.ndarray:
         """

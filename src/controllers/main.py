@@ -41,10 +41,10 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-CELL_SIZE_M = 0.075
-BASE_SPEED = 50
-TURN_SPEED = 55
-CORNER_SPEED = 50
+CELL_SIZE_M = 0.085
+BASE_SPEED = 40
+TURN_SPEED = 20     # Reduced from 25 to 20 for even slower turning
+CORNER_SPEED = 20   # Reduced from 25 to 20 for even slower cornering
 
 # Hardware-specific trims to account for motor differences.
 # Values are multipliers (1.0 = no change, 0.9 = 10% slower).
@@ -73,8 +73,8 @@ MAZE_GRID = [
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 13
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0]  # Row 14
 ]
-START_CELL = (0, 2) # Start position (col, row)
-END_CELL = (3, 12)   # End position (col, row)
+START_CELL = (3, 12) # Start position (col, row)
+END_CELL = (0, 0)   # End position (col, row)
 
 # START_DIRECTION must be a cardinal direction: 'N', 'S', 'E', or 'W'.
 # This tells the robot its initial orientation on the map grid.
@@ -82,7 +82,7 @@ END_CELL = (3, 12)   # End position (col, row)
 #  - 'S': Faces towards larger row numbers (Down on the map)
 #  - 'E': Faces towards larger column numbers (Right on the map)
 #  - 'W': Faces towards smaller column numbers (Left on the map)
-START_DIRECTION = 'E'
+START_DIRECTION = 'W'
 
 # Time in seconds it takes for the robot to cross one 12cm cell at BASE_SPEED.
 
@@ -96,13 +96,13 @@ CORNER_TURN_MODES = {
     'FRONT_TURN': 'front_turn'
 }
 CORNER_DETECTION_THRESHOLD = 0.35
-CORNER_TURN_DURATION = 30
+CORNER_TURN_DURATION = 60    # Increased from 30 to 60 for longer turn timeout
 SHARP_CORNER_THRESHOLD = 0.6
 
 # Camera configuration
 WEBCAM_INDEX = 1
-CAMERA_WIDTH, CAMERA_HEIGHT = 320, 720
-CAMERA_FPS = 60
+CAMERA_WIDTH, CAMERA_HEIGHT = 320, 240
+CAMERA_FPS = 30
 
 class RobotController(CameraLineFollowingMixin):
     """Main robot controller integrating visual localization and direct motor control."""
@@ -407,7 +407,7 @@ class RobotController(CameraLineFollowingMixin):
         """
         Execute a precise pivot turn in place - stops, turns until line found and centered.
         """
-        TURN_TIMEOUT_S = 4.5          # Moderate timeout for precision turns
+        TURN_TIMEOUT_S = 3.5          # Moderate timeout for precision turns
         MIN_TURN_DURATION_S = 0.8     # Ensure we turn away from current line
         LINE_CENTERED_THRESHOLD = 0.2 # More lenient for precision turns
         
@@ -687,7 +687,7 @@ class RobotController(CameraLineFollowingMixin):
         Commands motor speeds for a smooth, car-like arcing turn.
         This uses omni-wheel kinematics for combined forward and rotational motion.
         """
-        vx = BASE_SPEED * 0.8  # Forward speed during the turn
+        vx = BASE_SPEED * 0.6  # Reduced from 0.8 to 0.6 for slower forward speed during turns
         omega = TURN_SPEED     # Rotational speed for the turn
 
         # Based on the kinematic model in camera_line_follower, a left
@@ -734,8 +734,8 @@ class RobotController(CameraLineFollowingMixin):
         Execute a 180-degree turn in place when an obstacle blocks the line.
         Keep turning until the line is found, then replan path using A*.
         """
-        MAX_TURN_DURATION = 8.0   # Reasonable timeout for obstacle avoidance turns
-        MIN_TURN_DURATION = 1.2   # Moderate minimum to clear obstacles
+        MAX_TURN_DURATION = 12.0   # Increased from 8.0 to 12.0 for longer timeout
+        MIN_TURN_DURATION = 2.0    # Increased from 1.2 to 2.0 for more gradual turning
         
         time_in_turn = time.time() - self.turn_start_time
         
@@ -849,6 +849,7 @@ def main():
                 'is_at_intersection': robot.camera_line_result.get('is_at_intersection', False),
                 'intersection_count': robot.position_tracker.intersection_count,
                 'arm_filtering': robot.camera_line_follower.get_arm_filtering_status() if hasattr(robot, 'camera_line_follower') else {'enabled': False},
+                'adaptive_threshold': robot.camera_line_follower.get_adaptive_threshold_status() if hasattr(robot, 'camera_line_follower') else {'adaptive_enabled': False},
             },
             'obstacle_avoidance': {
                 'enabled': FEATURES['OBSTACLE_AVOIDANCE_ENABLED'],
@@ -1126,6 +1127,144 @@ def main():
             }
         })
 
+    @app.route('/adaptive_threshold_status')
+    def adaptive_threshold_status():
+        """Get current adaptive thresholding status."""
+        if not hasattr(robot, 'camera_line_follower'):
+            return jsonify({
+                'status': 'error',
+                'message': 'Camera line follower not available'
+            }), 400
+        
+        status = robot.camera_line_follower.get_adaptive_threshold_status()
+        return jsonify({
+            'status': 'success',
+            'adaptive_threshold': status
+        })
+
+    @app.route('/set_adaptive_threshold', methods=['POST'])
+    def set_adaptive_threshold():
+        """Configure adaptive threshold parameters."""
+        if not hasattr(robot, 'camera_line_follower'):
+            return jsonify({
+                'status': 'error',
+                'message': 'Camera line follower not available'
+            }), 400
+        
+        data = request.get_json()
+        
+        # Extract parameters
+        block_size = data.get('block_size')
+        c_constant = data.get('c_constant')
+        method_str = data.get('method', 'gaussian')
+        condition = data.get('condition', 'normal')
+        
+        # Convert method string to OpenCV constant
+        method = None
+        if method_str == 'gaussian':
+            method = cv2.ADAPTIVE_THRESH_GAUSSIAN_C
+        elif method_str == 'mean':
+            method = cv2.ADAPTIVE_THRESH_MEAN_C
+        
+        # Set parameters
+        success = robot.camera_line_follower.set_adaptive_threshold_params(
+            block_size=block_size,
+            c_constant=c_constant,
+            method=method,
+            condition=condition
+        )
+        
+        if success:
+            return jsonify({
+                'status': 'success',
+                'message': f'Updated {condition} adaptive threshold parameters',
+                'adaptive_threshold': robot.camera_line_follower.get_adaptive_threshold_status()
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid parameters provided'
+            }), 400
+
+    @app.route('/set_brightness_thresholds', methods=['POST'])
+    def set_brightness_thresholds():
+        """Set brightness thresholds for automatic adaptation."""
+        if not hasattr(robot, 'camera_line_follower'):
+            return jsonify({
+                'status': 'error',
+                'message': 'Camera line follower not available'
+            }), 400
+        
+        data = request.get_json()
+        bright_threshold = data.get('bright_threshold')
+        dim_threshold = data.get('dim_threshold')
+        
+        success = robot.camera_line_follower.set_brightness_thresholds(
+            bright_threshold=bright_threshold,
+            dim_threshold=dim_threshold
+        )
+        
+        if success:
+            return jsonify({
+                'status': 'success',
+                'message': 'Updated brightness thresholds',
+                'adaptive_threshold': robot.camera_line_follower.get_adaptive_threshold_status()
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid threshold values'
+            }), 400
+
+    @app.route('/toggle_threshold_methods', methods=['POST'])
+    def toggle_threshold_methods():
+        """Enable/disable different thresholding methods."""
+        if not hasattr(robot, 'camera_line_follower'):
+            return jsonify({
+                'status': 'error',
+                'message': 'Camera line follower not available'
+            }), 400
+        
+        data = request.get_json()
+        
+        robot.camera_line_follower.enable_threshold_methods(
+            adaptive=data.get('adaptive'),
+            simple=data.get('simple'),
+            hsv=data.get('hsv'),
+            auto_adapt=data.get('auto_adapt')
+        )
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Updated thresholding methods',
+            'adaptive_threshold': robot.camera_line_follower.get_adaptive_threshold_status()
+        })
+
+    @app.route('/set_simple_threshold', methods=['POST'])
+    def set_simple_threshold():
+        """Set simple threshold value."""
+        if not hasattr(robot, 'camera_line_follower'):
+            return jsonify({
+                'status': 'error',
+                'message': 'Camera line follower not available'
+            }), 400
+        
+        data = request.get_json()
+        threshold_value = data.get('threshold_value')
+        
+        if threshold_value is not None:
+            robot.camera_line_follower.set_simple_threshold(threshold_value)
+            return jsonify({
+                'status': 'success',
+                'message': f'Updated simple threshold to {threshold_value}',
+                'adaptive_threshold': robot.camera_line_follower.get_adaptive_threshold_status()
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'No threshold value provided'
+            }), 400
+
     @app.route('/grid_feed')
     def grid_feed():
         """Streams the grid map visualization."""
@@ -1185,9 +1324,43 @@ def main():
 
         if robot_cell:
             robot_x, robot_y = robot_cell[0], robot_cell[1]
-            cv2.circle(grid_img, 
-                       (robot_x * cell_size + cell_size // 2, robot_y * cell_size + cell_size // 2), 
-                       cell_size // 3, (203, 102, 255), -1) # Use pink for robot
+            center_x = robot_x * cell_size + cell_size // 2
+            center_y = robot_y * cell_size + cell_size // 2
+            
+            # Get robot's current direction from position tracker
+            robot_direction = robot.position_tracker.current_direction
+            
+            # Map direction to angle in radians (0 = right, π/2 = down, π = left, 3π/2 = up)
+            direction_angles = {
+                'E': 0,           # East (right)
+                'S': np.pi/2,     # South (down)
+                'W': np.pi,       # West (left)
+                'N': 3*np.pi/2    # North (up)
+            }
+            
+            angle = direction_angles.get(robot_direction, 0)
+            
+            # Draw robot as an arrow pointing in the facing direction
+            arrow_length = int(cell_size * 0.6)  # Make arrow longer and more prominent
+            arrow_end_x = int(center_x + arrow_length * np.cos(angle))
+            arrow_end_y = int(center_y + arrow_length * np.sin(angle))
+            
+            # Draw the main body of the robot as a circle
+            cv2.circle(grid_img, (center_x, center_y), cell_size // 4, (203, 102, 255), -1)
+            
+            # Draw a white border around the robot for better visibility
+            cv2.circle(grid_img, (center_x, center_y), cell_size // 4, (255, 255, 255), 2)
+            
+            # Draw the arrow showing direction with a thicker, more visible line
+            cv2.arrowedLine(grid_img, (center_x, center_y), (arrow_end_x, arrow_end_y), 
+                           (255, 255, 0), 4, tipLength=0.4)  # Changed to bright cyan (BGR format)
+            
+            # Add a direction indicator text
+            direction_text = f"{robot_direction}"
+            text_x = center_x - 8
+            text_y = center_y + cell_size // 2 + 15
+            cv2.putText(grid_img, direction_text, (text_x, text_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)  # Match arrow color
         
         return grid_img
     
