@@ -6,7 +6,7 @@ import sys
 
 class PiMotorController:
     """
-    Controller for a 4-wheel omni-drive robot using the Raspberry Pi's GPIO.
+    Controller for a 2-wheel differential drive robot using the Raspberry Pi's GPIO.
     Uses the gpiozero library, which is compatible with the Raspberry Pi 5.
     """
     # Encoders produce ~960 steps per wheel revolution.
@@ -15,24 +15,19 @@ class PiMotorController:
     def __init__(self, trims: dict = None):
         # GPIO pin numbers (BCM mode) for the motor driver.
         self.motor_pins = {
-            'fl': {'p1': 20, 'p2': 21},  # Front Left
-            'fr': {'p1': 13, 'p2': 19},  # Front Right
-            'bl': {'p1': 17, 'p2': 27},  # Back Left
-            'br': {'p1': 23, 'p2': 22},   # Back Right
+            'left': {'p1': 20, 'p2': 21},   # Left Motor
+            'right': {'p1': 13, 'p2': 19}, # Right Motor
         }
         
         # GPIO pin numbers for the wheel encoders (A and B phases)
         self.encoder_pins = {
-            'fl': {'A': 12, 'B': 14},    # Front Left
-            'fr': {'A': 24, 'B': 2},  # Front Right
-            'bl': {'A': 6, 'B': 5},  # Back Left
-            'br': {'A': 3, 'B': 4},  # Back Right
+            'left': {'A': 15, 'B': 14},     # Left Encoder
+            'right': {'A': 2, 'B': 3},     # Right Encoder
         }
         
         # Apply motor trims if provided. These are used to calibrate for motor speed
-        # differences. If a motor is too fast (e.g., the back-right), lower its
-        # trim value below 1.0.
-        self.trims = trims if trims else {'fl': 1.0, 'fr': 1.0, 'bl': 1.0, 'br': 1.0}
+        # differences. If a motor is too fast, lower its trim value below 1.0.
+        self.trims = trims if trims else {'left': 1.0, 'right': 1.0}
         
         self.motors = {}
         self.encoders = {}
@@ -112,24 +107,50 @@ class PiMotorController:
         except Exception as e:
             print(f"Warning during GPIO cleanup: {e}")
 
-    def send_motor_speeds(self, fl: int, fr: int, bl: int, br: int):
+    def send_motor_speeds(self, left: int, right: int):
         """
-        Set speeds for all four motors.
+        Set speeds for both motors.
         Speed is from -100 (reverse) to 100 (forward).
+        
+        Args:
+            left: Speed for left motor (-100 to 100)
+            right: Speed for right motor (-100 to 100)
         """
         if not self.motors:
             print("Warning: Motors not initialized, cannot set speeds")
             return
             
-        self._set_motor_speed('fl', fl)
-        self._set_motor_speed('fr', fr)
-        self._set_motor_speed('bl', bl)
-        self._set_motor_speed('br', br)
+        self._set_motor_speed('left', left)
+        self._set_motor_speed('right', right)
+
+    def move_forward(self, speed: int = 50):
+        """Move robot forward at specified speed."""
+        self.send_motor_speeds(speed, speed)
+
+    def move_backward(self, speed: int = 50):
+        """Move robot backward at specified speed."""
+        self.send_motor_speeds(-speed, -speed)
+
+    def turn_left(self, speed: int = 50):
+        """Turn robot left by spinning wheels in opposite directions."""
+        self.send_motor_speeds(-speed, speed)
+
+    def turn_right(self, speed: int = 50):
+        """Turn robot right by spinning wheels in opposite directions."""
+        self.send_motor_speeds(speed, -speed)
+
+    def pivot_left(self, speed: int = 50):
+        """Pivot left by stopping left wheel and moving right wheel forward."""
+        self.send_motor_speeds(0, speed)
+
+    def pivot_right(self, speed: int = 50):
+        """Pivot right by stopping right wheel and moving left wheel forward."""
+        self.send_motor_speeds(speed, 0)
 
     def get_encoder_counts(self):
         """Returns the current raw step count for each encoder."""
         if not self.encoders:
-            return {'fl': 0, 'fr': 0, 'bl': 0, 'br': 0}
+            return {'left': 0, 'right': 0}
         
         return {
             wheel: encoder.steps

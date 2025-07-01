@@ -11,10 +11,10 @@ try:
     print("Using gpiozero library (Pi 5 compatible)")
     
     # Motor pins using gpiozero
-    fl_pin1 = OutputDevice(21)  # Front Left motor pin 1
-    fl_pin2 = OutputDevice(20)  # Front Left motor pin 2
-    fr_pin1 = OutputDevice(19)  # Front Right motor pin 1  
-    fr_pin2 = OutputDevice(13)  # Front Right motor pin 2
+    fl_pin1 = OutputDevice(20)  # Front Left motor pin 1
+    fl_pin2 = OutputDevice(21)  # Front Left motor pin 2
+    fr_pin1 = OutputDevice(13)  # Front Right motor pin 1  
+    fr_pin2 = OutputDevice(19)  # Front Right motor pin 2
     
 
     
