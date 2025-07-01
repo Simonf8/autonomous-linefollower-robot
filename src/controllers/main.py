@@ -289,9 +289,9 @@ class RobotController(CameraLineFollowingMixin):
             # Consume the flag immediately to prevent re-triggering.
             self.position_tracker.just_crossed_by_camera = False
 
-            # Determine the required turn for the *next* path segment.
-            # We are at the decision point, so we look ahead.
-            turn_for_next_segment = 'forward' # Default
+            # Determine what to do at this intersection based on the planned path.
+            turn_for_next_segment = 'forward' # Default action is to go straight.
+            waypoint_just_reached = None
             if self.current_target_index < len(self.path):
                 # The waypoint we just arrived at IS the current target.
                 waypoint_just_reached = self.path[self.current_target_index]
@@ -302,24 +302,29 @@ class RobotController(CameraLineFollowingMixin):
                     current_direction = self.position_tracker.current_direction
                     turn_for_next_segment = self._get_required_turn(waypoint_just_reached, current_direction, next_waypoint_after_this)
 
-            turn_message = f"Intersection detected by camera. Path requires: {turn_for_next_segment}."
-            print(turn_message)
-            self.audio_feedback.speak(turn_message)
-            
-            # --- SNAP-TO-GRID ---
-            # This is the fix. We trust the camera and force the robot's position
-            # to match the waypoint we just arrived at.
-            self.position_tracker.force_set_position(waypoint_just_reached[0], waypoint_just_reached[1])
-
-            self.corner_cell_to_highlight = waypoint_just_reached # Highlight the cell we just confirmed we're at
-            self.turn_to_execute = turn_for_next_segment
-            self.state = 'waiting_at_corner'
-            self.wait_start_time = time.time()
-            
-            # We have now handled this waypoint. Increment the index for after the wait/turn.
-            self.current_target_index += 1
-            return # Exit to let the new state take over
-
+            # --- Smart Intersection Handling ---
+            if turn_for_next_segment != 'forward':
+                # This is a real corner. Stop, wait, and turn.
+                turn_message = f"Intersection detected. Path requires: {turn_for_next_segment}."
+                print(turn_message)
+                self.audio_feedback.speak(turn_message)
+                
+                # Snap position to the waypoint we just confirmed we're at.
+                self.position_tracker.force_set_position(waypoint_just_reached[0], waypoint_just_reached[1])
+                self.corner_cell_to_highlight = waypoint_just_reached
+                self.turn_to_execute = turn_for_next_segment
+                self.state = 'waiting_at_corner'
+                self.wait_start_time = time.time()
+                self.current_target_index += 1 # We've handled this waypoint.
+                return # Exit to let the new state take over.
+            else:
+                # This is a straight-through intersection. No need to stop.
+                # Silently update our position and continue line following.
+                print("Intersection detected, proceeding straight through.")
+                if waypoint_just_reached:
+                    self.position_tracker.force_set_position(waypoint_just_reached[0], waypoint_just_reached[1])
+                self.current_target_index += 1 # We've passed this waypoint.
+                # Do NOT change state. Continue in 'path_following'.
 
         # --- ENCODER-BASED WAYPOINT ARRIVAL (FALLBACK) ---
         # This block now only serves as a fallback if the camera misses an intersection.
