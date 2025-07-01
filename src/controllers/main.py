@@ -41,18 +41,16 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-CELL_SIZE_M = 0.085
-BASE_SPEED = 20
-TURN_SPEED = 20     # Reduced from 25 to 20 for even slower turning
-CORNER_SPEED = 20   # Reduced from 25 to 20 for even slower cornering
+CELL_SIZE_M = 0.064
+BASE_SPEED = 90
+TURN_SPEED = 50     # Reduced from 25 to 20 for even slower turning
+CORNER_SPEED = 50   # Reduced from 25 to 20 for even slower cornering
 
 # Hardware-specific trims to account for motor differences.
 # Values are multipliers (1.0 = no change, 0.9 = 10% slower).
 MOTOR_TRIMS =  {
-    'fl': 1.0,
-    'fr': 1.0,
-    'bl': 0.9,
-    'br': 0.9  # Back-right motor is a bit faster
+    'left': 1.0,   # Left side motors (fl + bl average)
+    'right': 1.0,  # Right side motors (fr + br average) - slightly slower
 }
 
 # Maze and Mission Configuration
@@ -73,8 +71,8 @@ MAZE_GRID = [
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 13
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0]  # Row 14
 ]
-START_CELL = (3, 12) # Start position (col, row)
-END_CELL = (0, 0)   # End position (col, row)
+START_CELL = (0, 0) # Start position (col, row)
+END_CELL = (20, 14)   # End position (col, row)
 
 # START_DIRECTION must be a cardinal direction: 'N', 'S', 'E', or 'W'.
 # This tells the robot its initial orientation on the map grid.
@@ -82,7 +80,7 @@ END_CELL = (0, 0)   # End position (col, row)
 #  - 'S': Faces towards larger row numbers (Down on the map)
 #  - 'E': Faces towards larger column numbers (Right on the map)
 #  - 'W': Faces towards smaller column numbers (Left on the map)
-START_DIRECTION = 'W'
+START_DIRECTION = 'S'
 
 # Time in seconds it takes for the robot to cross one 12cm cell at BASE_SPEED.
 
@@ -176,7 +174,11 @@ class RobotController(CameraLineFollowingMixin):
         """A wrapper to set motor speeds and store them for the UI."""
         self.motor_speeds = {'fl': int(fl), 'fr': int(fr), 'bl': int(bl), 'br': int(br)}
         if self.motor_controller:
-            self.motor_controller.send_motor_speeds(int(fl), int(fr), int(bl), int(br))
+            # Convert 4-wheel omni speeds to 2-wheel differential drive
+            # Average left side (fl + bl) and right side (fr + br)
+            left_speed = int((fl + bl) / 2)
+            right_speed = int((fr + br) / 2)
+            self.motor_controller.send_motor_speeds(left_speed, right_speed)
 
     def _setup_vision(self):
         """Initialize vision systems if enabled."""
@@ -312,7 +314,7 @@ class RobotController(CameraLineFollowingMixin):
             # If camera fails, maybe we should stop or rely on blind forward movement
             
             if self.motor_controller:
-                self.motor_controller.send_motor_speeds(BASE_SPEED, BASE_SPEED, BASE_SPEED, BASE_SPEED)
+                self.motor_controller.send_motor_speeds(BASE_SPEED, BASE_SPEED)
             return
 
         # PERFORMANCE: Skip every other frame for obstacle detection to improve speed

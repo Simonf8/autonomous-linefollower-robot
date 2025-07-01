@@ -182,10 +182,10 @@ class EncoderPositionTracker:
         delta_ticks = {w: current_counts[w] - self.last_encoder_counts[w] for w in current_counts}
         self.last_encoder_counts = current_counts
         
-        # A simple model for straight forward motion: average the two front wheel ticks.
-        # This is a simplification and might need adjustment based on robot kinematics.
+        # For 2-wheel differential drive: average the left and right wheel ticks.
+        # This is a simplification for straight forward motion.
         # We only consider positive ticks to count forward movement.
-        forward_ticks = [delta_ticks['fl'], delta_ticks['fr']]
+        forward_ticks = [delta_ticks['left'], delta_ticks['right']]
         avg_delta_ticks = sum(t for t in forward_ticks if t > 0) / 2 if any(t > 0 for t in forward_ticks) else 0
 
         distance_moved = avg_delta_ticks * self.METERS_PER_TICK

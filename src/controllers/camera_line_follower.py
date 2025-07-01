@@ -454,7 +454,7 @@ class CameraLineFollower:
     Detects black lines and provides steering corrections for line following.
     """
     
-    def __init__(self, camera_index=1, width=320, height=240, fps=30, debug=False):
+    def __init__(self, camera_index=1, width=720, height=480, fps=30, debug=False):
         self.debug = debug
         
         # Line detection parameters
@@ -512,7 +512,7 @@ class CameraLineFollower:
         self.BRIGHTNESS_THRESHOLD_DIM = 80      # Average brightness below this = dim conditions
         
         # Simple threshold parameters
-        self.SIMPLE_THRESHOLD_VALUE = 70       # Fixed threshold value
+        self.SIMPLE_THRESHOLD_VALUE = 60       # Fixed threshold value
         self.SIMPLE_THRESH_TYPE = cv2.THRESH_BINARY_INV
         
         # ARM FILTERING CONFIGURATION
@@ -533,10 +533,10 @@ class CameraLineFollower:
         ]
         
         # Minimum area for arm detection (pixels) - reduced to catch smaller arm regions
-        self.ARM_MIN_AREA = 50
+        self.ARM_MIN_AREA = 30
         
         # Maximum area ratio for arm (to avoid filtering large purple obstacles)
-        self.ARM_MAX_AREA_RATIO = 0.5  # Max 50% of ROI area
+        self.ARM_MAX_AREA_RATIO = 0.4  # Max 50% of ROI area
         
         # Arm position constraints (where we expect the arm to appear) - expanded
         self.ARM_EXPECTED_REGION = {
@@ -575,12 +575,12 @@ class CameraLineFollower:
         self.last_frame_hash = None
         self.last_result = None
         
-        self.max_line_width = 0.8 # Max line width as a ratio of ROI width
+        self.max_line_width = 0.7 # Max line width as a ratio of ROI width
         self.intersection_solidity_threshold = 0.85 # Lower value means more complex shape
         self.intersection_aspect_ratio_threshold = 0.8
         
         self.canny_high = 150
-        self.binary_threshold = 70
+        self.binary_threshold = 80
         
         # Line detection parameters
         self.min_line_area = 30  # Minimum contour area to be considered a line (reduced for better sensitivity)
@@ -1124,7 +1124,8 @@ class CameraLineFollower:
     
     def _find_line_in_roi(self, binary_roi: np.ndarray) -> Optional[Dict]:
         """
-        Finds the largest contour in the binary ROI, treating it as the line.
+        Finds the line contours in the binary ROI.
+        It can detect one or two lines and determines the center for navigation.
         """
         contours, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -1133,112 +1134,107 @@ class CameraLineFollower:
                 print("DEBUG: No contours found in binary ROI")
             return None
 
-        # --- Find the largest contour in the ROI ---
-        # The central filter was removed because it was preventing the detection
-        # of wide T-junctions, which are essential for cornering. By considering
-        # all contours, we can correctly identify the full shape of an intersection.
-        largest_contour = max(contours, key=cv2.contourArea)
-        largest_area = cv2.contourArea(largest_contour)
+        # --- Filter and select valid line contours ---
+        valid_contours = [c for c in contours if cv2.contourArea(c) >= self.min_line_area]
 
-        if self.debug:
-            print(f"DEBUG: Found {len(contours)} contours, largest area: {largest_area}, min_threshold: {self.min_line_area}")
-
-        # Lower the minimum area threshold to be more sensitive to small line segments
-        if largest_area < self.min_line_area:
+        if not valid_contours:
             if self.debug:
-                print(f"DEBUG: Largest contour area ({largest_area}) below threshold ({self.min_line_area})")
-            
-            # Fallback: Try to combine multiple smaller contours that might be line segments
-            valid_contours = [c for c in contours if cv2.contourArea(c) >= 10]  # Very small minimum
-            if len(valid_contours) >= 2:
-                if self.debug:
-                    print(f"DEBUG: Trying fallback with {len(valid_contours)} smaller contours")
-                
-                # Find the centroid of all valid contours combined
-                total_area = sum(cv2.contourArea(c) for c in valid_contours)
-                if total_area >= self.min_line_area:
-                    # Calculate weighted centroid
-                    total_mx = total_my = 0
-                    for contour in valid_contours:
-                        M = cv2.moments(contour)
-                        if M["m00"] > 0:
-                            total_mx += M["m10"]
-                            total_my += M["m01"]
-                    
-                    if total_mx > 0 and total_my > 0:
-                        # Use the largest contour but with combined centroid
-                        cx = int(total_mx / total_area)
-                        cy = int(total_my / total_area)
-                        
-                        # Update the largest contour center
-                        x, y, w, h = cv2.boundingRect(largest_contour)
-                        roi_height, roi_width = binary_roi.shape
-                        aspect_ratio = w / float(h) if h > 0 else 0
-                        area_ratio = total_area / (roi_width * roi_height)
-                        confidence = min(1.0, area_ratio * 10 + min(aspect_ratio / 3, 1.0) * 0.5)
-                        
-                        solidity = float(total_area) / cv2.contourArea(cv2.convexHull(largest_contour)) if cv2.contourArea(cv2.convexHull(largest_contour)) > 0 else 1.0
-                        is_complex_shape = solidity < self.intersection_solidity_threshold
-                        is_wide_shape = aspect_ratio > self.intersection_aspect_ratio_threshold
-                        
-                        if self.debug:
-                            print(f"DEBUG: Fallback successful - combined area: {total_area}, center: ({cx}, {cy})")
-                        
-                        return {
-                            'center': (cx, cy),
-                            'contour': largest_contour,
-                            'bbox': (x, y, w, h),
-                            'area': total_area,
-                            'confidence': confidence,
-                            'is_at_intersection': is_complex_shape or is_wide_shape,
-                            'solidity': solidity,
-                            'aspect_ratio': aspect_ratio
-                        }
-            
-            return None
-
-        # --- Proceed with the largest contour ---
-        M = cv2.moments(largest_contour)
-        if M["m00"] == 0:
-            if self.debug:
-                print("DEBUG: Contour has zero moments")
+                print(f"DEBUG: No contours found above min_line_area of {self.min_line_area}")
             return None
         
-        # Line center
-        cx = int(M["m10"] / M["m00"])
-        cy = int(M["m01"] / M["m00"])
+        # Sort contours by area in descending order
+        valid_contours.sort(key=cv2.contourArea, reverse=True)
         
-        # Bounding rectangle
-        x, y, w, h = cv2.boundingRect(largest_contour)
-        
-        # Calculate confidence based on contour properties
+        # --- Determine line center based on number of contours ---
         roi_height, roi_width = binary_roi.shape
-        area_ratio = cv2.contourArea(largest_contour) / (roi_width * roi_height)
-        aspect_ratio = w / float(h) if h > 0 else 0
         
-        # Higher confidence for larger, more line-like contours
-        confidence = min(1.0, area_ratio * 10 + min(aspect_ratio / 3, 1.0) * 0.5)
+        if len(valid_contours) >= 2:
+            # Two-line case: Assume the two largest contours are the track lines
+            line1_contour = valid_contours[0]
+            line2_contour = valid_contours[1]
+            
+            M1 = cv2.moments(line1_contour)
+            M2 = cv2.moments(line2_contour)
+            
+            if M1["m00"] == 0 or M2["m00"] == 0:
+                return None # Avoid division by zero
+                
+            cx1 = int(M1["m10"] / M1["m00"])
+            cx2 = int(M2["m10"] / M2["m00"])
+            
+            cy1 = int(M1["m01"] / M1["m00"])
+            cy2 = int(M2["m01"] / M2["m00"])
+            
+            # The line center is the midpoint between the two lines' centers
+            cx = (cx1 + cx2) // 2
+            cy = (cy1 + cy2) // 2
+            
+            # Combine contours for properties
+            combined_contour = np.vstack([line1_contour, line2_contour])
+            total_area = cv2.contourArea(line1_contour) + cv2.contourArea(line2_contour)
+            x, y, w, h = cv2.boundingRect(combined_contour)
+            
+            # Use combined properties for intersection detection
+            solidity = float(total_area) / cv2.contourArea(cv2.convexHull(combined_contour)) if cv2.contourArea(cv2.convexHull(combined_contour)) > 0 else 1.0
+            
+            # For two lines, aspect ratio should be of the combined bounding box
+            aspect_ratio = w / float(h) if h > 0 else 0
+            
+            is_complex_shape = solidity < self.intersection_solidity_threshold
+            is_wide_shape = aspect_ratio > self.intersection_aspect_ratio_threshold
+
+            if self.debug:
+                print(f"DEBUG: Two lines detected. Center at ({cx}, {cy}).")
+
+            return {
+                'center': (cx, cy),
+                'contour': combined_contour, # For debug drawing
+                'contours': [line1_contour, line2_contour], # Store individual contours
+                'bbox': (x, y, w, h),
+                'area': total_area,
+                'confidence': 1.0, # High confidence with two lines
+                'is_at_intersection': is_complex_shape or is_wide_shape,
+                'solidity': solidity,
+                'aspect_ratio': aspect_ratio
+            }
+            
+        elif len(valid_contours) == 1:
+            # Single-line case: Use the single largest contour
+            largest_contour = valid_contours[0]
+            M = cv2.moments(largest_contour)
+
+            if M["m00"] == 0:
+                return None
+            
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            
+            x, y, w, h = cv2.boundingRect(largest_contour)
+            area = cv2.contourArea(largest_contour)
+            area_ratio = area / (roi_width * roi_height)
+            aspect_ratio = w / float(h) if h > 0 else 0
+            confidence = min(1.0, area_ratio * 10 + min(aspect_ratio / 3, 1.0) * 0.5)
+            
+            solidity = float(area) / cv2.contourArea(cv2.convexHull(largest_contour)) if cv2.contourArea(cv2.convexHull(largest_contour)) > 0 else 1.0
+            is_complex_shape = solidity < self.intersection_solidity_threshold
+            is_wide_shape = aspect_ratio > self.intersection_aspect_ratio_threshold
+
+            if self.debug:
+                print(f"DEBUG: Single line detected. Center at ({cx}, {cy}).")
+
+            return {
+                'center': (cx, cy),
+                'contour': largest_contour,
+                'contours': [largest_contour],
+                'bbox': (x, y, w, h),
+                'area': area,
+                'confidence': confidence,
+                'is_at_intersection': is_complex_shape or is_wide_shape,
+                'solidity': solidity,
+                'aspect_ratio': aspect_ratio
+            }
         
-        # --- Intersection Detection ---
-        # A corner or T-junction is more "square" and less "solid" than a straight line.
-        solidity = float(cv2.contourArea(largest_contour)) / cv2.contourArea(cv2.convexHull(largest_contour)) if cv2.contourArea(cv2.convexHull(largest_contour)) > 0 else 1.0
-        
-        # Check if the shape is complex (not solid) or wide (like a T-junction)
-        is_complex_shape = solidity < self.intersection_solidity_threshold
-        is_wide_shape = aspect_ratio > self.intersection_aspect_ratio_threshold
-        
-        result = {
-            'center': (cx, cy),
-            'contour': largest_contour,
-            'bbox': (x, y, w, h),
-            'area': cv2.contourArea(largest_contour),
-            'confidence': confidence,
-            'is_at_intersection': is_complex_shape or is_wide_shape,
-            'solidity': solidity,
-            'aspect_ratio': aspect_ratio
-        }
-        
-        return result
+        return None # No valid contours found
     
     def _calculate_line_following_params(self, line_info: Optional[Dict], 
                                        frame_width: int, roi_start_y: int) -> Dict:
@@ -1280,7 +1276,13 @@ class CameraLineFollower:
             'line_center_x': line_center_x,
             'line_offset': smoothed_offset,
             'line_confidence': line_info['confidence'],
-            'status': 'line_following'
+            'status': 'line_following',
+            'is_at_intersection': line_info.get('is_at_intersection', False),
+            'solidity': line_info.get('solidity', 1.0),
+            'aspect_ratio': line_info.get('aspect_ratio', 0.0),
+            'area': line_info.get('area', 0),
+            'contour': line_info.get('contour'),
+            'contours': line_info.get('contours')
         }
     
     def _draw_debug_overlay(self, frame: np.ndarray, result: Dict, 
@@ -1312,15 +1314,22 @@ class CameraLineFollower:
         cv2.putText(debug_frame, "ARM EXCLUSION ZONE", (10, roi_end_y + 20), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-        if result.get('line_detected') and result.get('contour') is not None:
-            # Draw the detected contour in blue
-            contour = result['contour']
-            cv2.drawContours(debug_frame, [contour], -1, (255, 0, 0), 2, offset=(0, roi_start_y))
+        if result.get('line_detected') and result.get('contours'):
+            # Draw all detected contours in blue
+            cv2.drawContours(debug_frame, result['contours'], -1, (255, 0, 0), 2, offset=(0, roi_start_y))
 
             # Draw detected line center in green
-            if result.get('center'):
-                line_x, line_y = result['center']
-                cv2.circle(debug_frame, (line_x, line_y + roi_start_y), 8, (0, 255, 0), -1)
+            line_center_x = result.get('line_center_x')
+            if line_center_x is not None:
+                # For the y-coordinate, let's find an average y from the main contour's bounding box
+                # to place the center dot correctly.
+                contour = result.get('contour')
+                center_y_in_roi = frame.shape[0] // 2 
+                if contour is not None:
+                    _, y_box, _, h_box = cv2.boundingRect(contour)
+                    center_y_in_roi = y_box + h_box // 2
+
+                cv2.circle(debug_frame, (line_center_x, center_y_in_roi + roi_start_y), 8, (0, 255, 0), -1)
 
         # Display detection info
         solidity = result.get('solidity', -1.0)
