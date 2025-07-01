@@ -41,10 +41,10 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-CELL_SIZE_M = 0.064
-BASE_SPEED = 90
-TURN_SPEED = 50     # Reduced from 25 to 20 for even slower turning
-CORNER_SPEED = 50   # Reduced from 25 to 20 for even slower cornering
+CELL_SIZE_M = 0.067
+BASE_SPEED = 30
+TURN_SPEED = 20     # Reduced from 25 to 20 for even slower turning
+CORNER_SPEED = 20   # Reduced from 25 to 20 for even slower cornering
 
 # Hardware-specific trims to account for motor differences.
 # Values are multipliers (1.0 = no change, 0.9 = 10% slower).
@@ -84,7 +84,7 @@ START_DIRECTION = 'S'
 
 # Time in seconds it takes for the robot to cross one 12cm cell at BASE_SPEED.
 
-CELL_CROSSING_TIME_S = 1.5  # Increased to act as a safeguard timeout
+CELL_CROSSING_TIME_S = 2.5  # Increased to act as a safeguard timeout
 
 # Corner turning configuration
 CORNER_TURN_MODES = {
@@ -152,6 +152,7 @@ class RobotController(CameraLineFollowingMixin):
         self.current_target_index = 0
         self.turn_to_execute = None # Stores the next turn ('left' or 'right')
         self.turn_start_time = 0
+        self.wait_start_time = 0
         self.last_turn_complete_time = 0 # Cooldown timer for turns
         self.is_straight_corridor = False
         self.last_cell_update_time = 0
@@ -295,18 +296,14 @@ class RobotController(CameraLineFollowingMixin):
         can_turn = (time.time() - self.last_turn_complete_time) > TURN_COOLDOWN_S
 
         if required_turn in ['left', 'right'] and can_turn:
-            turn_message = f"Waypoint reached. Turning {required_turn} towards {next_waypoint}."
+            turn_message = f"Waypoint reached. Entering wait state before turning {required_turn}."
             print(turn_message)
             self.audio_feedback.speak(turn_message)
             
-            # Stop briefly before turning to make it more precise
-            self._stop_motors()
-            time.sleep(0.2) 
-
             self.turn_to_execute = required_turn
-            self.state = 'turning'
-            self.turn_start_time = time.time()
-            return # Exit to let the 'turning' state take over
+            self.state = 'waiting_at_corner'
+            self.wait_start_time = time.time()
+            return # Exit to let the new state take over
         
        
         frame = self.camera_line_follower.get_camera_frame()
@@ -459,57 +456,32 @@ class RobotController(CameraLineFollowingMixin):
 
     def _execute_smooth_arcing_turn(self):
         """
-        Execute the original arcing turn for general navigation.
+        Execute a more reliable, time-based arcing turn for general navigation.
+        This removes dependency on vision for turn completion, making it more robust.
         """
-        # Define turn parameters
-        TURN_TIMEOUT_S = 3.5          # Balanced timeout for reliable turns
-        MIN_TURN_DURATION_S = 0.6     # Moderate turn commitment time
-        LINE_CENTERED_THRESHOLD = 0.15 # How close to center the line must be
-        STRAIGHT_LINE_ASPECT_RATIO_THRESHOLD = 0.5 # A re-acquired line should be tall and thin
+        # Define a fixed duration for the arcing turn to approximate 90 degrees.
+        # This provides more consistent turning behavior.
+        ARCING_TURN_DURATION_S = 1.2
+        TURN_TIMEOUT_S = 2.0  # A shorter timeout as a safeguard.
 
-        # Get the latest camera frame and analyze it for the line
-        frame = self.camera_line_follower.get_camera_frame()
-        if frame is None:
-            self._stop_motors()
-            return
-
-        self.camera_line_result = self.camera_line_follower.detect_line(frame)
-        
-        # Feed camera results to position tracker for hybrid tracking
-        self.position_tracker.set_camera_line_result(self.camera_line_result)
-        
-        line_offset = self.camera_line_result.get('line_offset', 1.0) # Default to a large offset
-        aspect_ratio = self.camera_line_result.get('aspect_ratio', 1.0) # Default to a wide shape
-
-        is_line_centered = abs(line_offset) < LINE_CENTERED_THRESHOLD
-        is_line_straight = aspect_ratio < STRAIGHT_LINE_ASPECT_RATIO_THRESHOLD
-        
         time_in_turn = time.time() - self.turn_start_time
-        
-        # --- DEBUG LOG ---
-        
-        
-        # Check for completion conditions
-        # The robot must have been turning for a minimum duration AND see a centered, straight line.
-        turn_complete = is_line_centered and is_line_straight and (time_in_turn > MIN_TURN_DURATION_S)
-        turn_timed_out = time_in_turn > TURN_TIMEOUT_S
 
-        if turn_complete or turn_timed_out:
-            if turn_complete:
-               
-                self.audio_feedback.speak("Turn complete.")
-            else: # Timed out
-
+        # The turn is complete once the fixed duration has elapsed or it times out.
+        if time_in_turn >= ARCING_TURN_DURATION_S or time_in_turn > TURN_TIMEOUT_S:
+            if time_in_turn > TURN_TIMEOUT_S:
                 self.audio_feedback.speak("Turn timed out.")
-                
+            else:
+                self.audio_feedback.speak("Turn complete.")
+
             self._stop_motors()
             self.position_tracker.update_direction_after_turn(self.turn_to_execute)
             self.turn_to_execute = None
             self.state = 'path_following'
-            self.last_turn_complete_time = time.time() # Start cooldown
-            time.sleep(0.25) # Short pause to stabilize
+            self.last_turn_complete_time = time.time()  # Start cooldown
+            time.sleep(0.25)  # Short pause to stabilize and re-acquire line
         else:
-            # Condition not met, continue turning
+            # Condition not met, continue the arcing turn.
+            # We no longer need to check for line centering during the turn itself.
             self._perform_arcing_turn(self.turn_to_execute)
 
     def _run_state_machine(self):
@@ -525,6 +497,12 @@ class RobotController(CameraLineFollowingMixin):
         elif self.state == "path_following":
             self.position_tracker.set_moving(True)
             self._follow_path()
+        elif self.state == "waiting_at_corner":
+            self._stop_motors()
+            # Check if 4 seconds have passed
+            if time.time() - self.wait_start_time >= 4.0:
+                self.state = 'turning'
+                self.turn_start_time = time.time() # Start the timer for the turn itself
         elif self.state == "turning":
             self.position_tracker.set_moving(True)
             self._execute_arcing_turn()

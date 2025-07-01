@@ -564,12 +564,15 @@ class CameraLineFollower:
         self.last_detection_time = 0
         self.detection_fps = 0
         
-        # PID controller for smooth line following
-        self.pid = PIDController(kp=1.2, ki=0.1, kd=0.8, output_limits=(-100, 100))
-        self.strafe_gain = 30.0 # Proportional gain for sideways correction
+        # PID controller for smooth line following.
+        # Gains are tuned for direct differential drive control.
+        self.pid = PIDController(kp=15.0, ki=0.1, kd=5.0, output_limits=(-100, 100))
         
         # Detection history for smoothing
         self.line_offset_history = deque(maxlen=5)
+        
+        # Temporal filtering for noise reduction
+        self.mask_history = deque(maxlen=3)
         
         # Result cache to avoid re-computation
         self.last_frame_hash = None
@@ -580,10 +583,10 @@ class CameraLineFollower:
         self.intersection_aspect_ratio_threshold = 0.8
         
         self.canny_high = 150
-        self.binary_threshold = 80
+        self.binary_threshold = 60
         
         # Line detection parameters
-        self.min_line_area = 30  # Minimum contour area to be considered a line (reduced for better sensitivity)
+        self.min_line_area = 20  # Minimum contour area to be considered a line (reduced for better sensitivity)
         
         # Camera properties
         self.camera_index = camera_index
@@ -666,21 +669,9 @@ class CameraLineFollower:
         roi_end_y = int(height * self.ARM_EXCLUSION_RATIO)  # Stop before arm area
         roi = frame[roi_start_y:roi_end_y, :]
         
-        # Preprocess the ROI
+        # Preprocess the ROI to get a candidate mask for the current frame
         processed_roi = self._preprocess_roi(roi)
-        
-        # Detect line in the ROI
-        line_info = self._find_line_in_roi(processed_roi)
-        
-        # Calculate line following parameters and merge results
-        result = self._calculate_line_following_params(line_info, width, roi_start_y)
-        if line_info:
-            result.update(line_info) # Add solidity, aspect_ratio etc. to the main result
-        
-        # Add debug visualization if enabled
-        if self.debug:
-            result['processed_frame'] = self._draw_debug_overlay(frame, result, roi_start_y, processed_roi)
-        
+
         # Update FPS calculation based on actual processing time
         current_time = time.time()
         if self.last_detection_time > 0:
@@ -689,7 +680,45 @@ class CameraLineFollower:
                 self.detection_fps = 1.0 / time_diff
         self.last_detection_time = current_time
         
+        # --- NEW: Apply temporal filtering for a more stable mask ---
+        self.mask_history.append(processed_roi)
+        if len(self.mask_history) < self.mask_history.maxlen:
+            # Don't process until we have a full history to average
+            return self._empty_result()
+
+        # Apply the temporal filter to get a stable mask by averaging over the last few frames
+        stable_mask = self._apply_temporal_filter()
+        
+        # After stabilizing, perform a morphological closing operation to connect any remaining gaps
+        closing_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+        final_mask = cv2.morphologyEx(stable_mask, cv2.MORPH_CLOSE, closing_kernel)
+
+        # Now, run detection on the clean, final, temporally-stable mask
+        line_info = self._find_line_in_roi(final_mask)
+        
+        # Calculate all line following parameters based on the stable line info
+        result = self._calculate_line_following_params(line_info, width, roi_start_y)
+        if line_info:
+            result.update(line_info)
+
+        # Create the debug view using the final, cleaned mask
+        if self.debug:
+            result['processed_frame'] = self._draw_debug_overlay(frame, result, roi_start_y, final_mask)
+        
         return result
+    
+    def _apply_temporal_filter(self) -> np.ndarray:
+        """
+        Applies a median filter across the last few binary masks to reduce temporal noise.
+        This is very effective at removing flickering pixels (salt & pepper noise over time).
+        """
+        # Stack the masks in the history along a new dimension (creates a 3D array)
+        stacked_masks = np.stack(self.mask_history, axis=-1)
+        
+        # Calculate the median along the time axis and convert back to a standard 8-bit image
+        stable_mask = np.median(stacked_masks, axis=-1).astype(np.uint8)
+        
+        return stable_mask
     
     def _preprocess_roi(self, roi: np.ndarray) -> np.ndarray:
         """
@@ -699,6 +728,9 @@ class CameraLineFollower:
         # Convert to grayscale for thresholding
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
+        # --- NEW: Apply a Median Blur to reduce salt-and-pepper noise from adaptive thresholding ---
+        gray = cv2.medianBlur(gray, 5) # Kernel size of 5 is effective for this noise
+
         # Auto-adapt threshold parameters based on lighting conditions if enabled
         if self.AUTO_ADAPTIVE_ENABLED:
             avg_brightness = np.mean(gray)
@@ -715,92 +747,39 @@ class CameraLineFollower:
                 if self.debug and self.frames_processed % 30 == 0:
                     print(f"Normal conditions detected (avg={avg_brightness:.1f}), using normal adaptive params")
         
-        # Initialize masks list for combining different methods
-        masks = []
-        
-        # 1. HSV-based thresholding (if enabled)
+        # --- New Two-Mask Vision Strategy ---
+        # 1. Create a high-confidence "Color Mask" using strict HSV thresholds
+        hsv_mask = None
         if self.HSV_THRESH_ENABLED:
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-            # Define range for black color in HSV - balanced to detect black lines but avoid brown surfaces
             lower_black = np.array([0, 0, 0])
-            upper_black = np.array([180, 80, 100])  # Increased thresholds to better detect black lines
+            upper_black = np.array([180, 255, 75]) # Strict threshold for true black
             hsv_mask = cv2.inRange(hsv, lower_black, upper_black)
-            masks.append(hsv_mask)
+
+        # 2. Create a robust "Shape Mask" using adaptive thresholding
+        adaptive_mask_gauss = cv2.adaptiveThreshold(
+            gray, 255, self.current_adaptive_params['method'],
+            self.ADAPTIVE_THRESH_TYPE, self.current_adaptive_params['block_size'],
+            self.current_adaptive_params['c_constant']
+        )
         
-        # 2. Enhanced adaptive thresholding (if enabled)
-        if self.ADAPTIVE_THRESH_ENABLED:
-            # Primary adaptive threshold with current parameters
-            adaptive_mask = cv2.adaptiveThreshold(
-                gray, 
-                255, 
-                self.current_adaptive_params['method'], 
-                self.ADAPTIVE_THRESH_TYPE, 
-                self.current_adaptive_params['block_size'], 
-                self.current_adaptive_params['c_constant']
-            )
-            masks.append(adaptive_mask)
-            
-            # Additional adaptive threshold with different method for robustness
-            adaptive_mask_alt = cv2.adaptiveThreshold(
-                gray, 
-                255, 
-                cv2.ADAPTIVE_THRESH_MEAN_C,  # Different method
-                self.ADAPTIVE_THRESH_TYPE, 
-                self.current_adaptive_params['block_size'], 
-                max(2, self.current_adaptive_params['c_constant'] - 2)  # Slightly different C
-            )
-            
-            # Combine both adaptive methods with OR operation
-            combined_adaptive = cv2.bitwise_or(adaptive_mask, adaptive_mask_alt)
-            masks.append(combined_adaptive)
-        
-        # 3. Simple thresholding as fallback (if enabled)
-        if self.SIMPLE_THRESH_ENABLED:
-            _, simple_mask = cv2.threshold(gray, self.SIMPLE_THRESHOLD_VALUE, 255, self.SIMPLE_THRESH_TYPE)
-            masks.append(simple_mask)
-        
-        # Combine all enabled methods
-        if not masks:
-            # Fallback if no methods enabled
-            _, combined_mask = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY_INV)
-        elif len(masks) == 1:
-            combined_mask = masks[0]
+        # We no longer do complex morphology here; it's handled by the temporal filter.
+        shape_mask = adaptive_mask_gauss
+
+        # 3. Combine the masks
+        # Use the shape mask as the base, and add the high-confidence color mask to it.
+        if hsv_mask is not None:
+            combined_mask = cv2.bitwise_or(shape_mask, hsv_mask)
         else:
-            # Use AND operation for multiple masks to ensure high confidence
-            combined_mask = masks[0]
-            for mask in masks[1:]:
-                combined_mask = cv2.bitwise_and(combined_mask, mask)
+            combined_mask = shape_mask
         
         # Apply purple arm filtering if enabled
         if self.ARM_FILTERING_ENABLED:
-            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV) if not self.HSV_THRESH_ENABLED else hsv
-            combined_mask = self._filter_purple_arm(hsv, combined_mask, roi.shape)
-        
-        # Enhanced morphological operations to connect broken line segments and fill gaps
-        # 1. Remove small noise
-        small_kernel = np.ones((2, 2), np.uint8)
-        opened_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, small_kernel)
-        
-        # 2. Moderate directional closing to connect nearby segments
-        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 7))
-        h_closed = cv2.morphologyEx(opened_mask, cv2.MORPH_CLOSE, h_kernel)
-        
-        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 35))
-        v_closed = cv2.morphologyEx(h_closed, cv2.MORPH_CLOSE, v_kernel)
-        
-        # 3. Combine directional closings
-        directional_combined = cv2.bitwise_or(h_closed, v_closed)
-        
-        # 4. A single, more assertive closing operation
-        square_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 20))
-        gap_filled = cv2.morphologyEx(directional_combined, cv2.MORPH_CLOSE, square_kernel)
-        
-        # 5. Final dilation to thicken the line slightly
-        dilate_kernel = np.ones((5, 5), np.uint8)
-        final_mask = cv2.dilate(gap_filled, dilate_kernel, iterations=2)
-        
-        # 6. Intelligent gap filling using contour analysis
-        final_mask = self._contour_based_gap_filling(final_mask)
+            hsv_for_arm = hsv if 'hsv' in locals() else cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            combined_mask = self._filter_purple_arm(hsv_for_arm, combined_mask, roi.shape)
+
+        # Return the raw, noisy mask. The temporal filter will clean it.
+        final_mask = combined_mask
         
         return final_mask
     
@@ -943,7 +922,7 @@ class CameraLineFollower:
         
         # Additional filtering: Remove black pixels that are too close to purple regions (arm edges)
         # Dilate the purple mask to create a "no-black-zone" around purple areas
-        purple_exclusion_kernel = np.ones((15, 15), np.uint8)
+        purple_exclusion_kernel = np.ones((7, 7), np.uint8)
         purple_exclusion_mask = cv2.dilate(purple_mask, purple_exclusion_kernel, iterations=1)
         
         # Remove any black pixels that are within the purple exclusion zone
@@ -1369,10 +1348,8 @@ class CameraLineFollower:
     
     def get_motor_speeds(self, result: Dict, base_speed: int = 60) -> Tuple[int, int, int, int]:
         """
-        Calculates motor speeds based on the line detection result.
+        Calculates motor speeds for a differential drive robot based on line detection.
         'line_offset' is the key parameter used for PID control.
-        A positive offset means the line is to the right of center.
-        A negative offset means the line is to the left of center.
         """
         line_offset = result.get('line_offset', 0.0)
         line_confidence = result.get('line_confidence', 0.0)
@@ -1381,22 +1358,21 @@ class CameraLineFollower:
             # If line is lost or confidence is too low, stop.
             return 0, 0, 0, 0
             
-        # --- Omni-wheel control logic ---
-        # 1. Rotational correction to stay on the line (PID)
-        omega = self.pid.update(line_offset)
+        # Calculate the turning correction from the PID controller.
+        # A positive offset (line to the right) should make the robot turn right.
+        turn_correction = self.pid.update(line_offset)
         
-        # 2. Sideways (strafing) correction for fine-tuning position
-        vy = self.strafe_gain * line_offset
+        # ADAPTIVE SPEED: Slow down when turning to improve stability.
+        speed_reduction_factor = 1.0 - (abs(line_offset) * 0.5) # Reduce speed less aggressively
+        current_speed = int(base_speed * speed_reduction_factor)
         
-        # Combine forward, sideways, and rotational movements using the correct
-        # kinematic model for an X-configured omni-drive.
-        # vx = base_speed (forward)
-        fl = int(base_speed - vy + omega)
-        fr = int(base_speed + vy - omega)
-        bl = int(base_speed + vy + omega)
-        br = int(base_speed - vy - omega)
+        # For a right turn (positive offset -> positive correction), we want the right motor to be slower.
+        left_speed = int(current_speed + turn_correction)
+        right_speed = int(current_speed - turn_correction)
 
-        return fl, fr, bl, br
+        # The main controller expects four motor speeds, so we duplicate the values
+        # for the front and back wheels on each side.
+        return left_speed, right_speed, left_speed, right_speed
 
 
 class CameraLineFollowingMixin:

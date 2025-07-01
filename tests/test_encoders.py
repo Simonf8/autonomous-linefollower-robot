@@ -8,7 +8,7 @@ from gpiozero import RotaryEncoder
 # GPIO pin numbers for the wheel encoders (A and B phases)
 ENCODER_PINS = {
     'fl': {'A': 15, 'B': 14},    # Front Left
-    'fr': {'A': 2, 'B': 3},     # Front Right
+    'fr': {'A': 3, 'B': 2},     # Front Right
     # Add more encoders here if needed:
     # 'bl': {'A': 4, 'B': 5},     # Back Left
     # 'br': {'A': 6, 'B': 7},     # Back Right
