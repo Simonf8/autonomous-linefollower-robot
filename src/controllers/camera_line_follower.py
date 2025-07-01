@@ -469,9 +469,9 @@ class CameraLineFollower:
         
         # Region of Interest (ROI) settings.
         # This is a critical parameter to prevent the camera from looking too far ahead.
-        # We are focusing on the area from 40% down to 75% down the frame.
-        self.ROI_START_RATIO = 0.40   # Start ROI at 40% down the frame
-        self.ARM_EXCLUSION_RATIO = 0.75  # Bottom 25% is arm area - completely ignored
+        # We are focusing on the area from 30% down to 80% down the frame.
+        self.ROI_START_RATIO = 0.30   # Start ROI at 30% down the frame 
+        self.ARM_EXCLUSION_RATIO = 0.80  # Bottom 20% is arm area
         
         # ADAPTIVE THRESHOLDING CONFIGURATION
         # Enable/disable different thresholding methods
@@ -518,7 +518,7 @@ class CameraLineFollower:
         
         # ARM FILTERING CONFIGURATION
         # Enable/disable purple arm filtering
-        self.ARM_FILTERING_ENABLED = True
+        self.ARM_FILTERING_ENABLED = False
         
         # Purple color range in HSV for arm detection and filtering
         # Expanded ranges to better catch the bright purple arm
@@ -567,7 +567,7 @@ class CameraLineFollower:
         
         # PID controller for smooth line following.
         # Gains are tuned for direct differential drive control.
-        self.pid = PIDController(kp=4.0, ki=0.02, kd=1.0, output_limits=(-100, 100))
+        self.pid = PIDController(kp=2.0, ki=0.01, kd=0.5, output_limits=(-100, 100))
         
         # Detection history for smoothing
         self.line_offset_history = deque(maxlen=5)
@@ -580,8 +580,9 @@ class CameraLineFollower:
         self.last_result = None
         
         self.max_line_width = 0.7 # Max line width as a ratio of ROI width
-        self.intersection_solidity_threshold = 0.75 # Lowered from 0.85 to be less sensitive to noise on straight lines
-        self.intersection_aspect_ratio_threshold = 1.2 # Increased from 0.8 to be less sensitive
+        self.intersection_solidity_threshold = 0.4 # VERY LOW threshold - catch any complex shapes
+        self.intersection_aspect_ratio_threshold = 0.6 # VERY LOW threshold - catch any wide shapes  
+        self.intersection_area_threshold = 400 # VERY LOW area threshold - catch small intersections
         
         self.canny_high = 150
         self.binary_threshold = 60
@@ -652,601 +653,229 @@ class CameraLineFollower:
 
     def detect_line(self, frame: Optional[np.ndarray] = None) -> Dict:
         """
-        Analyzes a camera frame to find the line, its offset, and intersections.
-        If a frame is provided, it's used. Otherwise, captures a new frame.
+        Main line detection function.
+        Takes a raw camera frame, processes it, and returns line following data.
         """
-        if frame is None:
-            frame = self.get_camera_frame()
-        
-        if frame is None:
-            # If still no frame, return an empty result
-            return self._empty_result()
-            
-        height, width, _ = frame.shape
         self.frames_processed += 1
         
-        # Define ROI for line detection (exclude bottom 25% where arm is)
+        if frame is None:
+            frame = self.get_camera_frame()
+            if frame is None:
+                return self._calculate_line_following_params(None, 0, 0)
+
+        height, width, _ = frame.shape
+        
+        # 1. Define and Extract Region of Interest (ROI)
         roi_start_y = int(height * self.ROI_START_RATIO)
-        roi_end_y = int(height * self.ARM_EXCLUSION_RATIO)  # Stop before arm area
+        roi_end_y = int(height * self.ARM_EXCLUSION_RATIO)
         roi = frame[roi_start_y:roi_end_y, :]
-        
-        # Preprocess the ROI to get a candidate mask for the current frame
-        processed_roi = self._preprocess_roi(roi)
 
-        # Update FPS calculation based on actual processing time
-        current_time = time.time()
-        if self.last_detection_time > 0:
-            time_diff = current_time - self.last_detection_time
-            if time_diff > 0:
-                self.detection_fps = 1.0 / time_diff
-        self.last_detection_time = current_time
-        
-        # --- NEW: Apply temporal filtering for a more stable mask ---
-        self.mask_history.append(processed_roi)
-        if len(self.mask_history) < self.mask_history.maxlen:
-            # Don't process until we have a full history to average
-            return self._empty_result()
+        # 2. Preprocess ROI to get a clean binary mask
+        final_mask = self._preprocess_roi(roi)
 
-        # Apply the temporal filter to get a stable mask by averaging over the last few frames
-        stable_mask = self._apply_temporal_filter()
-        
-        # After stabilizing, perform a morphological closing operation to connect any remaining gaps
-        closing_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
-        final_mask = cv2.morphologyEx(stable_mask, cv2.MORPH_CLOSE, closing_kernel)
-
-        # Now, run detection on the clean, final, temporally-stable mask
+        # 3. Find line and intersection information from the mask
         line_info = self._find_line_in_roi(final_mask)
         
-        # Calculate all line following parameters based on the stable line info
+        # 4. Calculate final motor control parameters
         result = self._calculate_line_following_params(line_info, width, roi_start_y)
         if line_info:
             result.update(line_info)
 
-        # Create the debug view using the final, cleaned mask
+        # 5. Create debug view
         if self.debug:
             result['processed_frame'] = self._draw_debug_overlay(frame, result, roi_start_y, final_mask)
-        
+
         return result
-    
-    def _apply_temporal_filter(self) -> np.ndarray:
-        """
-        Applies a median filter across the last few binary masks to reduce temporal noise.
-        This is very effective at removing flickering pixels (salt & pepper noise over time).
-        """
-        # Stack the masks in the history along a new dimension (creates a 3D array)
-        stacked_masks = np.stack(self.mask_history, axis=-1)
-        
-        # Calculate the median along the time axis and convert back to a standard 8-bit image
-        stable_mask = np.median(stacked_masks, axis=-1).astype(np.uint8)
-        
-        return stable_mask
-    
+
     def _preprocess_roi(self, roi: np.ndarray) -> np.ndarray:
         """
-        Applies enhanced adaptive thresholding to isolate the line.
-        Uses configurable adaptive thresholding with auto-adaptation for lighting conditions.
+        Takes the raw ROI frame and converts it into a clean, binary mask 
+        of the line. This is the heart of the vision pipeline.
         """
-        # Convert to grayscale for thresholding
+        # 1. Convert to grayscale
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
-        # --- NEW: Apply a Median Blur to reduce salt-and-pepper noise from adaptive thresholding ---
-        gray = cv2.medianBlur(gray, 5) # Kernel size of 5 is effective for this noise
+        # 2. Apply a Gaussian blur to reduce noise before thresholding
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-        # Auto-adapt threshold parameters based on lighting conditions if enabled
-        if self.AUTO_ADAPTIVE_ENABLED:
-            avg_brightness = np.mean(gray)
-            if avg_brightness > self.BRIGHTNESS_THRESHOLD_BRIGHT:
-                self.current_adaptive_params = self.ADAPTIVE_PARAMS_BRIGHT
-                if self.debug and self.frames_processed % 30 == 0:  # Log every 30 frames
-                    print(f"Bright conditions detected (avg={avg_brightness:.1f}), using bright adaptive params")
-            elif avg_brightness < self.BRIGHTNESS_THRESHOLD_DIM:
-                self.current_adaptive_params = self.ADAPTIVE_PARAMS_DIM
-                if self.debug and self.frames_processed % 30 == 0:
-                    print(f"Dim conditions detected (avg={avg_brightness:.1f}), using dim adaptive params")
-            else:
-                self.current_adaptive_params = self.ADAPTIVE_PARAMS_NORMAL
-                if self.debug and self.frames_processed % 30 == 0:
-                    print(f"Normal conditions detected (avg={avg_brightness:.1f}), using normal adaptive params")
-        
-        # --- New Two-Mask Vision Strategy ---
-        # 1. Create a high-confidence "Color Mask" using strict HSV thresholds
-        hsv_mask = None
-        if self.HSV_THRESH_ENABLED:
-            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-            lower_black = np.array([0, 0, 0])
-            upper_black = np.array([180, 255, 75]) # Strict threshold for true black
-            hsv_mask = cv2.inRange(hsv, lower_black, upper_black)
+        # 3. Very sensitive threshold - detect anything darker than 180 as black line
+        _, binary_roi = cv2.threshold(blurred, 180, 255, cv2.THRESH_BINARY_INV)
 
-        # 2. Create a robust "Shape Mask" using adaptive thresholding
-        adaptive_mask_gauss = cv2.adaptiveThreshold(
-            gray, 255, self.current_adaptive_params['method'],
-            self.ADAPTIVE_THRESH_TYPE, self.current_adaptive_params['block_size'],
-            self.current_adaptive_params['c_constant']
-        )
-        
-        # We no longer do complex morphology here; it's handled by the temporal filter.
-        shape_mask = adaptive_mask_gauss
-
-        # 3. Combine the masks
-        # Use the shape mask as the base, and add the high-confidence color mask to it.
-        if hsv_mask is not None:
-            combined_mask = cv2.bitwise_or(shape_mask, hsv_mask)
-        else:
-            combined_mask = shape_mask
-        
-        # Apply purple arm filtering if enabled
+        # 4. Apply arm filtering if enabled
         if self.ARM_FILTERING_ENABLED:
-            hsv_for_arm = hsv if 'hsv' in locals() else cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-            combined_mask = self._filter_purple_arm(hsv_for_arm, combined_mask, roi.shape)
+            binary_roi = self._filter_out_robot_arm(roi, binary_roi)
 
-        # Return the raw, noisy mask. The temporal filter will clean it.
-        final_mask = combined_mask
+        # --- SCANLINE-BASED GAP FILLING ---
+        # This approach fills gaps between left and right edges on each row
+        height, width = binary_roi.shape
+        filled_roi = binary_roi.copy()
         
-        return final_mask
-    
-    def _contour_based_gap_filling(self, binary_mask: np.ndarray) -> np.ndarray:
-        """
-        Uses contour analysis to identify and fill gaps between line segments.
-        This is a more intelligent method than pure morphological operations.
-        """
-        # Find all contours that could be line segments
-        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if len(contours) < 2:
-            return binary_mask  # Not enough contours to have a gap
-
-        # Filter contours by area to remove noise
-        min_contour_area = 20
-        line_segments = [c for c in contours if cv2.contourArea(c) > min_contour_area]
-        
-        if len(line_segments) < 2:
-            return binary_mask
-
-        filled_mask = binary_mask.copy()
-        
-        # Compare all pairs of line segments to see if they should be connected
-        for i in range(len(line_segments)):
-            for j in range(i + 1, len(line_segments)):
-                contour1 = line_segments[i]
-                contour2 = line_segments[j]
+        # Process each row to find and fill gaps between edges
+        for y in range(height):
+            row = binary_roi[y, :]
+            white_pixels = np.where(row == 255)[0]
+            
+            if len(white_pixels) >= 2:
+                # Find leftmost and rightmost white pixels
+                left_edge = white_pixels[0]
+                right_edge = white_pixels[-1]
                 
-                # Get bounding boxes to determine alignment and distance
-                x1, y1, w1, h1 = cv2.boundingRect(contour1)
-                x2, y2, w2, h2 = cv2.boundingRect(contour2)
+                # Only fill if there's a reasonable gap (not too wide to be noise)
+                gap_width = right_edge - left_edge
+                if gap_width > 10 and gap_width < width * 0.8:  # Reasonable lane width
+                    # Fill the entire span between edges
+                    filled_roi[y, left_edge:right_edge+1] = 255
+        
+        # --- ENHANCED CORNER CLEANUP ---
+        # Remove corner blocks more aggressively
+        
+        # Find contours after gap filling
+        contours, _ = cv2.findContours(filled_roi.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if len(contours) >= 1:
+            # Sort contours by area - largest is likely the main lane
+            contours_by_area = sorted(contours, key=cv2.contourArea, reverse=True)
+            
+            # Remove ALL smaller contours that could be corner artifacts
+            for i, contour in enumerate(contours_by_area):
+                area = cv2.contourArea(contour)
+                x, y, w, h = cv2.boundingRect(contour)
                 
-                center1_y = y1 + h1 / 2
-                center2_y = y2 + h2 / 2
+                # Only remove very small noise contours, keep intersection parts
+                is_tiny_noise = area < (width * height * 0.02)  # Only remove if less than 2% of image
                 
-                # Check for vertical alignment (are they part of the same horizontal line?)
-                # Allow a small vertical drift
-                if abs(center1_y - center2_y) < 20: # Max 20 pixels vertical difference
-                    
-                    # Determine the horizontal gap between the two segments
-                    gap_left = max(x1, x2)
-                    gap_right = min(x1 + w1, x2 + w2)
-                    
-                    # This calculation is for overlap, for gap we need the space between them
-                    box1_right = x1 + w1
-                    box2_left = x2
-                    
-                    if box1_right < box2_left: # No overlap, box1 is to the left of box2
-                        horizontal_gap = box2_left - box1_right
-                        gap_start_x = box1_right
-                        gap_end_x = box2_left
-                    else: # No overlap, box2 is to the left of box1
-                        horizontal_gap = x1 - (x2 + w2)
-                        gap_start_x = x2 + w2
-                        gap_end_x = x1
-                        
-                    # Connect segments that have a reasonable gap between them
-                    if 0 < horizontal_gap < 50: # Connect if gap is between 1 and 50 pixels
-                        # Draw a rectangle to fill the gap
-                        y_top = int(min(center1_y, center2_y) - 10)
-                        y_bottom = int(max(center1_y, center2_y) + 10)
-                        cv2.rectangle(filled_mask, (gap_start_x, y_top), (gap_end_x, y_bottom), 255, -1)
+                # Remove only tiny noise, keep everything else (including corners)
+                if is_tiny_noise:
+                    cv2.fillPoly(filled_roi, [contour], 0)
+        
+        # Apply morphological closing to smooth connections
+        kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 15))
+        filled_roi = cv2.morphologyEx(filled_roi, cv2.MORPH_CLOSE, kernel_vertical)
+        
+        # Final horizontal closing to ensure solid lanes
+        kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+        final_roi = cv2.morphologyEx(filled_roi, cv2.MORPH_CLOSE, kernel_horizontal)
 
-        return filled_mask
-    
-    def _filter_purple_arm(self, hsv_roi: np.ndarray, black_mask: np.ndarray, roi_shape: tuple) -> np.ndarray:
+        return final_roi
+
+    def _apply_temporal_filter(self) -> np.ndarray:
         """
-        Filters out purple arm regions from the black mask to prevent interference.
+        Applies a temporal filter to the mask history to smooth out noise.
+        """
+        if len(self.mask_history) < 2:
+            return self.mask_history[-1]
+        
+        # Calculate the average of the last two masks
+        last_mask = self.mask_history[-1]
+        second_last_mask = self.mask_history[-2]
+        
+        averaged_mask = (last_mask + second_last_mask) / 2
+        
+        return averaged_mask
+
+    def _filter_out_robot_arm(self, roi: np.ndarray, binary_roi: np.ndarray) -> np.ndarray:
+        """
+        Filters out the robot arm from the binary mask.
         
         Args:
-            hsv_roi: HSV version of the ROI
-            black_mask: Current black line mask
-            roi_shape: Shape of the ROI (height, width, channels)
+            roi: The original RGB frame
+            binary_roi: The binary mask of the line
             
         Returns:
-            Filtered black mask with arm regions removed
+            Filtered binary mask with the robot arm removed
         """
-        roi_height, roi_width = roi_shape[:2]
+        # Convert to HSV color space
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         
-        # Create combined purple mask from all defined ranges
-        purple_mask = np.zeros((roi_height, roi_width), dtype=np.uint8)
+        # Define color ranges for the robot arm
+        lower_arm = np.array([0, 0, 0])
+        upper_arm = np.array([180, 255, 75])
         
-        for lower_purple, upper_purple in self.ARM_PURPLE_RANGES:
-            range_mask = cv2.inRange(hsv_roi, lower_purple, upper_purple)
-            purple_mask = cv2.bitwise_or(purple_mask, range_mask)
+        # Create a mask for the robot arm
+        arm_mask = cv2.inRange(hsv, lower_arm, upper_arm)
         
-        # Find purple contours (potential arm regions)
-        purple_contours, _ = cv2.findContours(purple_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Invert the arm mask
+        arm_mask_inv = cv2.bitwise_not(arm_mask)
         
-        # Filter purple contours to identify likely arm regions
-        arm_regions = []
-        for contour in purple_contours:
-            area = cv2.contourArea(contour)
-            
-            # Skip if too small or too large
-            if area < self.ARM_MIN_AREA:
-                continue
-            if area > (roi_width * roi_height * self.ARM_MAX_AREA_RATIO):
-                continue
-            
-            # Get contour properties
-            x, y, w, h = cv2.boundingRect(contour)
-            center_x = x + w // 2
-            center_y = y + h // 2
-            
-            # Check if in expected arm region (bottom portion, near center)
-            expected_bottom_y = roi_height * (1.0 - self.ARM_EXPECTED_REGION['bottom_ratio'])
-            center_tolerance = roi_width * self.ARM_EXPECTED_REGION['center_tolerance']
-            roi_center_x = roi_width // 2
-            
-            is_in_bottom_region = center_y >= expected_bottom_y
-            is_near_center = abs(center_x - roi_center_x) <= center_tolerance
-            
-            # Consider it an arm if it meets position criteria
-            if is_in_bottom_region and is_near_center:
-                arm_regions.append({
-                    'contour': contour,
-                    'bbox': (x, y, w, h),
-                    'area': area,
-                    'center': (center_x, center_y)
-                })
+        # Apply the inverted arm mask to the binary mask
+        filtered_binary_roi = cv2.bitwise_and(binary_roi, arm_mask_inv)
         
-        # Remove arm regions from the black mask
-        filtered_mask = black_mask.copy()
-        
-        # Additional aggressive filtering: remove any purple pixels from the bottom region
-        bottom_region_start = int(roi_height * 0.7)  # Bottom 30% of ROI
-        bottom_purple_mask = purple_mask[bottom_region_start:, :]
-        
-        if np.sum(bottom_purple_mask) > 0:  # If there are purple pixels in bottom region
-            # Create a mask to remove all purple from bottom region
-            bottom_filter_mask = np.ones((roi_height, roi_width), dtype=np.uint8) * 255
-            bottom_filter_mask[bottom_region_start:, :] = cv2.bitwise_not(purple_mask[bottom_region_start:, :])
-            filtered_mask = cv2.bitwise_and(filtered_mask, bottom_filter_mask)
-            
-            if self.debug:
-                purple_pixel_count = np.sum(bottom_purple_mask > 0)
-                print(f"Filtered {purple_pixel_count} purple pixels from bottom region")
-        
-        # Additional filtering: Remove black pixels that are too close to purple regions (arm edges)
-        # Dilate the purple mask to create a "no-black-zone" around purple areas
-        purple_exclusion_kernel = np.ones((7, 7), np.uint8)
-        purple_exclusion_mask = cv2.dilate(purple_mask, purple_exclusion_kernel, iterations=1)
-        
-        # Remove any black pixels that are within the purple exclusion zone
-        filtered_mask = cv2.bitwise_and(filtered_mask, cv2.bitwise_not(purple_exclusion_mask))
-        
-        if self.debug and np.sum(purple_exclusion_mask) > 0:
-            excluded_pixels = np.sum(purple_exclusion_mask > 0)
-            print(f"Excluded {excluded_pixels} pixels near purple regions (arm edges)")
-        
-        # Process individual arm regions
-        for arm_region in arm_regions:
-            # Create a mask for this arm region with some padding
-            arm_mask = np.zeros((roi_height, roi_width), dtype=np.uint8)
-            cv2.drawContours(arm_mask, [arm_region['contour']], -1, 255, -1)
-            
-            # Dilate the arm mask more aggressively to ensure complete removal
-            dilate_kernel = np.ones((7, 7), np.uint8)
-            arm_mask_dilated = cv2.dilate(arm_mask, dilate_kernel, iterations=2)
-            
-            # Remove this arm region from the black mask
-            filtered_mask = cv2.bitwise_and(filtered_mask, cv2.bitwise_not(arm_mask_dilated))
-            
-            if self.debug:
-                print(f"Filtered arm region: area={arm_region['area']}, center={arm_region['center']}")
-        
-        return filtered_mask
-    
-    def set_arm_filtering(self, enabled: bool):
-        """Enable or disable purple arm filtering."""
-        self.ARM_FILTERING_ENABLED = enabled
-        if self.debug:
-            status = "enabled" if enabled else "disabled"
-            print(f"Purple arm filtering {status}")
-    
-    def configure_arm_colors(self, purple_ranges: List[Tuple[np.ndarray, np.ndarray]]):
-        """
-        Configure the purple color ranges for arm detection.
-        
-        Args:
-            purple_ranges: List of (lower_hsv, upper_hsv) tuples defining purple color ranges
-        """
-        self.ARM_PURPLE_RANGES = purple_ranges
-        if self.debug:
-            print(f"Updated arm color ranges: {len(purple_ranges)} ranges configured")
-    
-    def get_arm_filtering_status(self) -> Dict:
-        """Get current arm filtering configuration and status."""
-        return {
-            'enabled': self.ARM_FILTERING_ENABLED,
-            'purple_ranges': len(self.ARM_PURPLE_RANGES),
-            'min_area': self.ARM_MIN_AREA,
-            'max_area_ratio': self.ARM_MAX_AREA_RATIO,
-            'expected_region': self.ARM_EXPECTED_REGION
-        }
-    
-    def get_adaptive_threshold_status(self) -> Dict:
-        """Get current adaptive thresholding configuration and status."""
-        return {
-            'adaptive_enabled': self.ADAPTIVE_THRESH_ENABLED,
-            'simple_enabled': self.SIMPLE_THRESH_ENABLED,
-            'hsv_enabled': self.HSV_THRESH_ENABLED,
-            'auto_adaptation': self.AUTO_ADAPTIVE_ENABLED,
-            'current_params': self.current_adaptive_params.copy(),
-            'brightness_thresholds': {
-                'bright': self.BRIGHTNESS_THRESHOLD_BRIGHT,
-                'dim': self.BRIGHTNESS_THRESHOLD_DIM
-            },
-            'simple_threshold': self.SIMPLE_THRESHOLD_VALUE
-        }
-    
-    def set_adaptive_threshold_params(self, 
-                                    block_size: int = None, 
-                                    c_constant: int = None, 
-                                    method: int = None,
-                                    condition: str = 'normal') -> bool:
-        """
-        Set adaptive threshold parameters for specific lighting conditions.
-        
-        Args:
-            block_size: Size of neighborhood area (must be odd, >= 3)
-            c_constant: Constant subtracted from mean/gaussian
-            method: cv2.ADAPTIVE_THRESH_GAUSSIAN_C or cv2.ADAPTIVE_THRESH_MEAN_C
-            condition: 'normal', 'bright', 'dim' - which condition to update
-            
-        Returns:
-            True if parameters were valid and set, False otherwise
-        """
-        # Validate parameters
-        if block_size is not None and (block_size < 3 or block_size % 2 == 0):
-            if self.debug:
-                print(f"Invalid block_size {block_size}, must be odd and >= 3")
-            return False
-        
-        if method is not None and method not in [cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.ADAPTIVE_THRESH_MEAN_C]:
-            if self.debug:
-                print(f"Invalid method {method}")
-            return False
-        
-        # Choose which parameter set to update
-        if condition == 'bright':
-            params = self.ADAPTIVE_PARAMS_BRIGHT
-        elif condition == 'dim':
-            params = self.ADAPTIVE_PARAMS_DIM
-        else:
-            params = self.ADAPTIVE_PARAMS_NORMAL
-        
-        # Update parameters
-        if block_size is not None:
-            params['block_size'] = block_size
-        if c_constant is not None:
-            params['c_constant'] = c_constant
-        if method is not None:
-            params['method'] = method
-        
-        if self.debug:
-            print(f"Updated {condition} adaptive threshold params: {params}")
-        
-        return True
-    
-    def set_brightness_thresholds(self, bright_threshold: int = None, dim_threshold: int = None) -> bool:
-        """
-        Set the brightness thresholds for automatic adaptation.
-        
-        Args:
-            bright_threshold: Average brightness above this = bright conditions
-            dim_threshold: Average brightness below this = dim conditions
-            
-        Returns:
-            True if thresholds were valid and set, False otherwise
-        """
-        if bright_threshold is not None and dim_threshold is not None:
-            if bright_threshold <= dim_threshold:
-                if self.debug:
-                    print(f"Invalid thresholds: bright ({bright_threshold}) must be > dim ({dim_threshold})")
-                return False
-        
-        if bright_threshold is not None:
-            self.BRIGHTNESS_THRESHOLD_BRIGHT = bright_threshold
-        if dim_threshold is not None:
-            self.BRIGHTNESS_THRESHOLD_DIM = dim_threshold
-        
-        if self.debug:
-            print(f"Updated brightness thresholds: bright={self.BRIGHTNESS_THRESHOLD_BRIGHT}, dim={self.BRIGHTNESS_THRESHOLD_DIM}")
-        
-        return True
-    
-    def enable_threshold_methods(self, adaptive: bool = None, simple: bool = None, hsv: bool = None, auto_adapt: bool = None):
-        """
-        Enable or disable different thresholding methods.
-        
-        Args:
-            adaptive: Enable/disable adaptive thresholding
-            simple: Enable/disable simple thresholding
-            hsv: Enable/disable HSV color-based thresholding
-            auto_adapt: Enable/disable automatic adaptation to lighting
-        """
-        if adaptive is not None:
-            self.ADAPTIVE_THRESH_ENABLED = adaptive
-        if simple is not None:
-            self.SIMPLE_THRESH_ENABLED = simple
-        if hsv is not None:
-            self.HSV_THRESH_ENABLED = hsv
-        if auto_adapt is not None:
-            self.AUTO_ADAPTIVE_ENABLED = auto_adapt
-        
-        if self.debug:
-            print(f"Threshold methods - Adaptive: {self.ADAPTIVE_THRESH_ENABLED}, Simple: {self.SIMPLE_THRESH_ENABLED}, HSV: {self.HSV_THRESH_ENABLED}, Auto-adapt: {self.AUTO_ADAPTIVE_ENABLED}")
-    
-    def set_simple_threshold(self, threshold_value: int):
-        """Set the simple threshold value."""
-        if 0 <= threshold_value <= 255:
-            self.SIMPLE_THRESHOLD_VALUE = threshold_value
-            if self.debug:
-                print(f"Updated simple threshold value to {threshold_value}")
-        else:
-            if self.debug:
-                print(f"Invalid threshold value {threshold_value}, must be 0-255")
-    
+        return filtered_binary_roi
+
     def _find_line_in_roi(self, binary_roi: np.ndarray) -> Optional[Dict]:
         """
-        Finds the line contours in the binary ROI.
-        It can detect one or two lines and determines the center for navigation.
+        Analyzes the binary mask of the ROI to find the line and detect intersections.
+        This uses a simplified, robust logic for intersection detection.
         """
         contours, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
-            if self.debug:
-                print("DEBUG: No contours found in binary ROI")
             return None
 
-        # --- Filter and select valid line contours ---
-        valid_contours = [c for c in contours if cv2.contourArea(c) >= self.min_line_area]
+        # Filter out very small contours (noise)
+        min_contour_area = 50
+        valid_contours = [c for c in contours if cv2.contourArea(c) > min_contour_area]
 
         if not valid_contours:
-            if self.debug:
-                print(f"DEBUG: No contours found above min_line_area of {self.min_line_area}")
             return None
+
+        # Sort by area, largest first
+        valid_contours = sorted(valid_contours, key=cv2.contourArea, reverse=True)
         
-        # Sort contours by area in descending order
-        valid_contours.sort(key=cv2.contourArea, reverse=True)
-        
-        # --- Determine line center based on number of contours ---
-        roi_height, roi_width = binary_roi.shape
-        
+        roi_h, roi_w = binary_roi.shape
+        is_intersection = False
+
+        # --- Case 1: Multiple contours detected ---
+        # This is a strong indicator of an intersection or a broken line.
         if len(valid_contours) >= 2:
-            # Two-line case: Assume the two largest contours are the track lines
+            is_intersection = True
             line1_contour = valid_contours[0]
             line2_contour = valid_contours[1]
             
-            M1 = cv2.moments(line1_contour)
-            M2 = cv2.moments(line2_contour)
-            
-            if M1["m00"] == 0 or M2["m00"] == 0:
-                return None # Avoid division by zero
-                
-            cx1 = int(M1["m10"] / M1["m00"])
-            cx2 = int(M2["m10"] / M2["m00"])
-            
-            cy1 = int(M1["m01"] / M1["m00"])
-            cy2 = int(M2["m01"] / M2["m00"])
-            
-            # The line center is the midpoint between the two lines' centers
-            cx = (cx1 + cx2) // 2
-            cy = (cy1 + cy2) // 2
-            
-            # Combine contours for properties
+            # Combine the two largest contours for analysis
             combined_contour = np.vstack([line1_contour, line2_contour])
-            total_area = cv2.contourArea(line1_contour) + cv2.contourArea(line2_contour)
+            M = cv2.moments(combined_contour)
             x, y, w, h = cv2.boundingRect(combined_contour)
-            
-            # Use combined properties for intersection detection
-            solidity = float(total_area) / cv2.contourArea(cv2.convexHull(combined_contour)) if cv2.contourArea(cv2.convexHull(combined_contour)) > 0 else 1.0
-            
-            # For two lines, aspect ratio should be of the combined bounding box
-            aspect_ratio = w / float(h) if h > 0 else 0
-            
-            is_complex_shape = solidity < self.intersection_solidity_threshold
-            is_wide_shape = aspect_ratio > self.intersection_aspect_ratio_threshold
-            is_intersection = is_complex_shape or is_wide_shape
+            area = cv2.contourArea(combined_contour)
 
-            if self.debug:
-                print(f"DEBUG: Two lines detected. Center at ({cx}, {cy}).")
-
-            return {
-                'center': (cx, cy),
-                'contour': combined_contour, # For debug drawing
-                'contours': [line1_contour, line2_contour], # Store individual contours
-                'bbox': (x, y, w, h),
-                'area': total_area,
-                'confidence': 1.0, # High confidence with two lines
-                'is_at_intersection': is_complex_shape or is_wide_shape,
-                'solidity': solidity,
-                'aspect_ratio': aspect_ratio
-            }
-            
-        elif len(valid_contours) == 1:
-            # Single-line case: Use the single largest contour
+        # --- Case 2: One large contour detected ---
+        else:
             largest_contour = valid_contours[0]
             M = cv2.moments(largest_contour)
-
-            if M["m00"] == 0:
-                return None
-            
-            # Initially, calculate the standard centroid and bounding box for the whole shape
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
             x, y, w, h = cv2.boundingRect(largest_contour)
-            
-            # --- Intersection Detection ---
             area = cv2.contourArea(largest_contour)
-            solidity = float(area) / cv2.contourArea(cv2.convexHull(largest_contour)) if cv2.contourArea(cv2.convexHull(largest_contour)) > 0 else 1.0
-            aspect_ratio = w / float(h) if h > 0 else 0
-            is_complex_shape = solidity < self.intersection_solidity_threshold
-            is_wide_shape = aspect_ratio > self.intersection_aspect_ratio_threshold
-            is_intersection = is_complex_shape or is_wide_shape
-
-            # --- Recalculate Center for Intersections ---
-            # If it's an intersection, the standard centroid is misleading.
-            # We recalculate the center based *only* on the part of the line closest to the robot.
-            if is_intersection:
-                roi_h, _ = binary_roi.shape
-                
-                # Define a sub-region at the bottom of the main ROI.
-                sub_roi_h = roi_h // 3 # Analyze bottom third of the ROI
-                sub_roi_y_start = roi_h - sub_roi_h
-                bottom_slice = binary_roi[sub_roi_y_start:, :]
-                
-                # Calculate the centroid of this bottom slice.
-                M_bottom = cv2.moments(bottom_slice)
-                
-                if M_bottom["m00"] > 0:
-                    # If we found the line in the bottom slice, its centroid is our new, more reliable navigation point.
-                    cx_bottom = int(M_bottom["m10"] / M_bottom["m00"])
-                    if self.debug:
-                        print(f"DEBUG: Intersection. Using bottom-slice center cx={cx_bottom} (was {cx})")
-                    cx = cx_bottom # Override the original centroid
-                else:
-                    # Fallback: if the bottom slice is empty (e.g., a horizontal line at the top of the ROI),
-                    # use the center of the contour's bounding box as a safer default than the full centroid.
-                    if self.debug:
-                        print(f"DEBUG: Intersection, but bottom slice empty. Falling back to bbox center.")
-                    cx = x + w // 2 # Override the original centroid
             
-            if self.debug and not is_intersection:
-                print(f"DEBUG: Single line detected. Center at ({cx}, {cy}).")
-
-            # --- Final Return ---
-            area_ratio = area / (roi_width * roi_height)
-            confidence = min(1.0, area_ratio * 10 + min(aspect_ratio / 3, 1.0) * 0.5)
-
-            return {
-                'center': (cx, cy),
-                'contour': largest_contour,
-                'contours': [largest_contour],
-                'bbox': (x, y, w, h),
-                'area': area,
-                'confidence': confidence,
-                'is_at_intersection': is_intersection,
-                'solidity': solidity,
-                'aspect_ratio': aspect_ratio
-            }
+            # Simple, robust intersection logic: if the shape is very wide or very tall,
+            # it's an intersection. This is more reliable than solidity/aspect ratio.
+            is_wide = w > roi_w * 0.6
+            is_tall = h > roi_h * 0.7
+            if is_wide or is_tall:
+                is_intersection = True
         
-        return None # No valid contours found
+        if M["m00"] == 0:
+            return None
+        
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+
+        # If it's an intersection, use the bottom-slice logic to find a stable navigation point
+        if is_intersection:
+            sub_roi_h = roi_h // 3
+            sub_roi_y_start = roi_h - sub_roi_h
+            bottom_slice = binary_roi[sub_roi_y_start:, :]
+            M_bottom = cv2.moments(bottom_slice)
+            if M_bottom["m00"] > 0:
+                cx = int(M_bottom["m10"] / M_bottom["m00"])
+
+        return {
+            'center': (cx, cy),
+            'contour': valid_contours[0], # Return the largest for drawing
+            'contours': valid_contours,
+            'bbox': (x, y, w, h),
+            'area': area,
+            'confidence': 1.0, # Simplified confidence
+            'is_at_intersection': is_intersection
+        }
     
     def _calculate_line_following_params(self, line_info: Optional[Dict], 
                                        frame_width: int, roi_start_y: int) -> Dict:

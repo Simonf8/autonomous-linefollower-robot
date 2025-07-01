@@ -33,9 +33,6 @@ class EncoderPositionTracker:
         
         # Camera-assisted tracking
         self.camera_line_result: Optional[Dict] = None
-        self.last_intersection_detection = False
-        self.just_crossed_by_camera = False # Flag to signal a camera-based cell crossing
-        self.expected_intersections = self._calculate_expected_intersections()
         self.intersection_count = 0
         
         # Position correction parameters
@@ -49,46 +46,11 @@ class EncoderPositionTracker:
         else:
             self.last_encoder_counts = {'fl': 0, 'fr': 0, 'bl': 0, 'br': 0}
 
-    def _calculate_expected_intersections(self) -> int:
-        """Calculate expected number of intersections on the path."""
-        # This is a simplified calculation - in a real implementation,
-        # you'd calculate this based on the planned path
-        return 0
-
-    def _handle_intersection_detection(self):
-        """
-        Handles the logic when the camera detects an intersection.
-        This advances the cell position and resets the distance tracker.
-        """
-        if not self.is_moving:
-            return
-
-        # Use the camera-detected intersection as a high-confidence signal
-        # that we have reached the next cell in our path.
-        self._advance_cell()
-        self.just_crossed_by_camera = True # Set the flag for the main controller
-        self.intersection_count += 1
-
-        if self.debug:
-            print(f"CAMERA CORRECTION: Intersection detected. Advanced to {self.current_pos}.")
-        
-        # Reset the distance traveled since the last cell.
-        self.distance_since_last_cell = 0.0
-        self.position_confidence = min(1.0, self.position_confidence + 0.2) # Boost confidence
-
     def set_camera_line_result(self, camera_result: Dict):
         """Update the tracker with the latest camera line detection result."""
         self.camera_line_result = camera_result
-        
-        # Check for intersection detection. This logic is now simpler.
-        # It relies on a rising edge (transition from not seeing to seeing an intersection).
-        is_at_intersection = camera_result and camera_result.get('is_at_intersection', False)
-
-        if is_at_intersection and not self.last_intersection_detection:
-            # Rising edge detected: We just arrived at an intersection.
-            self._handle_intersection_detection()
-        
-        self.last_intersection_detection = is_at_intersection
+        # Camera intersection detection is now handled directly in main.py
+        # This method just stores the result for reference
 
     def start(self):
         """Starts the position tracking."""
@@ -134,9 +96,21 @@ class EncoderPositionTracker:
         self.distance_since_last_cell += distance_moved
 
         # Check if we have crossed into a new cell based on encoder distance
-        if self.distance_since_last_cell >= self.cell_size_m:
+        # Add a buffer to prevent premature cell advancement
+        CELL_ADVANCE_THRESHOLD = self.cell_size_m * 1.5  # Require 50% more distance
+        MIN_MOVEMENT_SPEED = 0.001  # Minimum movement to consider valid (m/s)
+        
+        # Calculate movement speed to filter out noise
+        time_delta = time.time() - self.last_update_time
+        movement_speed = distance_moved / time_delta if time_delta > 0 else 0
+        self.last_update_time = time.time()
+        
+        # Only advance if we've moved enough distance AND at reasonable speed
+        if (self.distance_since_last_cell >= CELL_ADVANCE_THRESHOLD and 
+            movement_speed >= MIN_MOVEMENT_SPEED and
+            self.is_moving):
             if self.debug:
-                print(f"ENCODER: Cell crossing triggered! Dist: {self.distance_since_last_cell:.3f}m")
+                print(f"ENCODER: Cell crossing triggered! Dist: {self.distance_since_last_cell:.3f}m, Speed: {movement_speed:.3f}m/s")
             self._advance_cell()
             # Reset distance, but don't set the camera flag here
             self.distance_since_last_cell -= self.cell_size_m

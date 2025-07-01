@@ -49,8 +49,8 @@ CORNER_SPEED = 20   # Reduced from 25 to 20 for even slower cornering
 # Hardware-specific trims to account for motor differences.
 # Values are multipliers (1.0 = no change, 0.9 = 10% slower).
 MOTOR_TRIMS =  {
-    'left': 1.0,   # Left side motors (fl + bl average)
-    'right': 1.0,  # Right side motors (fr + br average) - slightly slower
+    'left': 1.0,   
+    'right': 1.0, 
 }
 
 # Maze and Mission Configuration
@@ -277,23 +277,79 @@ class RobotController(CameraLineFollowingMixin):
             self._stop_motors()
             return
 
-        # --- CAMERA-BASED INTERSECTION OVERRIDE (NEW LOGIC) ---
-        # This is now the primary trigger for handling corners and intersections.
-        # If the camera sees an intersection, we stop and decide what to do,
-        # overriding any other logic.
+        # --- CAMERA-BASED INTERSECTION DETECTION (PASS-THROUGH LOGIC) ---
+        # The camera looks ahead, so when it sees an intersection, we continue forward
+        # until we PASS the intersection (stop seeing it), then handle the turn.
         TURN_COOLDOWN_S = 2.0
         can_act_on_intersection = (time.time() - self.last_turn_complete_time) > TURN_COOLDOWN_S
-        camera_saw_intersection = self.position_tracker.just_crossed_by_camera
         
-        if camera_saw_intersection and can_act_on_intersection:
-            # Consume the flag immediately to prevent re-triggering.
-            self.position_tracker.just_crossed_by_camera = False
-
+        # Track intersection visibility state
+        if not hasattr(self, 'intersection_state'):
+            self.intersection_state = {
+                'currently_seeing': False,
+                'was_seeing': False,
+                'just_passed': False,
+                'first_seen_time': 0,
+                'last_seen_time': 0,
+                'stable_not_seeing_count': 0
+            }
+        
+        # Update intersection visibility from camera
+        current_intersection = self.camera_line_result.get('is_at_intersection', False)
+        current_time = time.time()
+        
+        # Debug: Show when intersections are detected
+        if FEATURES['DEBUG_VISUALIZATION_ENABLED'] and current_intersection and self.position_tracker.intersection_count % 20 == 0:
+            print(f"INTERSECTION DETECTED: Camera sees intersection")
+        
+        # Update state tracking
+        self.intersection_state['was_seeing'] = self.intersection_state['currently_seeing']
+        self.intersection_state['currently_seeing'] = current_intersection
+        
+        # Track timing for stable detection
+        if current_intersection:
+            if not self.intersection_state['was_seeing']:
+                # Just started seeing intersection
+                self.intersection_state['first_seen_time'] = current_time
+            self.intersection_state['last_seen_time'] = current_time
+            self.intersection_state['stable_not_seeing_count'] = 0
+        else:
+            # Not seeing intersection
+            self.intersection_state['stable_not_seeing_count'] += 1
+        
+        # Detect when we JUST PASSED an intersection with stable requirements
+        MIN_INTERSECTION_DURATION = 0.2  # Must see intersection for at least 0.2 seconds (reduced)
+        MIN_STABLE_NOT_SEEING = 3  # Must not see intersection for 3 consecutive frames (reduced)
+        
+        intersection_duration = self.intersection_state['last_seen_time'] - self.intersection_state['first_seen_time']
+        had_stable_intersection = intersection_duration >= MIN_INTERSECTION_DURATION
+        now_stable_not_seeing = self.intersection_state['stable_not_seeing_count'] >= MIN_STABLE_NOT_SEEING
+        
+        self.intersection_state['just_passed'] = (
+            self.intersection_state['was_seeing'] and 
+            not self.intersection_state['currently_seeing'] and
+            had_stable_intersection and
+            now_stable_not_seeing
+        )
+        
+        # Debug intersection state changes
+        if FEATURES['DEBUG_VISUALIZATION_ENABLED']:
+            if self.intersection_state['currently_seeing'] != self.intersection_state['was_seeing']:
+                if self.intersection_state['currently_seeing']:
+                    print("INTERSECTION: Now seeing intersection")
+                else:
+                    print(f"INTERSECTION: No longer seeing intersection (duration: {intersection_duration:.1f}s, stable_count: {self.intersection_state['stable_not_seeing_count']})")
+            if self.intersection_state['just_passed']:
+                print(f"INTERSECTION: PASSED STABLE INTERSECTION (duration: {intersection_duration:.1f}s) - checking path requirements...")
+        
+        if self.intersection_state['just_passed'] and can_act_on_intersection:
+            print("Just passed an intersection - determining action...")
+            
             # Determine what to do at this intersection based on the planned path.
             turn_for_next_segment = 'forward' # Default action is to go straight.
             waypoint_just_reached = None
             if self.current_target_index < len(self.path):
-                # The waypoint we just arrived at IS the current target.
+                # The waypoint we just passed IS the current target.
                 waypoint_just_reached = self.path[self.current_target_index]
                 
                 # The turn is determined by where we go from here to the *next* waypoint.
@@ -305,12 +361,13 @@ class RobotController(CameraLineFollowingMixin):
             # --- Smart Intersection Handling ---
             if turn_for_next_segment != 'forward':
                 # This is a real corner. Stop, wait, and turn.
-                turn_message = f"Intersection detected. Path requires: {turn_for_next_segment}."
+                turn_message = f"Passed intersection. Path requires: {turn_for_next_segment}."
                 print(turn_message)
                 self.audio_feedback.speak(turn_message)
                 
-                # Snap position to the waypoint we just confirmed we're at.
-                self.position_tracker.force_set_position(waypoint_just_reached[0], waypoint_just_reached[1])
+                # Snap position to the waypoint we just passed.
+                if waypoint_just_reached:
+                    self.position_tracker.force_set_position(waypoint_just_reached[0], waypoint_just_reached[1])
                 self.corner_cell_to_highlight = waypoint_just_reached
                 self.turn_to_execute = turn_for_next_segment
                 self.state = 'waiting_at_corner'
@@ -320,7 +377,7 @@ class RobotController(CameraLineFollowingMixin):
             else:
                 # This is a straight-through intersection. No need to stop.
                 # Silently update our position and continue line following.
-                print("Intersection detected, proceeding straight through.")
+                print("Passed intersection, proceeding straight through.")
                 if waypoint_just_reached:
                     self.position_tracker.force_set_position(waypoint_just_reached[0], waypoint_just_reached[1])
                 self.current_target_index += 1 # We've passed this waypoint.
@@ -913,12 +970,9 @@ def main():
                 'line_offset': robot.camera_line_result.get('line_offset', 0),
                 'is_at_intersection': robot.camera_line_result.get('is_at_intersection', False),
                 'intersection_count': robot.position_tracker.intersection_count,
-                'arm_filtering': robot.camera_line_follower.get_arm_filtering_status() if hasattr(robot, 'camera_line_follower') else {'enabled': False},
-                'adaptive_threshold': robot.camera_line_follower.get_adaptive_threshold_status() if hasattr(robot, 'camera_line_follower') else {'adaptive_enabled': False},
             },
             'obstacle_avoidance': {
                 'enabled': FEATURES['OBSTACLE_AVOIDANCE_ENABLED'],
-                'status': 'active' if robot.obstacle_avoidance else 'disabled',
             },
             'motors': robot.motor_speeds,
             'encoders': encoder_counts,
@@ -1091,72 +1145,6 @@ def main():
             'message': f'TTS test queued with provider: {provider or robot.audio_feedback.preferred_provider}'
         })
 
-    @app.route('/arm_filter_status')
-    def arm_filter_status():
-        """Get current arm filtering status."""
-        if hasattr(robot, 'camera_line_follower'):
-            status = robot.camera_line_follower.get_arm_filtering_status()
-            return jsonify({
-                'status': 'success',
-                'arm_filtering': status
-            })
-        else:
-            return jsonify({
-                'status': 'error',
-                'message': 'Camera line follower not available'
-            }), 400
-
-    @app.route('/set_arm_filter', methods=['POST'])
-    def set_arm_filter():
-        """Enable or disable purple arm filtering."""
-        data = request.get_json()
-        enabled = data.get('enabled', True)
-        
-        if hasattr(robot, 'camera_line_follower'):
-            robot.camera_line_follower.set_arm_filtering(enabled)
-            return jsonify({
-                'status': 'success',
-                'message': f'Arm filtering {"enabled" if enabled else "disabled"}',
-                'arm_filtering': robot.camera_line_follower.get_arm_filtering_status()
-            })
-        else:
-            return jsonify({
-                'status': 'error',
-                'message': 'Camera line follower not available'
-            }), 400
-
-    @app.route('/configure_arm_colors', methods=['POST'])
-    def configure_arm_colors():
-        """Configure purple color ranges for arm detection."""
-        data = request.get_json()
-        color_ranges = data.get('color_ranges', [])
-        
-        if not hasattr(robot, 'camera_line_follower'):
-            return jsonify({
-                'status': 'error',
-                'message': 'Camera line follower not available'
-            }), 400
-        
-        try:
-            # Convert color ranges from list format to numpy arrays
-            parsed_ranges = []
-            for range_data in color_ranges:
-                lower = np.array(range_data['lower'])
-                upper = np.array(range_data['upper'])
-                parsed_ranges.append((lower, upper))
-            
-            robot.camera_line_follower.configure_arm_colors(parsed_ranges)
-            return jsonify({
-                'status': 'success',
-                'message': f'Configured {len(parsed_ranges)} color ranges',
-                'arm_filtering': robot.camera_line_follower.get_arm_filtering_status()
-            })
-        except Exception as e:
-            return jsonify({
-                'status': 'error',
-                'message': f'Failed to configure colors: {str(e)}'
-            }), 400
-
     @app.route('/test_obstacle_detection')
     def test_obstacle_detection():
         """Test obstacle detection with current camera frame."""
@@ -1196,144 +1184,6 @@ def main():
                 'frame_size': f"{frame.shape[1]}x{frame.shape[0]}"
             }
         })
-
-    @app.route('/adaptive_threshold_status')
-    def adaptive_threshold_status():
-        """Get current adaptive thresholding status."""
-        if not hasattr(robot, 'camera_line_follower'):
-            return jsonify({
-                'status': 'error',
-                'message': 'Camera line follower not available'
-            }), 400
-        
-        status = robot.camera_line_follower.get_adaptive_threshold_status()
-        return jsonify({
-            'status': 'success',
-            'adaptive_threshold': status
-        })
-
-    @app.route('/set_adaptive_threshold', methods=['POST'])
-    def set_adaptive_threshold():
-        """Configure adaptive threshold parameters."""
-        if not hasattr(robot, 'camera_line_follower'):
-            return jsonify({
-                'status': 'error',
-                'message': 'Camera line follower not available'
-            }), 400
-        
-        data = request.get_json()
-        
-        # Extract parameters
-        block_size = data.get('block_size')
-        c_constant = data.get('c_constant')
-        method_str = data.get('method', 'gaussian')
-        condition = data.get('condition', 'normal')
-        
-        # Convert method string to OpenCV constant
-        method = None
-        if method_str == 'gaussian':
-            method = cv2.ADAPTIVE_THRESH_GAUSSIAN_C
-        elif method_str == 'mean':
-            method = cv2.ADAPTIVE_THRESH_MEAN_C
-        
-        # Set parameters
-        success = robot.camera_line_follower.set_adaptive_threshold_params(
-            block_size=block_size,
-            c_constant=c_constant,
-            method=method,
-            condition=condition
-        )
-        
-        if success:
-            return jsonify({
-                'status': 'success',
-                'message': f'Updated {condition} adaptive threshold parameters',
-                'adaptive_threshold': robot.camera_line_follower.get_adaptive_threshold_status()
-            })
-        else:
-            return jsonify({
-                'status': 'error',
-                'message': 'Invalid parameters provided'
-            }), 400
-
-    @app.route('/set_brightness_thresholds', methods=['POST'])
-    def set_brightness_thresholds():
-        """Set brightness thresholds for automatic adaptation."""
-        if not hasattr(robot, 'camera_line_follower'):
-            return jsonify({
-                'status': 'error',
-                'message': 'Camera line follower not available'
-            }), 400
-        
-        data = request.get_json()
-        bright_threshold = data.get('bright_threshold')
-        dim_threshold = data.get('dim_threshold')
-        
-        success = robot.camera_line_follower.set_brightness_thresholds(
-            bright_threshold=bright_threshold,
-            dim_threshold=dim_threshold
-        )
-        
-        if success:
-            return jsonify({
-                'status': 'success',
-                'message': 'Updated brightness thresholds',
-                'adaptive_threshold': robot.camera_line_follower.get_adaptive_threshold_status()
-            })
-        else:
-            return jsonify({
-                'status': 'error',
-                'message': 'Invalid threshold values'
-            }), 400
-
-    @app.route('/toggle_threshold_methods', methods=['POST'])
-    def toggle_threshold_methods():
-        """Enable/disable different thresholding methods."""
-        if not hasattr(robot, 'camera_line_follower'):
-            return jsonify({
-                'status': 'error',
-                'message': 'Camera line follower not available'
-            }), 400
-        
-        data = request.get_json()
-        
-        robot.camera_line_follower.enable_threshold_methods(
-            adaptive=data.get('adaptive'),
-            simple=data.get('simple'),
-            hsv=data.get('hsv'),
-            auto_adapt=data.get('auto_adapt')
-        )
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'Updated thresholding methods',
-            'adaptive_threshold': robot.camera_line_follower.get_adaptive_threshold_status()
-        })
-
-    @app.route('/set_simple_threshold', methods=['POST'])
-    def set_simple_threshold():
-        """Set simple threshold value."""
-        if not hasattr(robot, 'camera_line_follower'):
-            return jsonify({
-                'status': 'error',
-                'message': 'Camera line follower not available'
-            }), 400
-        
-        data = request.get_json()
-        threshold_value = data.get('threshold_value')
-        
-        if threshold_value is not None:
-            robot.camera_line_follower.set_simple_threshold(threshold_value)
-            return jsonify({
-                'status': 'success',
-                'message': f'Updated simple threshold to {threshold_value}',
-                'adaptive_threshold': robot.camera_line_follower.get_adaptive_threshold_status()
-            })
-        else:
-            return jsonify({
-                'status': 'error',
-                'message': 'No threshold value provided'
-            }), 400
 
     @app.route('/grid_feed')
     def grid_feed():
