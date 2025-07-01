@@ -41,9 +41,9 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-CELL_SIZE_M = 0.067
-BASE_SPEED = 30
-TURN_SPEED = 20     # Reduced from 25 to 20 for even slower turning
+CELL_SIZE_M = 0.069
+BASE_SPEED = 24
+TURN_SPEED = 24     # Reduced from 25 to 20 for even slower turning
 CORNER_SPEED = 20   # Reduced from 25 to 20 for even slower cornering
 
 # Hardware-specific trims to account for motor differences.
@@ -154,6 +154,9 @@ class RobotController(CameraLineFollowingMixin):
         self.turn_start_time = 0
         self.wait_start_time = 0
         self.last_turn_complete_time = 0 # Cooldown timer for turns
+        self.corner_cell_to_highlight = None # The cell where a turn is planned
+        self.total_corners_in_path = 0 # How many turns are in the planned path
+        self.corners_passed = 0 # How many corners we have passed so far
         self.is_straight_corridor = False
         self.last_cell_update_time = 0
 
@@ -238,12 +241,17 @@ class RobotController(CameraLineFollowingMixin):
         if path_nodes:
             self.path = path_nodes
             self.current_target_index = 0
+            
+            # Calculate and store the number of corners in the planned path
+            self.total_corners_in_path = self._calculate_corners_in_path(self.path)
+            self.corners_passed = 0
+
             self.state = "path_following"
             
             # Check if the path is a straight line to determine the following strategy.
             self.is_straight_corridor = self._is_path_straight(self.path)
             
-            path_message = f"Path planned with {len(self.path)} waypoints."
+            path_message = f"Path planned with {len(self.path)} waypoints and {self.total_corners_in_path} corners."
             print(path_message)
             self.audio_feedback.speak(path_message)
             
@@ -269,10 +277,54 @@ class RobotController(CameraLineFollowingMixin):
             self._stop_motors()
             return
 
-        # --- Waypoint Arrival Logic (Encoder-based) ---
-        # Check if the robot has arrived at the next waypoint in its path.
+        # --- CAMERA-BASED INTERSECTION OVERRIDE (NEW LOGIC) ---
+        # This is now the primary trigger for handling corners and intersections.
+        # If the camera sees an intersection, we stop and decide what to do,
+        # overriding any other logic.
+        TURN_COOLDOWN_S = 2.0
+        can_act_on_intersection = (time.time() - self.last_turn_complete_time) > TURN_COOLDOWN_S
+        camera_saw_intersection = self.position_tracker.just_crossed_by_camera
+        
+        if camera_saw_intersection and can_act_on_intersection:
+            # Consume the flag immediately to prevent re-triggering.
+            self.position_tracker.just_crossed_by_camera = False
+
+            # Determine the required turn for the *next* path segment.
+            # We are at the decision point, so we look ahead.
+            turn_for_next_segment = 'forward' # Default
+            if self.current_target_index < len(self.path):
+                # The waypoint we just arrived at IS the current target.
+                waypoint_just_reached = self.path[self.current_target_index]
+                
+                # The turn is determined by where we go from here to the *next* waypoint.
+                if self.current_target_index + 1 < len(self.path):
+                    next_waypoint_after_this = self.path[self.current_target_index + 1]
+                    current_direction = self.position_tracker.current_direction
+                    turn_for_next_segment = self._get_required_turn(waypoint_just_reached, current_direction, next_waypoint_after_this)
+
+            turn_message = f"Intersection detected by camera. Path requires: {turn_for_next_segment}."
+            print(turn_message)
+            self.audio_feedback.speak(turn_message)
+            
+            # --- SNAP-TO-GRID ---
+            # This is the fix. We trust the camera and force the robot's position
+            # to match the waypoint we just arrived at.
+            self.position_tracker.force_set_position(waypoint_just_reached[0], waypoint_just_reached[1])
+
+            self.corner_cell_to_highlight = waypoint_just_reached # Highlight the cell we just confirmed we're at
+            self.turn_to_execute = turn_for_next_segment
+            self.state = 'waiting_at_corner'
+            self.wait_start_time = time.time()
+            
+            # We have now handled this waypoint. Increment the index for after the wait/turn.
+            self.current_target_index += 1
+            return # Exit to let the new state take over
+
+
+        # --- ENCODER-BASED WAYPOINT ARRIVAL (FALLBACK) ---
+        # This block now only serves as a fallback if the camera misses an intersection.
         if current_cell == self.path[self.current_target_index]:
-            print(f"Reached waypoint {self.current_target_index}: {current_cell}")
+            print(f"Reached waypoint {self.current_target_index} by ENCODER: {current_cell}")
             self.last_cell_update_time = time.time()
             self.current_target_index += 1
             if self.current_target_index >= len(self.path):
@@ -282,29 +334,9 @@ class RobotController(CameraLineFollowingMixin):
                 self._stop_motors()
                 return
 
-        # --- Turn Determination Logic ---
-        # Based on the *next* waypoint, determine if a turn is needed *now*.
-        current_dir = self.position_tracker.current_direction
-        next_waypoint = self.path[self.current_target_index]
-        required_turn = self._get_required_turn(current_cell, current_dir, next_waypoint)
-        
-        print(f"Path Follow: Cell={current_cell}, Target={next_waypoint}, Required Turn={required_turn}")
-
-        # If a turn is required, change state to 'turning'.
-        # This is triggered by the cell change from the encoder tracker.
-        TURN_COOLDOWN_S = 2.0
-        can_turn = (time.time() - self.last_turn_complete_time) > TURN_COOLDOWN_S
-
-        if required_turn in ['left', 'right'] and can_turn:
-            turn_message = f"Waypoint reached. Entering wait state before turning {required_turn}."
-            print(turn_message)
-            self.audio_feedback.speak(turn_message)
-            
-            self.turn_to_execute = required_turn
-            self.state = 'waiting_at_corner'
-            self.wait_start_time = time.time()
-            return # Exit to let the new state take over
-        
+        # --- (REMOVED) Turn Determination Logic ---
+        # This is now handled by the camera-based intersection override block.
+        # The old logic is no longer needed here.
        
         frame = self.camera_line_follower.get_camera_frame()
         if frame is None:
@@ -447,6 +479,7 @@ class RobotController(CameraLineFollowingMixin):
             self._stop_motors()
             self.position_tracker.update_direction_after_turn(self.turn_to_execute)
             self.turn_to_execute = None
+            self.corner_cell_to_highlight = None # Clear the highlight after turn completes
             self.state = 'path_following'
             self.last_turn_complete_time = time.time()
             time.sleep(0.5)  # Longer pause for precision
@@ -466,6 +499,19 @@ class RobotController(CameraLineFollowingMixin):
 
         time_in_turn = time.time() - self.turn_start_time
 
+        # If the plan is to go forward, no turn is needed. Just exit the turning state.
+        if self.turn_to_execute == 'forward':
+            print("Turn type is 'forward'. Skipping physical turn.")
+            self.audio_feedback.speak("Proceeding straight.")
+            self._stop_motors()
+            # No change in direction needed
+            self.turn_to_execute = None
+            self.state = 'path_following'
+            self.last_turn_complete_time = time.time()
+            self.corner_cell_to_highlight = None # Clear highlight
+            time.sleep(0.25)
+            return
+
         # The turn is complete once the fixed duration has elapsed or it times out.
         if time_in_turn >= ARCING_TURN_DURATION_S or time_in_turn > TURN_TIMEOUT_S:
             if time_in_turn > TURN_TIMEOUT_S:
@@ -473,9 +519,13 @@ class RobotController(CameraLineFollowingMixin):
             else:
                 self.audio_feedback.speak("Turn complete.")
 
+            if self.turn_to_execute in ['left', 'right']:
+                self.corners_passed += 1
+
             self._stop_motors()
             self.position_tracker.update_direction_after_turn(self.turn_to_execute)
             self.turn_to_execute = None
+            self.corner_cell_to_highlight = None # Clear the highlight after turn completes
             self.state = 'path_following'
             self.last_turn_complete_time = time.time()  # Start cooldown
             time.sleep(0.25)  # Short pause to stabilize and re-acquire line
@@ -780,6 +830,35 @@ class RobotController(CameraLineFollowingMixin):
         
         return is_straight_x or is_straight_y
 
+    def _calculate_corners_in_path(self, path: List[Tuple[int, int]]) -> int:
+        """Calculates the number of turns ('left' or 'right') in a given path."""
+        if len(path) < 2:
+            return 0
+
+        corners = 0
+        # To count corners accurately, we must track the robot's orientation through the path.
+        # We start with the robot's initial direction.
+        current_direction = self.position_tracker.start_direction
+        
+        for i in range(len(path) - 1):
+            current_pos = path[i]
+            next_pos = path[i+1]
+            
+            required_turn = self._get_required_turn(current_pos, current_direction, next_pos)
+            
+            if required_turn in ['left', 'right']:
+                corners += 1
+                
+                # Update the simulated direction for the next path segment calculation.
+                turn_map_right = {'N': 'E', 'E': 'S', 'S': 'W', 'W': 'N'}
+                turn_map_left = {'N': 'W', 'W': 'S', 'S': 'E', 'E': 'N'}
+                if required_turn == 'left':
+                    current_direction = turn_map_left[current_direction]
+                else: # right
+                    current_direction = turn_map_right[current_direction]
+        
+        return corners
+
 def main():
     """Main entry point for the robot controller."""
     
@@ -844,8 +923,13 @@ def main():
                 'available_providers': audio_status.get('available_providers', []),
                 'queue_size': audio_status.get('queue_size', 0),
             },
-            'path': robot.path,
-            'current_target_index': robot.current_target_index,
+            'path_info': {
+                'path': robot.path,
+                'current_target_index': robot.current_target_index,
+                'turn_to_execute': robot.turn_to_execute,
+                'total_corners': robot.total_corners_in_path,
+                'corners_passed': robot.corners_passed
+            }
         }
         return jsonify(data)
 
@@ -1253,13 +1337,15 @@ def main():
             while robot.running:
                 robot_cell = robot.position_tracker.get_current_cell()
                 path = robot.path
+                corner_cell = robot.corner_cell_to_highlight # Get the corner cell to highlight
                 
                 grid_img = generate_grid_image(
                     pathfinder=robot.pathfinder,
                     robot_cell=robot_cell,
                     path=path,
                     start_cell=START_CELL,
-                    end_cell=END_CELL
+                    end_cell=END_CELL,
+                    corner_cell=corner_cell
                 )
                 
                 _, buffer = cv2.imencode('.jpg', grid_img)
@@ -1271,7 +1357,7 @@ def main():
                 time.sleep(0.1)
         return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-    def generate_grid_image(pathfinder, robot_cell, path, start_cell, end_cell):
+    def generate_grid_image(pathfinder, robot_cell, path, start_cell, end_cell, corner_cell=None):
         """Generates the grid image for the web UI."""
         grid = np.array(pathfinder.get_grid())
         cell_size = 20
@@ -1284,6 +1370,15 @@ def main():
                 cv2.rectangle(grid_img, (c * cell_size, r * cell_size), 
                               ((c + 1) * cell_size, (r + 1) * cell_size), color, -1)
         
+        # Highlight the corner cell if one is detected
+        if corner_cell:
+            cx, cy = corner_cell
+            # Don't draw over start/end cells
+            if (cx, cy) != start_cell and (cx, cy) != end_cell:
+                # Use a different shade of green to distinguish from the start cell
+                cv2.rectangle(grid_img, (cx * cell_size, cy * cell_size),
+                              ((cx + 1) * cell_size, (cy + 1) * cell_size), (0, 180, 0), -1)
+
         if path:
             for i in range(len(path) - 1):
                 p1_x = path[i][0] * cell_size + cell_size // 2

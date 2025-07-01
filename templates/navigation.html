@@ -410,6 +410,21 @@
                     </div>
                 </div>
 
+                <!-- NEW: Path & Navigation Panel -->
+                <div class="sub-panel">
+                    <h2 class="subsection-title">Path & Navigation</h2>
+                    <div class="quad-data-grid">
+                        <div class="quad-item full-width">
+                            <span>Next Turn:</span>
+                            <span id="next-turn-display">N/A</span>
+                        </div>
+                        <div class="quad-item full-width">
+                            <span>Corners:</span>
+                            <span id="corners-display">0 / 0</span>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Audio Feedback Panel -->
                 <div class="panel audio-panel">
                     <div class="panel-header">
@@ -481,54 +496,80 @@
                     return response.json();
                 })
                 .then(data => {
-                    document.getElementById('robot-position').textContent = `(${data.x.toFixed(2)}, ${data.y.toFixed(2)})`;
-                    document.getElementById('robot-heading').textContent = data.heading.toFixed(1) + '°';
-                    document.getElementById('robot-state').textContent = data.state;
-                    
-                    // Update package status
-                    const packageStatus = data.has_package ? 'CARRYING' : (data.package_detected ? 'DETECTED' : 'NONE');
-                    document.getElementById('box-status').textContent = packageStatus;
-                    
-                    // Update box progress
-                    document.getElementById('boxes-collected').textContent = `${data.collected_boxes || 0}/${data.total_tasks || 4}`;
-                    document.getElementById('boxes-delivered').textContent = `${data.delivered_boxes || 0}/${data.total_tasks || 4}`;
+                    const ui = {
+                        position: document.getElementById('robot-position'),
+                        heading: document.getElementById('robot-heading'),
+                        state: document.getElementById('robot-state'),
+                        boxStatus: document.getElementById('box-status'),
+                        boxesCollected: document.getElementById('boxes-collected'),
+                        boxesDelivered: document.getElementById('boxes-delivered'),
+                        trackerStatus: document.getElementById('tracker-status'),
+                        trackerPosition: document.getElementById('tracker-position'),
+                        trackerDirection: document.getElementById('tracker-direction'),
+                        trackerMessage: document.getElementById('tracker-message'),
+                        lineOffset: document.getElementById('line-offset'),
+                        intersectionStatus: document.getElementById('intersection-status'),
+                        armFilterStatus: document.getElementById('arm-filter-status'),
+                        motorFl: document.getElementById('motor-fl'),
+                        motorFr: document.getElementById('motor-fr'),
+                        motorBl: document.getElementById('motor-bl'),
+                        motorBr: document.getElementById('motor-br'),
+                        encoderFl: document.getElementById('encoder-fl'),
+                        encoderFr: document.getElementById('encoder-fr'),
+                        encoderBl: document.getElementById('encoder-bl'),
+                        encoderBr: document.getElementById('encoder-br'),
+                        audioEnabled: document.getElementById('audio-enabled'),
+                        audioProvider: document.getElementById('audio-provider'),
+                        audioQueue: document.getElementById('audio-queue'),
+                        audioProviders: document.getElementById('audio-providers'),
+                        statusIndicator: document.getElementById('status-indicator'),
+                        statusText: document.getElementById('status-text'),
+                        nextTurnDisplay: document.getElementById('next-turn-display'),
+                        cornersDisplay: document.getElementById('corners-display'),
+                    };
+
+                    // Update main status
+                    ui.position.textContent = `(${data.x.toFixed(2)}, ${data.y.toFixed(2)})`;
+                    ui.heading.textContent = data.heading.toFixed(1) + '°';
+                    ui.state.textContent = data.state;
 
                     // Update Position Tracker data
                     const trackerData = data.position_tracker;
-                    document.getElementById('tracker-status').textContent = trackerData.status.toUpperCase();
-                    document.getElementById('tracker-position').textContent = `(${trackerData.position[0]}, ${trackerData.position[1]})`;
-                    document.getElementById('tracker-direction').textContent = trackerData.direction;
-                    document.getElementById('tracker-message').textContent = trackerData.message;
+                    ui.trackerStatus.textContent = trackerData.status.toUpperCase();
+                    ui.trackerPosition.textContent = `(${trackerData.position[0]}, ${trackerData.position[1]})`;
+                    ui.trackerDirection.textContent = trackerData.direction;
+                    ui.trackerMessage.textContent = trackerData.message;
 
                     // Update Line Follower data
                     const lineFollowerData = data.line_follower;
-                    document.getElementById('line-offset').textContent = lineFollowerData.line_offset.toFixed(2);
-                    document.getElementById('intersection-status').textContent = lineFollowerData.is_at_intersection ? 'TRUE' : 'FALSE';
+                    ui.lineOffset.textContent = lineFollowerData.line_offset.toFixed(2);
+                    ui.intersectionStatus.textContent = lineFollowerData.is_at_intersection ? 'TRUE' : 'FALSE';
+                    ui.intersectionStatus.style.color = lineFollowerData.is_at_intersection ? 'var(--cyber-pink)' : '#ffffff';
                     
                     // Update Arm Filter status
                     const armFilterData = lineFollowerData.arm_filtering || {};
-                    document.getElementById('arm-filter-status').textContent = armFilterData.enabled ? 'ON' : 'OFF';
+                    ui.armFilterStatus.textContent = armFilterData.enabled ? 'ON' : 'OFF';
 
                     // Update Motor Speeds
                     const motors = data.motors || {};
-                    document.getElementById('motor-fl').textContent = motors.fl || 0;
-                    document.getElementById('motor-fr').textContent = motors.fr || 0;
-                    document.getElementById('motor-bl').textContent = motors.bl || 0;
-                    document.getElementById('motor-br').textContent = motors.br || 0;
+                    ui.motorFl.textContent = motors.fl || 0;
+                    ui.motorFr.textContent = motors.fr || 0;
+                    ui.motorBl.textContent = motors.bl || 0;
+                    ui.motorBr.textContent = motors.br || 0;
 
                     // Update Encoder Ticks
                     const encoders = data.encoders || {};
-                    document.getElementById('encoder-fl').textContent = encoders.fl || 0;
-                    document.getElementById('encoder-fr').textContent = encoders.fr || 0;
-                    document.getElementById('encoder-bl').textContent = encoders.bl || 0;
-                    document.getElementById('encoder-br').textContent = encoders.br || 0;
+                    ui.encoderFl.textContent = encoders.fl || 0;
+                    ui.encoderFr.textContent = encoders.fr || 0;
+                    ui.encoderBl.textContent = encoders.bl || 0;
+                    ui.encoderBr.textContent = encoders.br || 0;
 
                     // Update Audio Feedback data
                     const audioData = data.audio_feedback || {};
-                    document.getElementById('audio-enabled').textContent = audioData.enabled ? 'ENABLED' : 'DISABLED';
-                    document.getElementById('audio-provider').textContent = audioData.current_provider || 'NONE';
-                    document.getElementById('audio-queue').textContent = audioData.queue_size || 0;
-                    document.getElementById('audio-providers').textContent = (audioData.available_providers || []).join(', ') || '--';
+                    ui.audioEnabled.textContent = audioData.enabled ? 'ENABLED' : 'DISABLED';
+                    ui.audioProvider.textContent = audioData.provider || 'NONE';
+                    ui.audioQueue.textContent = audioData.queue_size || 0;
+                    ui.audioProviders.textContent = (audioData.available_providers || []).join(', ') || '--';
                     
                     // Update TTS provider dropdown if not already populated
                     const providerSelect = document.getElementById('tts-provider-select');
@@ -541,26 +582,37 @@
                         });
                     }
 
-                    const statusIndicator = document.getElementById('status-indicator');
-                    const statusText = document.getElementById('status-text');
+                    // Update system status indicator
                     if (data.state === 'mission_complete') {
-                        statusIndicator.className = 'status-indicator goal';
-                        statusText.textContent = 'MISSION COMPLETE';
+                        ui.statusIndicator.className = 'status-indicator goal';
+                        ui.statusText.textContent = 'MISSION COMPLETE';
                     } else if (data.state === 'error') {
-                        statusIndicator.className = 'status-indicator error';
-                        statusText.textContent = 'ERROR';
+                        ui.statusIndicator.className = 'status-indicator error';
+                        ui.statusText.textContent = 'ERROR';
                     } else {
-                        statusIndicator.className = 'status-indicator online';
-                        statusText.textContent = 'SYSTEM ONLINE';
+                        ui.statusIndicator.className = 'status-indicator online';
+                        ui.statusText.textContent = 'SYSTEM ONLINE';
                     }
 
+                    // Update the path info display
+                    const pathInfo = data.path_info || {};
+                    const nextTurn = pathInfo.turn_to_execute;
+                    if (nextTurn) {
+                        ui.nextTurnDisplay.textContent = nextTurn.toUpperCase();
+                        ui.nextTurnDisplay.style.color = 'var(--cyber-pink)';
+                    } else {
+                        ui.nextTurnDisplay.textContent = '...';
+                        ui.nextTurnDisplay.style.color = '#ffffff';
+                    }
+
+                    const cornersText = `${pathInfo.corners_passed || 0} / ${pathInfo.total_corners || 0}`;
+                    ui.cornersDisplay.textContent = cornersText;
                 })
                 .catch(error => {
                     console.error('Error fetching robot data:', error);
                     document.getElementById('status-text').textContent = 'SYSTEM OFFLINE';
                     const indicator = document.getElementById('status-indicator');
-                    indicator.classList.remove('online');
-                    indicator.classList.add('offline');
+                    indicator.className = 'status-indicator offline';
                 });
         }
 

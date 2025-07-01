@@ -34,8 +34,7 @@ class EncoderPositionTracker:
         # Camera-assisted tracking
         self.camera_line_result: Optional[Dict] = None
         self.last_intersection_detection = False
-        self.intersection_detection_cooldown = 0.0
-        self.INTERSECTION_COOLDOWN_S = 2.0  # Minimum time between intersection detections
+        self.just_crossed_by_camera = False # Flag to signal a camera-based cell crossing
         self.expected_intersections = self._calculate_expected_intersections()
         self.intersection_count = 0
         
@@ -59,41 +58,37 @@ class EncoderPositionTracker:
     def _handle_intersection_detection(self):
         """
         Handles the logic when the camera detects an intersection.
-        This simply resets the distance tracker, using the intersection as a hard sync point.
+        This advances the cell position and resets the distance tracker.
         """
-        self.intersection_count += 1
-        
         if not self.is_moving:
             return
 
+        # Use the camera-detected intersection as a high-confidence signal
+        # that we have reached the next cell in our path.
+        self._advance_cell()
+        self.just_crossed_by_camera = True # Set the flag for the main controller
+        self.intersection_count += 1
+
         if self.debug:
-            print(f"CAMERA CORRECTION: Intersection detected at {self.current_pos}. Resetting distance tracker.")
+            print(f"CAMERA CORRECTION: Intersection detected. Advanced to {self.current_pos}.")
         
         # Reset the distance traveled since the last cell.
-        # The camera-detected intersection is now our new "zero" point for this cell.
         self.distance_since_last_cell = 0.0
-        self.position_confidence = min(1.0, self.position_confidence + 0.1)
+        self.position_confidence = min(1.0, self.position_confidence + 0.2) # Boost confidence
 
     def set_camera_line_result(self, camera_result: Dict):
         """Update the tracker with the latest camera line detection result."""
         self.camera_line_result = camera_result
         
-        # Check for intersection detection
-        if camera_result and camera_result.get('is_at_intersection', False):
-            current_time = time.time()
-            
-            # Only process if we're not in cooldown period
-            if current_time - self.intersection_detection_cooldown > self.INTERSECTION_COOLDOWN_S:
-                if not self.last_intersection_detection:  # Rising edge detection
-                    self._handle_intersection_detection()
-                    self.intersection_detection_cooldown = current_time
-                
-                self.last_intersection_detection = True
-            else:
-                # Still seeing an intersection, but in cooldown
-                pass
-        else:
-            self.last_intersection_detection = False
+        # Check for intersection detection. This logic is now simpler.
+        # It relies on a rising edge (transition from not seeing to seeing an intersection).
+        is_at_intersection = camera_result and camera_result.get('is_at_intersection', False)
+
+        if is_at_intersection and not self.last_intersection_detection:
+            # Rising edge detected: We just arrived at an intersection.
+            self._handle_intersection_detection()
+        
+        self.last_intersection_detection = is_at_intersection
 
     def start(self):
         """Starts the position tracking."""
@@ -138,15 +133,16 @@ class EncoderPositionTracker:
         distance_moved = avg_delta_ticks * self.METERS_PER_TICK
         self.distance_since_last_cell += distance_moved
 
-        # Check if we have crossed into a new cell
+        # Check if we have crossed into a new cell based on encoder distance
         if self.distance_since_last_cell >= self.cell_size_m:
             if self.debug:
                 print(f"ENCODER: Cell crossing triggered! Dist: {self.distance_since_last_cell:.3f}m")
             self._advance_cell()
-            self.distance_since_last_cell = 0.0 # Reset distance
+            # Reset distance, but don't set the camera flag here
+            self.distance_since_last_cell -= self.cell_size_m
 
     def _advance_cell(self):
-        """Move one cell forward in the current direction based on encoder distance."""
+        """Move one cell forward in the current direction."""
         # This is now a fallback method when no camera correction is available
         dx, dy = 0, 0
         if self.current_direction == 'N': dy = -1
@@ -185,6 +181,15 @@ class EncoderPositionTracker:
         
         if self.debug:
             print(f"Encoder Tracker: Direction updated to {self.current_direction} after {turn} turn.")
+
+    def force_set_position(self, x: int, y: int):
+        """Allows the main controller to force-set the robot's grid position."""
+        new_pos = (x, y)
+        if self.debug:
+            print(f"POSITION OVERRIDE: Position manually set from {self.current_pos} to {new_pos}")
+        self.current_pos = new_pos
+        # Whenever we force-set position, we should be highly confident.
+        self.position_confidence = 1.0
 
     def get_pose(self) -> Tuple[float, float, float]:
         """Returns the robot's current pose (x, y, heading) in meters and radians."""

@@ -467,9 +467,10 @@ class CameraLineFollower:
         # Morphological operations kernel
         self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         
-        # Region of Interest (ROI) settings - ignore bottom 25% where arm is
-        self.ROI_HEIGHT_RATIO = 0.5  # Use middle 50% of frame for line detection
-        self.ROI_START_RATIO = 0.25   # Start ROI at 25% down from top (ignore top 25%)
+        # Region of Interest (ROI) settings.
+        # This is a critical parameter to prevent the camera from looking too far ahead.
+        # We are focusing on the area from 40% down to 75% down the frame.
+        self.ROI_START_RATIO = 0.40   # Start ROI at 40% down the frame
         self.ARM_EXCLUSION_RATIO = 0.75  # Bottom 25% is arm area - completely ignored
         
         # ADAPTIVE THRESHOLDING CONFIGURATION
@@ -566,7 +567,7 @@ class CameraLineFollower:
         
         # PID controller for smooth line following.
         # Gains are tuned for direct differential drive control.
-        self.pid = PIDController(kp=15.0, ki=0.1, kd=5.0, output_limits=(-100, 100))
+        self.pid = PIDController(kp=4.0, ki=0.02, kd=1.0, output_limits=(-100, 100))
         
         # Detection history for smoothing
         self.line_offset_history = deque(maxlen=5)
@@ -579,8 +580,8 @@ class CameraLineFollower:
         self.last_result = None
         
         self.max_line_width = 0.7 # Max line width as a ratio of ROI width
-        self.intersection_solidity_threshold = 0.85 # Lower value means more complex shape
-        self.intersection_aspect_ratio_threshold = 0.8
+        self.intersection_solidity_threshold = 0.75 # Lowered from 0.85 to be less sensitive to noise on straight lines
+        self.intersection_aspect_ratio_threshold = 1.2 # Increased from 0.8 to be less sensitive
         
         self.canny_high = 150
         self.binary_threshold = 60
@@ -1161,6 +1162,7 @@ class CameraLineFollower:
             
             is_complex_shape = solidity < self.intersection_solidity_threshold
             is_wide_shape = aspect_ratio > self.intersection_aspect_ratio_threshold
+            is_intersection = is_complex_shape or is_wide_shape
 
             if self.debug:
                 print(f"DEBUG: Two lines detected. Center at ({cx}, {cy}).")
@@ -1185,21 +1187,52 @@ class CameraLineFollower:
             if M["m00"] == 0:
                 return None
             
+            # Initially, calculate the standard centroid and bounding box for the whole shape
             cx = int(M["m10"] / M["m00"])
             cy = int(M["m01"] / M["m00"])
-            
             x, y, w, h = cv2.boundingRect(largest_contour)
-            area = cv2.contourArea(largest_contour)
-            area_ratio = area / (roi_width * roi_height)
-            aspect_ratio = w / float(h) if h > 0 else 0
-            confidence = min(1.0, area_ratio * 10 + min(aspect_ratio / 3, 1.0) * 0.5)
             
+            # --- Intersection Detection ---
+            area = cv2.contourArea(largest_contour)
             solidity = float(area) / cv2.contourArea(cv2.convexHull(largest_contour)) if cv2.contourArea(cv2.convexHull(largest_contour)) > 0 else 1.0
+            aspect_ratio = w / float(h) if h > 0 else 0
             is_complex_shape = solidity < self.intersection_solidity_threshold
             is_wide_shape = aspect_ratio > self.intersection_aspect_ratio_threshold
+            is_intersection = is_complex_shape or is_wide_shape
 
-            if self.debug:
+            # --- Recalculate Center for Intersections ---
+            # If it's an intersection, the standard centroid is misleading.
+            # We recalculate the center based *only* on the part of the line closest to the robot.
+            if is_intersection:
+                roi_h, _ = binary_roi.shape
+                
+                # Define a sub-region at the bottom of the main ROI.
+                sub_roi_h = roi_h // 3 # Analyze bottom third of the ROI
+                sub_roi_y_start = roi_h - sub_roi_h
+                bottom_slice = binary_roi[sub_roi_y_start:, :]
+                
+                # Calculate the centroid of this bottom slice.
+                M_bottom = cv2.moments(bottom_slice)
+                
+                if M_bottom["m00"] > 0:
+                    # If we found the line in the bottom slice, its centroid is our new, more reliable navigation point.
+                    cx_bottom = int(M_bottom["m10"] / M_bottom["m00"])
+                    if self.debug:
+                        print(f"DEBUG: Intersection. Using bottom-slice center cx={cx_bottom} (was {cx})")
+                    cx = cx_bottom # Override the original centroid
+                else:
+                    # Fallback: if the bottom slice is empty (e.g., a horizontal line at the top of the ROI),
+                    # use the center of the contour's bounding box as a safer default than the full centroid.
+                    if self.debug:
+                        print(f"DEBUG: Intersection, but bottom slice empty. Falling back to bbox center.")
+                    cx = x + w // 2 # Override the original centroid
+            
+            if self.debug and not is_intersection:
                 print(f"DEBUG: Single line detected. Center at ({cx}, {cy}).")
+
+            # --- Final Return ---
+            area_ratio = area / (roi_width * roi_height)
+            confidence = min(1.0, area_ratio * 10 + min(aspect_ratio / 3, 1.0) * 0.5)
 
             return {
                 'center': (cx, cy),
@@ -1208,7 +1241,7 @@ class CameraLineFollower:
                 'bbox': (x, y, w, h),
                 'area': area,
                 'confidence': confidence,
-                'is_at_intersection': is_complex_shape or is_wide_shape,
+                'is_at_intersection': is_intersection,
                 'solidity': solidity,
                 'aspect_ratio': aspect_ratio
             }
