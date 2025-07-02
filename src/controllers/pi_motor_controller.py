@@ -16,8 +16,8 @@ class PiMotorController:
     def __init__(self, trims: dict = None):
         # GPIO pin numbers (BCM mode) for the motor driver.
         self.motor_pins = {
-            'left': {'p1': 13, 'p2': 19},   # Left Motor
-            'right': {'p1': 21, 'p2': 20}, # Right Motor
+            'left': {'p1': 5, 'p2': 6},   # Left Motor
+            'right': {'p1': 19, 'p2': 13}, # Right Motor
         }
         
         # GPIO pin numbers for the wheel encoders (A and B phases)

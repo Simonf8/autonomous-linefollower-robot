@@ -599,7 +599,7 @@ class CameraLineFollower:
         
         # Corner stopping system
         self.corner_stop_enabled = True
-        self.corner_stop_duration = 2.0  # Stop for 2 seconds at each corner
+        self.corner_stop_duration = 0.2  # Stop for 0.2 seconds at each corner (minimal pause)
         self.corner_stop_start_time = None
         self.is_stopping_at_corner = False
         self.last_intersection_state = False

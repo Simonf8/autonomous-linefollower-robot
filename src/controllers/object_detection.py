@@ -81,7 +81,8 @@ class ObjectDetector:
                                 'class_name': class_name,
                                 'confidence': confidence,
                                 'bbox': bbox,  # [x1, y1, x2, y2]
-                                'center': self._get_bbox_center(bbox)
+                                'center': self._get_bbox_center(bbox),
+                                'area': (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])  # Calculate area from bounding box
                             }
                             
                             # Categorize detection

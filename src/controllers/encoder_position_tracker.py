@@ -36,7 +36,7 @@ class EncoderPositionTracker:
         self.intersection_count = 0
         
         # Position correction parameters
-        self.position_confidence = 1.0
+        self.position_confidence = 0.2
         self.encoder_drift_threshold = 0.3  # Maximum allowed drift before correction
         
         # Reset encoders at the start
@@ -137,8 +137,9 @@ class EncoderPositionTracker:
         else:
             if self.debug:
                 print(f"Encoder Tracker: WARN: Advance to {new_pos} blocked by wall or boundary.")
-            # We hit a wall according to encoders, majorly reduce confidence
-            self.position_confidence = max(0.0, self.position_confidence - 0.5)
+            # Don't advance position but don't reduce confidence as aggressively
+            # The camera will handle turns at intersections
+            self.position_confidence = max(0.3, self.position_confidence - 0.1)
 
     def get_current_cell(self) -> Tuple[int, int]:
         return self.current_pos

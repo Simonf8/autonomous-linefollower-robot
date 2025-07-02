@@ -20,7 +20,7 @@ class LineMemoryBuffer:
     - Adaptive confidence based on buffer age and movement consistency
     """
     
-    def __init__(self, buffer_size=20, max_prediction_time=2.0, debug=False):
+    def __init__(self, buffer_size=200, max_prediction_time=0.6, debug=False):
         self.debug = debug
         self.buffer_size = buffer_size
         self.max_prediction_time = max_prediction_time  # Maximum time to predict without new line data
@@ -41,7 +41,7 @@ class LineMemoryBuffer:
         
         # Line prediction parameters
         self.prediction_confidence = 1.0
-        self.confidence_decay_rate = 0.7  # How fast confidence decays during prediction
+        self.confidence_decay_rate = 0.5  # How fast confidence decays during prediction
         self.min_confidence_threshold = 0.3  # Minimum confidence to provide predictions
         
         # Movement smoothing

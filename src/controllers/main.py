@@ -29,7 +29,7 @@ from camera_obstacle_avoidance import CameraObstacleAvoidance
 FEATURES = {
     'BOX_MISSION_ENABLED': True,
     'OBJECT_DETECTION_ENABLED': True,
-    'OBSTACLE_AVOIDANCE_ENABLED': True,  # Enabled for line blocking detection
+    'OBSTACLE_AVOIDANCE_ENABLED': False,  # Enabled for line blocking detection
     'VISION_SYSTEM_ENABLED': False, # Disabled to use encoders
     'CAMERA_LINE_FOLLOWING_ENABLED': True, 
     'POSITION_CORRECTION_ENABLED': False, # N/A for encoder-based tracking
@@ -42,10 +42,10 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-CELL_SIZE_M = 0.068
-BASE_SPEED = 35  # Increased for faster straight-line movement
-TURN_SPEED = 30     # Significantly reduced for much slower, controlled turning
-CORNER_SPEED = 15   # Very slow for precise cornering
+CELL_SIZE_M = 0.061
+BASE_SPEED = 75  # Further increased to reduce stopping and correction loops
+TURN_SPEED = 60     # Increased for smoother turning
+CORNER_SPEED = 55   # Increased for less stopping
 
 # If corners are still too fast, you can further reduce these values:
 # TURN_SPEED = 10   # Ultra-slow turning
@@ -82,7 +82,7 @@ MAZE_GRID = [
 ]
 START_CELL = (0, 12) # Start position (col, row)
 if not FEATURES['BOX_MISSION_ENABLED']:
-    END_CELL = (18, 14)   # End position for non-box missions
+    END_CELL = (20, 14)   # End position for non-box missions
 else:
     END_CELL = None
 
@@ -92,11 +92,11 @@ else:
 #  - 'S': Faces towards larger row numbers (Down on the map)
 #  - 'E': Faces towards larger column numbers (Right on the map)
 #  - 'W': Faces towards smaller column numbers (Left on the map)
-START_DIRECTION = 'S'
+START_DIRECTION = 'E'
 
 # Time in seconds it takes for the robot to cross one 12cm cell at BASE_SPEED.
 
-CELL_CROSSING_TIME_S = 2.5  # Increased to act as a safeguard timeout
+CELL_CROSSING_TIME_S = 1.5  # Increased to act as a safeguard timeout
 
 # Corner turning configuration
 CORNER_TURN_MODES = {
@@ -105,9 +105,9 @@ CORNER_TURN_MODES = {
     'PIVOT': 'pivot',
     'FRONT_TURN': 'front_turn'
 }
-CORNER_DETECTION_THRESHOLD = 0.35
-CORNER_TURN_DURATION = 60    # Increased from 30 to 60 for longer turn timeout
-SHARP_CORNER_THRESHOLD = 0.6
+CORNER_DETECTION_THRESHOLD = 0.05
+CORNER_TURN_DURATION = 1    # Increased from 30 to 60 for longer turn timeout
+SHARP_CORNER_THRESHOLD = 0.5
 
 # Camera configuration
 WEBCAM_INDEX = 1
@@ -185,8 +185,10 @@ class RobotController(CameraLineFollowingMixin):
         self.corners_passed = 0 # How many corners we have passed so far
         self.is_straight_corridor = False
         self.last_cell_update_time = 0
+        self.box_lost_counter = 0
+        self.path_planned_for_dropoff = False  # Track if we've already planned path to dropoff
 
-        self.line_pid = PIDController(kp=0.5, ki=0.01, kd=0.1, output_limits=(-100, 100))
+        self.line_pid = PIDController(kp=0.15, ki=0.001, kd=0.02, output_limits=(-30, 30))
         self.state = "idle"
         self.debug = FEATURES['DEBUG_VISUALIZATION_ENABLED']
 
@@ -315,6 +317,74 @@ class RobotController(CameraLineFollowingMixin):
         current_cell = self.position_tracker.get_current_cell()
         target_cell = self.path[-1]
 
+        # --- Waypoint Arrival Check ---
+        target_waypoint = self.path[self.current_target_index]
+        waypoint_reached = (current_cell == target_waypoint)
+
+        # If we didn't get an exact match, try a more lenient check for corners where precision is critical.
+        if not waypoint_reached:
+            # Check if the target waypoint is a corner in the path
+            is_target_a_corner = False
+            if 0 < self.current_target_index < len(self.path) - 1:
+                prev_wp = self.path[self.current_target_index - 1]
+                next_wp = self.path[self.current_target_index + 1]
+                # A corner is where the direction of movement changes.
+                if (target_waypoint[0] - prev_wp[0] != next_wp[0] - target_waypoint[0]) or \
+                   (target_waypoint[1] - prev_wp[1] != next_wp[1] - target_waypoint[1]):
+                    is_target_a_corner = True
+            
+            if is_target_a_corner:
+                # Check Manhattan distance for proximity
+                dist = abs(current_cell[0] - target_waypoint[0]) + abs(current_cell[1] - target_waypoint[1])
+                if dist <= 1:  # If we are at or adjacent to the corner
+                    # Check if we have arrived at or passed the corner to avoid turning too early.
+                    direction = self.position_tracker.current_direction
+                    dx = current_cell[0] - target_waypoint[0]
+                    dy = current_cell[1] - target_waypoint[1]
+                    
+                    passed_or_at_corner = False
+                    if direction == 'E' and dx >= 0: passed_or_at_corner = True
+                    if direction == 'W' and dx <= 0: passed_or_at_corner = True
+                    if direction == 'S' and dy >= 0: passed_or_at_corner = True
+                    if direction == 'N' and dy <= 0: passed_or_at_corner = True
+                    
+                    if passed_or_at_corner:
+                        waypoint_reached = True
+                        print(f"LENIENT MATCH: Close to corner {target_waypoint} (at {current_cell}), triggering turn.")
+        
+        if waypoint_reached:
+            print(f"Reached waypoint {self.current_target_index} by ENCODER: {current_cell}")
+            self.last_cell_update_time = time.time()
+        
+            # Check if this waypoint is a corner that requires a turn.
+            if self.current_target_index < len(self.path) - 1:
+                next_waypoint = self.path[self.current_target_index + 1]
+                current_direction = self.position_tracker.current_direction
+                required_turn = self._get_required_turn(current_cell, current_direction, next_waypoint)
+                
+                if required_turn != 'forward':
+                    print(f"ENCODER: Path requires a '{required_turn}' turn. Initiating turn.")
+                    # Use the actual required turn direction - no more hardcoded left turns!
+                    self.audio_feedback.speak(f"Turning {required_turn}.")
+                    
+                    self._stop_motors()
+                    time.sleep(0.05)  # Reduced pause to minimize stopping
+                    self.turn_to_execute = required_turn
+                    self.state = 'turning'
+                    self.turn_start_time = time.time()
+                    self.current_target_index += 1  # We've handled this waypoint's turn
+                    return
+
+            # If no turn needed, or it's the last waypoint in a segment
+            self.current_target_index += 1
+            if self.current_target_index >= len(self.path):
+                # This handles arrival at the destination for this path segment
+                # The final state transition is handled by the `current_cell == target_cell` check below
+                pass
+
+        # Remove early transition - let robot follow path all the way to the box
+        # The box will be visible after the turn, no need to search for it early
+
         # Check for arrival at the final destination of the current path segment
         if current_cell == target_cell:
             print(f"Reached target destination: {current_cell}")
@@ -327,149 +397,8 @@ class RobotController(CameraLineFollowingMixin):
                     self.state = "at_pickup"
             else:
                 self.state = "mission_complete" # Fallback for non-box mission
-            self._stop_motors()
-            return
-        
-        # The primary goal is to reach the final destination.
-        if current_cell == self.path[-1]:
-            print(f"Reached final destination: {current_cell}")
-            self.audio_feedback.speak("Final destination reached! Aligning with line...")
-            self.state = "destination_alignment"
-            self.turn_start_time = time.time()
-            return
-
-        # --- CAMERA-BASED INTERSECTION DETECTION (DISABLED FOR CORNER STOPPING) ---
-        # DISABLED: The old intersection detection system conflicts with the new corner stopping
-        # Let the new corner stopping system handle ALL intersections
-        
-        # OLD CODE DISABLED:
-        # The camera looks ahead, so when it sees an intersection, we continue forward
-        # until we PASS the intersection (stop seeing it), then handle the turn.
-        
-        # Comment out the entire old intersection detection block
-        """
-        TURN_COOLDOWN_S = 2.0
-        can_act_on_intersection = (time.time() - self.last_turn_complete_time) > TURN_COOLDOWN_S
-        
-        # Track intersection visibility state
-        if not hasattr(self, 'intersection_state'):
-            self.intersection_state = {
-                'currently_seeing': False,
-                'was_seeing': False,
-                'just_passed': False,
-                'first_seen_time': 0,
-                'last_seen_time': 0,
-                'stable_not_seeing_count': 0,
-                'can_act_is': 0,
-                'can_act_is_last_time': 0
-            }
-        
-        # Update intersection visibility from camera
-        current_intersection = self.camera_line_result.get('is_at_intersection', False)
-        current_time = time.time()
-        
-        # Debug: Show when intersections are detected
-        if FEATURES['DEBUG_VISUALIZATION_ENABLED'] and current_intersection and self.position_tracker.intersection_count % 20 == 0:
-            print(f"INTERSECTION DETECTED: Camera sees intersection")
-        
-        # Update state tracking
-        self.intersection_state['was_seeing'] = self.intersection_state['currently_seeing']
-        self.intersection_state['currently_seeing'] = current_intersection
-        
-        # Track timing for stable detection
-        if current_intersection:
-            if not self.intersection_state['was_seeing']:
-                # Just started seeing intersection
-                self.intersection_state['first_seen_time'] = current_time
-            self.intersection_state['last_seen_time'] = current_time
-            self.intersection_state['stable_not_seeing_count'] = 0
-        else:
-            # Not seeing intersection
-            self.intersection_state['stable_not_seeing_count'] += 1
-        
-        # Detect when we JUST PASSED an intersection with stable requirements
-        MIN_INTERSECTION_DURATION = 0.2  # Must see intersection for at least 0.2 seconds (reduced)
-        MIN_STABLE_NOT_SEEING = 3  # Must not see intersection for 3 consecutive frames (reduced)
-        
-        intersection_duration = self.intersection_state['last_seen_time'] - self.intersection_state['first_seen_time']
-        had_stable_intersection = intersection_duration >= MIN_INTERSECTION_DURATION
-        now_stable_not_seeing = self.intersection_state['stable_not_seeing_count'] >= MIN_STABLE_NOT_SEEING
-        
-        self.intersection_state['just_passed'] = (
-            self.intersection_state['was_seeing'] and 
-            not self.intersection_state['currently_seeing'] and
-            had_stable_intersection and
-            now_stable_not_seeing
-        )
-        
-        # Debug intersection state changes
-        if FEATURES['DEBUG_VISUALIZATION_ENABLED']:
-            if self.intersection_state['currently_seeing'] != self.intersection_state['was_seeing']:
-                if self.intersection_state['currently_seeing']:
-                    print("INTERSECTION: Now seeing intersection")
-                else:
-                    print(f"INTERSECTION: No longer seeing intersection (duration: {intersection_duration:.1f}s, stable_count: {self.intersection_state['stable_not_seeing_count']})")
-            if self.intersection_state['just_passed']:
-                print(f"INTERSECTION: PASSED STABLE INTERSECTION (duration: {intersection_duration:.1f}s) - checking path requirements...")
-        
-        if self.intersection_state['just_passed'] and can_act_on_intersection:
-            print("Just passed an intersection - determining action...")
-            
-            # Determine what to do at this intersection based on the planned path.
-            turn_for_next_segment = 'forward' # Default action is to go straight.
-            waypoint_just_reached = None
-            if self.current_target_index < len(self.path):
-                # The waypoint we just passed IS the current target.
-                waypoint_just_reached = self.path[self.current_target_index]
-                
-                # The turn is determined by where we go from here to the *next* waypoint.
-                if self.current_target_index + 1 < len(self.path):
-                    next_waypoint_after_this = self.path[self.current_target_index + 1]
-                    current_direction = self.position_tracker.current_direction
-                    turn_for_next_segment = self._get_required_turn(waypoint_just_reached, current_direction, next_waypoint_after_this)
-
-            # --- Smart Intersection Handling ---
-            if turn_for_next_segment != 'forward':
-                # This is a real corner. Stop, wait, and turn.
-                turn_message = f"Passed intersection. Path requires: {turn_for_next_segment}."
-                print(turn_message)
-                self.audio_feedback.speak(turn_message)
-                
-                # Snap position to the waypoint we just passed.
-                if waypoint_just_reached:
-                    self.position_tracker.force_set_position(waypoint_just_reached[0], waypoint_just_reached[1])
-                self.corner_cell_to_highlight = waypoint_just_reached
-                self.turn_to_execute = turn_for_next_segment
-                self.state = 'waiting_at_corner'
-                self.wait_start_time = time.time()
-                self.current_target_index += 1 # We've handled this waypoint.
-                return # Exit to let the new state take over.
-            else:
-                # This is a straight-through intersection. No need to stop.
-                # Silently update our position and continue line following.
-                print("Passed intersection, proceeding straight through.")
-                if waypoint_just_reached:
-                    self.position_tracker.force_set_position(waypoint_just_reached[0], waypoint_just_reached[1])
-                self.current_target_index += 1 # We've passed this waypoint.
-                # Do NOT change state. Continue in 'path_following'.
-        """
-
-        # --- ENCODER-BASED WAYPOINT ARRIVAL (FALLBACK) ---
-        # This block now only serves as a fallback if the camera misses an intersection.
-        if current_cell == self.path[self.current_target_index]:
-            print(f"Reached waypoint {self.current_target_index} by ENCODER: {current_cell}")
-            self.last_cell_update_time = time.time()
-            self.current_target_index += 1
-            if self.current_target_index >= len(self.path):
-                print("All waypoints completed - mission complete!")
-                self.audio_feedback.speak("All waypoints completed!")
-                self.state = "mission_complete"
                 self._stop_motors()
                 return
-
-        # --- (REMOVED) Turn Determination Logic ---
-        # This is now handled by the camera-based intersection override block.
-        # The old logic is no longer needed here.
        
         frame = self.camera_line_follower.get_camera_frame()
         if frame is None:
@@ -539,7 +468,14 @@ class RobotController(CameraLineFollowingMixin):
                 self.turn_start_time = time.time()
                 return
         
-        # Normal line following if no obstacles
+        # DISABLE camera intersection detection - let encoder path-following handle all turns
+        # This prevents conflicts between encoder and camera turn detection
+        corner_status = self.camera_line_follower.get_corner_status()
+        if corner_status.get('intersection_detected_for_main', False):
+            print("CAMERA: Intersection detected but ignoring - encoder handles all turns")
+            self.camera_line_follower.clear_intersection_signal()  # Clear to prevent spam
+
+        # Normal line following if no obstacles or intersections
         # Adjust speed based on proximity to destination
         current_base_speed = BASE_SPEED
         if self.path and len(self.path) > 0:
@@ -547,56 +483,24 @@ class RobotController(CameraLineFollowingMixin):
             final_destination = self.path[-1]
             distance_to_destination = abs(current_cell[0] - final_destination[0]) + abs(current_cell[1] - final_destination[1])
             
-            # Slow down when approaching destination
+            # ELECTROMAGNET CONTROL: Turn on electromagnet when 3 cells before pickup location
+            if FEATURES['BOX_MISSION_ENABLED'] and self.box_handler and not self.box_handler.has_package:
+                # Check if we're heading to a pickup location
+                if target_cell in self.box_handler.pickup_locations:
+                    if distance_to_destination <= 3 and self.motor_controller:
+                        if not self.motor_controller.get_electromagnet_status():
+                            print(f"Approaching pickup zone ({distance_to_destination} cells away). Activating electromagnet.")
+                            self.motor_controller.electromagnet_on()
+            
+            # Slow down when approaching destination (less aggressive)
             if remaining_waypoints <= 1 or distance_to_destination <= 1:
-                current_base_speed = int(BASE_SPEED * 0.6)  # 60% speed for final approach
+                current_base_speed = int(BASE_SPEED * 0.8)  # 80% speed for final approach (less slowdown)
             elif remaining_waypoints <= 2 or distance_to_destination <= 2:
-                current_base_speed = int(BASE_SPEED * 0.8)  # 80% speed when close
+                current_base_speed = int(BASE_SPEED * 0.9)  # 90% speed when close (minimal slowdown)
         
-        # Update corner stopping logic every iteration (this runs the timer)
-        self.camera_line_follower.update_corner_stopping(self.camera_line_result)
-        
-        # Check if camera line follower is stopping at a corner
-        corner_status = self.camera_line_follower.get_corner_status()
-        
-        # Check if intersection was detected and we need to handle turning
-        if corner_status['intersection_detected_for_main'] and not corner_status['is_stopping_at_corner']:
-            # Intersection detected and we finished stopping - time to make a turn decision
-            print("INTERSECTION HANDLING: Camera detected intersection, checking if turn is needed...")
-            
-            # Find the next waypoint to determine turn direction
-            if self.path and self.current_target_index < len(self.path) - 1:
-                current_cell = self.position_tracker.get_current_cell()
-                next_waypoint = self.path[self.current_target_index + 1]
-                
-                # Calculate required turn
-                current_direction = self.position_tracker.current_direction
-                required_turn = self._get_required_turn(current_cell, current_direction, next_waypoint)
-                
-                if required_turn != 'forward':
-                    # We need to turn - enter turning state
-                    print(f"INTERSECTION TURN: Need to turn {required_turn} to reach next waypoint {next_waypoint}")
-                    self.turn_to_execute = required_turn
-                    self.state = 'turning'
-                    self.turn_start_time = time.time()
-                    self.current_target_index += 1  # We've handled this waypoint
-                    self.camera_line_follower.clear_intersection_signal()
-                    return
-                else:
-                    print("INTERSECTION STRAIGHT: Continuing straight through intersection")
-                    self.current_target_index += 1  # We've passed this waypoint
-            
-            # Clear the signal
-            self.camera_line_follower.clear_intersection_signal()
-        
-        if corner_status['is_stopping_at_corner']:
-            # Camera line follower is handling corner stopping - don't override
-            print(f"MAIN CONTROLLER: Respecting corner stop - setting motors to 0,0,0,0 (stop time: {corner_status['current_stop_time']:.1f}s)")
-            self._set_motor_speeds(0, 0, 0, 0)
-        else:
-            # Normal line following
-            fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(self.camera_line_result, base_speed=current_base_speed)
-            self._set_motor_speeds(fl, fr, bl, br)
+        # Use camera line follower for motor speeds only when not handling intersections
+        fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(self.camera_line_result, base_speed=current_base_speed)
+        self._set_motor_speeds(fl, fr, bl, br)
 
     def _execute_arcing_turn(self):
         """
@@ -624,56 +528,24 @@ class RobotController(CameraLineFollowingMixin):
 
     def _execute_precision_pivot_turn(self):
         """
-        Execute a precise pivot turn in place - stops, turns until line found and centered.
+        Execute a precise, time-based pivot turn in place. This is more robust against vision failure.
         """
-        TURN_TIMEOUT_S = 3.5          # Moderate timeout for precision turns
-        MIN_TURN_DURATION_S = 0.8     # Ensure we turn away from current line
-        LINE_CENTERED_THRESHOLD = 0.2 # More lenient for precision turns
+        # A 90-degree pivot turn takes a predictable amount of time.
+        # This value may need tuning based on the robot's hardware and surface.
+        PIVOT_DURATION_S = 1.4 # Reduced from 1.8
+        TURN_TIMEOUT_S = 2.5          # Safety timeout
         
         time_in_turn = time.time() - self.turn_start_time
         
-        # Get the latest camera frame and analyze it for the line
-        frame = self.camera_line_follower.get_camera_frame()
-        if frame is None:
-            self._stop_motors()
-            return
-
-        # Prepare robot state for line detection with memory buffer
-        current_cell = self.position_tracker.get_current_cell()
-        robot_state = {
-            'position': current_cell,
-            'direction': self.position_tracker.current_direction,
-            'motor_speeds': {'left': self.motor_speeds.get('fl', 0), 'right': self.motor_speeds.get('fr', 0)},
-            'timestamp': time.time()
-        }
-        
-        encoder_counts = self.motor_controller.get_encoder_counts() if self.motor_controller else {}
-        
-        # Detect line with memory buffer integration
-        self.camera_line_result = self.camera_line_follower.detect_line(frame, robot_state, encoder_counts)
-        
-        # Feed camera results to position tracker for hybrid tracking
-        self.position_tracker.set_camera_line_result(self.camera_line_result)
-        
-        line_detected = self.camera_line_result.get('line_detected', False)
-        line_offset = self.camera_line_result.get('line_offset', 1.0)
-        
-        is_line_centered = abs(line_offset) < LINE_CENTERED_THRESHOLD
-        
-        # --- DEBUG LOG ---
-        
-        # Check for completion conditions
-        # Must turn for minimum duration AND find a reasonably centered line
-        turn_complete = line_detected and is_line_centered and (time_in_turn > MIN_TURN_DURATION_S)
+        # Turn completion is now based on time, not on re-acquiring the line with vision.
+        turn_complete = time_in_turn >= PIVOT_DURATION_S
         turn_timed_out = time_in_turn > TURN_TIMEOUT_S
 
         if turn_complete or turn_timed_out:
-            if turn_complete:
-        
-                self.audio_feedback.speak("Turn complete.")
-            else:
-                
+            if turn_timed_out:
                 self.audio_feedback.speak("Turn timed out.")
+            else:
+                self.audio_feedback.speak("Turn complete.")
                 
             self._stop_motors()
             self.position_tracker.update_direction_after_turn(self.turn_to_execute)
@@ -681,7 +553,7 @@ class RobotController(CameraLineFollowingMixin):
             self.corner_cell_to_highlight = None # Clear the highlight after turn completes
             self.state = 'path_following'
             self.last_turn_complete_time = time.time()
-            time.sleep(0.5)  # Longer pause for precision
+            time.sleep(0.1)  # Minimal pause for precision
         else:
             # Continue pivot turning (rotate in place)
             self._perform_pivot_turn(self.turn_to_execute)
@@ -693,7 +565,7 @@ class RobotController(CameraLineFollowingMixin):
         """
         # Define a longer duration for slower, more controlled turns
         # This provides more consistent turning behavior.
-        ARCING_TURN_DURATION_S = 2.0  # Increased from 1.2 to 2.0 for slower turns
+        ARCING_TURN_DURATION_S = 1.6  # Reduced from 2.0
         TURN_TIMEOUT_S = 3.0  # Increased timeout to match longer turn duration
 
         time_in_turn = time.time() - self.turn_start_time
@@ -727,7 +599,7 @@ class RobotController(CameraLineFollowingMixin):
             self.corner_cell_to_highlight = None # Clear the highlight after turn completes
             self.state = 'path_following'
             self.last_turn_complete_time = time.time()  # Start cooldown
-            time.sleep(0.25)  # Short pause to stabilize and re-acquire line
+            time.sleep(0.1)  # Minimal pause to stabilize and re-acquire line
         else:
             # Condition not met, continue the arcing turn.
             # We no longer need to check for line centering during the turn itself.
@@ -746,12 +618,6 @@ class RobotController(CameraLineFollowingMixin):
         elif self.state == "path_following":
             self.position_tracker.set_moving(True)
             self._follow_path()
-        elif self.state == "waiting_at_corner":
-            self._stop_motors()
-            # Check if 1 second has passed (reduced from 4 seconds)
-            if time.time() - self.wait_start_time >= 1.0:
-                self.state = 'turning'
-                self.turn_start_time = time.time() # Start the timer for the turn itself
         elif self.state == "turning":
             self.position_tracker.set_moving(True)
             self._execute_arcing_turn()
@@ -772,11 +638,11 @@ class RobotController(CameraLineFollowingMixin):
             else:
                 self.state = "mission_complete"
         elif self.state == "at_pickup":
-            print("At pickup location. Engaging electromagnet.")
-            self.audio_feedback.speak("Picking up box.")
-            self._stop_motors()
-            self.state = "locating_box"
-            self.turn_start_time = time.time() # Use for timeout
+            print("At pickup location. Box will be ahead - approaching directly.")
+            # No need to stop and search - the box will be there after the turn!
+            self.audio_feedback.speak("Approaching for pickup.")
+            self.state = 'approaching_box'
+            self.action_start_time = time.time()
 
         elif self.state == "locating_box":
             self._handle_locating_box()
@@ -794,15 +660,33 @@ class RobotController(CameraLineFollowingMixin):
             self._handle_turning_after_pickup()
 
         elif self.state == "going_to_dropoff":
-            target_info = self.box_handler.get_current_target()
-            if target_info:
-                target_cell, mission_type = target_info
-                if mission_type == "DROPOFF":
-                    self._plan_path_to_target(target_cell)
-                else: # Should not happen
-                    self.state = "error"
+            if not self.path_planned_for_dropoff:
+                target_info = self.box_handler.get_current_target()
+                if target_info:
+                    target_cell, mission_type = target_info
+                    if mission_type == "DROPOFF":
+                        print(f"Planning path to dropoff at {target_cell}")
+                        # Force update position tracker after the left turn
+                        current_cell = self.position_tracker.get_current_cell()
+                        print(f"Robot is now at {current_cell} facing {self.position_tracker.current_direction}")
+                        self._plan_path_to_target(target_cell)
+                        self.path_planned_for_dropoff = True
+                        # Note: _plan_path_to_target() will change state to "path_following" if successful
+                    else: # Should not happen
+                        print(f"ERROR: Expected DROPOFF mission but got {mission_type}")
+                        self.state = "error"
+                else:
+                    print("ERROR: No target info available for dropoff")
+                    self.state = "mission_complete" # Should not happen
             else:
-                self.state = "mission_complete" # Should not happen
+                # Path already planned, should be in path_following state by now
+                # If we're still here, there might be an issue - force state change
+                print("WARNING: Path planned but still in going_to_dropoff state. Forcing path_following.")
+                if self.path and len(self.path) > 0:
+                    self.state = "path_following"
+                else:
+                    print("ERROR: No valid path found for dropoff")
+                    self.state = "error"
 
         elif self.state == "at_dropoff":
             print("At dropoff location. Disengaging electromagnet.")
@@ -1024,6 +908,29 @@ class RobotController(CameraLineFollowingMixin):
         
         self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
 
+    def _perform_slow_pivot_turn(self, direction: str):
+        """
+        Commands motor speeds for a very slow, controlled pivot turn after pickup.
+        This prevents over-spinning and provides more precise control.
+        """
+        # Use much slower speed for post-pickup turn
+        extra_slow_turn_speed = 35  # Much slower than CORNER_SPEED (55)
+        
+        if direction == "left":
+            # Rotate counter-clockwise (left turn)
+            fl_speed = -extra_slow_turn_speed    # Front left: reverse
+            fr_speed = extra_slow_turn_speed     # Front right: forward
+            bl_speed = -extra_slow_turn_speed    # Back left: reverse  
+            br_speed = extra_slow_turn_speed     # Back right: forward
+        else:  # right turn
+            # Rotate clockwise (right turn)
+            fl_speed = extra_slow_turn_speed     # Front left: forward
+            fr_speed = -extra_slow_turn_speed    # Front right: reverse
+            bl_speed = extra_slow_turn_speed     # Back left: forward
+            br_speed = -extra_slow_turn_speed    # Back right: reverse
+        
+        self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+
     def _execute_destination_alignment(self):
         """
         Turn at destination until line is found and centered.
@@ -1190,9 +1097,12 @@ class RobotController(CameraLineFollowingMixin):
         LOCATING_TIMEOUT_S = 15.0
         
         if time.time() - self.turn_start_time > LOCATING_TIMEOUT_S:
-            print("Could not find a box within the timeout.")
-            self.audio_feedback.speak("Box not found.")
-            self.state = "error"
+            print("Could not visually locate box within timeout. Trusting position and attempting blind approach.")
+            self.audio_feedback.speak("Box not found. Trying blind pickup.")
+            self._stop_motors()
+            time.sleep(0.5)
+            self.state = 'approaching_box' # Fallback to blind/timed approach
+            self.action_start_time = time.time()
             return
 
         frame = self.camera_line_follower.get_camera_frame()
@@ -1230,57 +1140,176 @@ class RobotController(CameraLineFollowingMixin):
         self._perform_pivot_turn('left')
 
     def _handle_approaching_box(self):
-        """Move forward for a fixed duration to get close to the box."""
-        APPROACH_DURATION_S = 2.0
+        """
+        Move forward to the box using YOLO11n detection until it disappears from view.
+        Then reverse and continue. If object detection is off, it moves for a fixed duration.
+        """
         APPROACH_SPEED = 15
+        MAX_APPROACH_DISTANCE = 1.0  # Maximum distance to approach in cells (prevent going off map)
 
-        if time.time() - self.action_start_time < APPROACH_DURATION_S:
-            self._set_motor_speeds(APPROACH_SPEED, APPROACH_SPEED, APPROACH_SPEED, APPROACH_SPEED)
+        # Safety check: don't go too far from pickup location
+        current_cell = self.position_tracker.get_current_cell()
+        target_info = self.box_handler.get_current_target()
+        if target_info:
+            target_cell, _ = target_info
+            distance_from_target = abs(current_cell[0] - target_cell[0]) + abs(current_cell[1] - target_cell[1])
+            
+            if distance_from_target > MAX_APPROACH_DISTANCE:
+                print(f"Too far from pickup location ({distance_from_target:.1f} cells). Stopping approach.")
+                self.audio_feedback.speak("Approach limit reached. Grabbing.")
+                self._stop_motors()
+                self.state = 'grabbing_box'
+                return
+
+        # Vision-based approach with YOLO11n
+        if FEATURES['OBJECT_DETECTION_ENABLED']:
+            APPROACH_TIMEOUT_S = 5.0  # Reduced timeout to prevent going too far
+
+            if time.time() - self.action_start_time > APPROACH_TIMEOUT_S:
+                print("Approaching box timed out. Assuming position is correct.")
+                self.audio_feedback.speak("Approach timed out.")
+                self._stop_motors()
+                self.state = 'grabbing_box'
+                return
+
+            frame = self.camera_line_follower.get_camera_frame()
+            if frame is None:
+                self._stop_motors()
+                return
+
+            box_detected = False
+            if self.object_detector:
+                detection_result = self.object_detector.detect_objects(frame)
+                closest_package = self.object_detector.get_closest_package(detection_result)
+                
+                if closest_package:
+                    self.box_lost_counter = 0 # Reset counter when box is seen
+                    box_detected = True
+                    
+                    print(f"YOLO11n DETECTION: Box found - class: {closest_package['class_name']}, conf: {closest_package['confidence']:.2f}, area: {closest_package['area']}")
+                    
+                    # Actively steer towards the box center while approaching
+                    frame_center_x = frame.shape[1] / 2
+                    box_center_x = closest_package['center'][0]
+                    
+                    # Proportional controller for steering correction
+                    error = box_center_x - frame_center_x
+                    kp = 0.25 # Proportional gain for steering
+                    turn_correction = kp * error
+                    
+                    # Clamp the correction to prevent extreme turns
+                    max_correction = APPROACH_SPEED * 0.8
+                    turn_correction = max(-max_correction, min(max_correction, turn_correction))
+
+                    left_speed = int(APPROACH_SPEED - turn_correction)
+                    right_speed = int(APPROACH_SPEED + turn_correction)
+                    
+                    print(f"APPROACH: Steering toward box - error: {error:.1f}, correction: {turn_correction:.1f}")
+                    self._set_motor_speeds(left_speed, right_speed, left_speed, right_speed)
+                else:
+                    # Box was detected in previous frames but is now lost
+                    self.box_lost_counter += 1
+                    box_detected = False
+                    print(f"BOX LOST: Counter at {self.box_lost_counter}")
+
+            # Check if box is at the right distance for grabbing
+            if box_detected and closest_package:
+                box_area = closest_package['area']
+                
+                # Stop when box is reasonably close (area indicates proximity)
+                if box_area > 8000:  # Lowered threshold to stop before getting too close
+                    print(f"Box close enough (area: {box_area}) - stopping to grab.")
+                    self.audio_feedback.speak("Box reached. Grabbing.")
+                    self._stop_motors()
+                    self.state = 'grabbing_box'
+                    return
+                    
+            # If box disappeared, we may have gone past it
+            elif not box_detected and self.box_lost_counter >= 2:  # Reduced frames needed
+                print("Box disappeared from YOLO11n view - stopping to grab.")
+                self.audio_feedback.speak("Box reached. Grabbing.")
+                self._stop_motors()
+                self.state = 'grabbing_box'
+                return
+                
+            # If no box detected yet, keep approaching
+            if not box_detected and self.box_lost_counter == 0:
+                print("No box detected yet, continuing approach...")
+                self._set_motor_speeds(APPROACH_SPEED, APPROACH_SPEED, APPROACH_SPEED, APPROACH_SPEED)
+        
+        # Time-based (blind) approach when object detection is disabled
         else:
-            self._stop_motors()
-            self.state = 'grabbing_box'
+            APPROACH_DURATION_S = 0.8  # Shorter approach to prevent overshooting
+            if time.time() - self.action_start_time < APPROACH_DURATION_S:
+                self._set_motor_speeds(APPROACH_SPEED, APPROACH_SPEED, APPROACH_SPEED, APPROACH_SPEED)
+            else:
+                print("Blind approach complete. Grabbing box.")
+                self._stop_motors()
+                self.state = 'grabbing_box'
 
     def _handle_grabbing_box(self):
         """Activate the electromagnet to pick up the box."""
-        print("Grabbing box with electromagnet.")
+        print("GRABBING BOX STATE: Entered state.")
         self.audio_feedback.speak("Grabbing box.")
         if self.motor_controller:
+            print("GRABBING BOX STATE: Motor controller found. Activating electromagnet.")
             self.motor_controller.electromagnet_on()
+        else:
+            print("GRABBING BOX STATE: MOTOR CONTROLLER NOT FOUND. Electromagnet not activated.")
         
         current_cell = self.position_tracker.get_current_cell()
+        print(f"GRABBING BOX: Collecting package at {current_cell}")
         self.box_handler.collect_package(current_cell)
-        time.sleep(1.0) # Wait for electromagnet to engage
+        time.sleep(0.8) # Shorter wait for electromagnet to engage
         
+        print("GRABBING BOX: Transitioning to reverse state")
         self.state = "reversing_from_box"
         self.action_start_time = time.time()
 
     def _handle_reversing_from_box(self):
         """Move backward for a fixed duration after picking up the box."""
-        REVERSE_DURATION_S = 2.0
-        REVERSE_SPEED = -15
+        REVERSE_DURATION_S = 1.5  # Longer reverse time to get clear of box area
+        REVERSE_SPEED = -35  # Faster reverse to be more decisive
 
-        if time.time() - self.action_start_time < REVERSE_DURATION_S:
+        elapsed_time = time.time() - self.action_start_time
+        print(f"REVERSING FROM BOX: {elapsed_time:.1f}s / {REVERSE_DURATION_S}s")
+        
+        if elapsed_time < REVERSE_DURATION_S:
             self._set_motor_speeds(REVERSE_SPEED, REVERSE_SPEED, REVERSE_SPEED, REVERSE_SPEED)
         else:
             self._stop_motors()
+            print("Finished reversing from box. Starting turn.")
+            time.sleep(0.1) # Minimal pause
             self.state = 'turning_after_pickup'
             self.action_start_time = time.time()
 
     def _handle_turning_after_pickup(self):
-        """Perform a 180-degree turn."""
-        TURN_DURATION_S = 4.0 # Estimated time for a 180-degree pivot turn
+        """Perform a 180-degree turn after pickup to go back to dropoff."""
+        # After picking up box, robot needs to turn around and go back to dropoff area
+        TURN_DURATION_S = 1.2  # 180-degree turn takes more time than 90-degree
 
-        if time.time() - self.action_start_time < TURN_DURATION_S:
-            self._perform_pivot_turn('right') # or 'left'
+        elapsed_time = time.time() - self.action_start_time
+        print(f"POST-PICKUP 180-TURN: {elapsed_time:.1f}s / {TURN_DURATION_S}s")
+        
+        if elapsed_time < TURN_DURATION_S:
+            # 180-degree turn to face back towards dropoff area
+            self._perform_slow_pivot_turn('right') 
         else:
             self._stop_motors()
+            print("Completed 180-degree turn after pickup.")
+            self.audio_feedback.speak("Turn complete. Going to dropoff.")
+            
             # Update direction in position tracker (180 degrees)
             current_dir = self.position_tracker.current_direction
             opposite_directions = {'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E'}
             new_direction = opposite_directions.get(current_dir, current_dir)
             self.position_tracker.current_direction = new_direction
+            print(f"DIRECTION UPDATE: Changed from {current_dir} to {new_direction} after 180-turn")
 
+            print("TRANSITIONING TO DROPOFF STATE")
             self.state = 'going_to_dropoff'
+            self.path_planned_for_dropoff = False  # Reset flag for new dropoff planning
+            time.sleep(0.1) # Minimal pause to stabilize
 
 def main():
     """Main entry point for the robot controller."""
