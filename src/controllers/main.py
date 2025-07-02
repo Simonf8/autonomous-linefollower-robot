@@ -81,7 +81,10 @@ MAZE_GRID = [
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0]  # Row 14
 ]
 START_CELL = (2, 0) # Start position (col, row)
-END_CELL = (18, 14)   # End position (col, row)
+if not FEATURES['BOX_MISSION_ENABLED']:
+    END_CELL = (18, 14)   # End position for non-box missions
+else:
+    END_CELL = None
 
 # START_DIRECTION must be a cardinal direction: 'N', 'S', 'E', or 'W'.
 # This tells the robot its initial orientation on the map grid.
@@ -1603,10 +1606,11 @@ def main():
         cv2.rectangle(grid_img, (start_x * cell_size, start_y * cell_size),
                       ((start_x + 1) * cell_size, (start_y + 1) * cell_size), start_color, -1)
         
-        end_color = (0, 0, 255)
-        end_x, end_y = end_cell[0], end_cell[1]
-        cv2.rectangle(grid_img, (end_x * cell_size, end_y * cell_size),
-                      ((end_x + 1) * cell_size, (end_y + 1) * cell_size), end_color, -1)
+        if end_cell:
+            end_color = (0, 0, 255)
+            end_x, end_y = end_cell[0], end_cell[1]
+            cv2.rectangle(grid_img, (end_x * cell_size, end_y * cell_size),
+                          ((end_x + 1) * cell_size, (end_y + 1) * cell_size), end_color, -1)
 
         if robot_cell:
             robot_x, robot_y = robot_cell[0], robot_cell[1]
