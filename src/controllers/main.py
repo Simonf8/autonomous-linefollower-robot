@@ -42,14 +42,14 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-CELL_SIZE_M = 0.061
-BASE_SPEED = 75  # Further increased to reduce stopping and correction loops
-TURN_SPEED = 60     # Increased for smoother turning
-CORNER_SPEED = 55   # Increased for less stopping
+CELL_SIZE_M = 0.064
+BASE_SPEED = 50     # Reduced from 75 for better control
+TURN_SPEED = 40     # Reduced from 60 for more accurate turns
+CORNER_SPEED = 35   # Reduced from 55 for better corner navigation
 
 # If corners are still too fast, you can further reduce these values:
-# TURN_SPEED = 10   # Ultra-slow turning
-# CORNER_SPEED = 8  # Ultra-slow cornering
+# TURN_SPEED = 30   # Even slower turning
+# CORNER_SPEED = 25  # Even slower cornering
 
 # Hardware-specific trims to account for motor differences.
 # Values are multipliers (1.0 = no change, 0.9 = 10% slower).
@@ -495,6 +495,18 @@ class RobotController(CameraLineFollowingMixin):
             # This can be used for verification or emergency handling
             print(f"LOOK-AHEAD: Intersection NOW detected - type: {self.camera_line_result.get('upcoming_intersection_type', 'unknown')}")
             
+            # If we're near the pickup location and see a box, we should turn towards it
+            if self.camera_line_result.get('box_detected', False):
+                current_cell = self.position_tracker.get_current_cell()
+                if self.box_handler and current_cell in self.box_handler.pickup_locations:
+                    print("At pickup location with box visible - initiating turn")
+                    self._stop_motors()
+                    time.sleep(0.1)
+                    self.turn_to_execute = 'right'  # Boxes are always to the right
+                    self.state = 'turning'
+                    self.turn_start_time = time.time()
+                    return
+            
         # Check if look-ahead system sees an intersection ahead
         if self.camera_line_result.get('intersection_ahead', False):
             countdown = self.camera_line_result.get('intersection_countdown', 0)
@@ -514,8 +526,13 @@ class RobotController(CameraLineFollowingMixin):
                 # Check if we're heading to a pickup location
                 if target_cell in self.box_handler.pickup_locations:
                     if distance_to_destination <= 3 and self.motor_controller:
-                        if not self.motor_controller.get_electromagnet_status():
-                            print(f"Approaching pickup zone ({distance_to_destination} cells away). Activating electromagnet.")
+                        try:
+                            if not self.motor_controller.get_electromagnet_status():
+                                print(f"Approaching pickup zone ({distance_to_destination} cells away). Activating electromagnet.")
+                                self.motor_controller.electromagnet_on()
+                        except Exception as e:
+                            # Just turn it on anyway if status check fails
+                            print(f"Electromagnet status check failed, turning on anyway: {e}")
                             self.motor_controller.electromagnet_on()
             
             # Slow down when approaching destination (less aggressive)
@@ -526,6 +543,26 @@ class RobotController(CameraLineFollowingMixin):
         
         # Use the new look-ahead motor control system
         fl, fr, bl, br = self.camera_line_follower.get_motor_speeds_lookahead(self.camera_line_result, base_speed=current_base_speed)
+        
+        # If line is lost, be more aggressive with recovery
+        if not self.camera_line_result.get('line_detected', False):
+            print("Line lost! Initiating aggressive recovery...")
+            # Continue with the motor speeds from look-ahead which now uses memory buffer
+        
+        # Check if the look-ahead system says we're ready for pickup
+        if self.camera_line_result.get('ready_for_pickup', False):
+            print("Look-ahead system signals: Ready for pickup!")
+            self.audio_feedback.speak("Box in position. Grabbing.")
+            self._stop_motors()
+            
+            # Ensure electromagnet is on before grabbing
+            if self.motor_controller and not self.box_handler.has_package:
+                print("Activating electromagnet for immediate pickup")
+                self.motor_controller.electromagnet_on()
+            
+            self.state = 'grabbing_box'
+            return
+        
         self._set_motor_speeds(fl, fr, bl, br)
 
     def _execute_arcing_turn(self):
@@ -558,8 +595,15 @@ class RobotController(CameraLineFollowingMixin):
         """
         # A 90-degree pivot turn takes a predictable amount of time.
         # This value may need tuning based on the robot's hardware and surface.
-        PIVOT_DURATION_S = 1.4 # Reduced from 1.8
-        TURN_TIMEOUT_S = 2.5          # Safety timeout
+        PIVOT_DURATION_S = 1.6 # Slightly increased for more complete turns
+        
+        # Special case: longer turn duration when turning to face a box at pickup
+        if (self.camera_line_result.get('box_detected', False) and 
+            self.position_tracker.get_current_cell() in (self.box_handler.pickup_locations if self.box_handler else [])):
+            PIVOT_DURATION_S = 2.1  # Extra time to fully align with box
+            print("Extended pivot turn duration for box alignment")
+        
+        TURN_TIMEOUT_S = 3.0          # Safety timeout
         
         time_in_turn = time.time() - self.turn_start_time
         
@@ -591,8 +635,15 @@ class RobotController(CameraLineFollowingMixin):
         """
         # Define a longer duration for slower, more controlled turns
         # This provides more consistent turning behavior.
-        ARCING_TURN_DURATION_S = 1.6  # Reduced from 2.0
-        TURN_TIMEOUT_S = 3.0  # Increased timeout to match longer turn duration
+        ARCING_TURN_DURATION_S = 1.8  # Slightly increased for more complete turns
+        
+        # Special case: longer turn duration when turning to face a box at pickup
+        if (self.camera_line_result.get('box_detected', False) and 
+            self.position_tracker.get_current_cell() in (self.box_handler.pickup_locations if self.box_handler else [])):
+            ARCING_TURN_DURATION_S = 2.3  # Extra time to fully align with box
+            print("Extended turn duration for box alignment")
+        
+        TURN_TIMEOUT_S = 3.5  # Increased timeout to match longer turn duration
 
         time_in_turn = time.time() - self.turn_start_time
 
@@ -623,6 +674,21 @@ class RobotController(CameraLineFollowingMixin):
             self.position_tracker.update_direction_after_turn(self.turn_to_execute)
             self.turn_to_execute = None
             self.corner_cell_to_highlight = None # Clear the highlight after turn completes
+            
+            # Special handling: if we just turned at a pickup location and see a box, fine-tune alignment
+            current_cell = self.position_tracker.get_current_cell()
+            if (self.box_handler and current_cell in self.box_handler.pickup_locations):
+                # Check if we can see the box now
+                frame = self.camera_line_follower.get_camera_frame()
+                if frame is not None:
+                    result = self.camera_line_follower.detect_line_with_lookahead(frame)
+                    if result.get('box_detected', False):
+                        print("Box detected after turn - fine-tuning alignment")
+                        self.state = 'box_fine_alignment'
+                        self.action_start_time = time.time()
+                        self.last_turn_complete_time = time.time()
+                        return
+            
             self.state = 'path_following'
             self.last_turn_complete_time = time.time()  # Start cooldown
             time.sleep(0.1)  # Minimal pause to stabilize and re-acquire line
@@ -664,8 +730,28 @@ class RobotController(CameraLineFollowingMixin):
             else:
                 self.state = "mission_complete"
         elif self.state == "at_pickup":
-            print("At pickup location. Box will be ahead - approaching directly.")
-            # No need to stop and search - the box will be there after the turn!
+            print("At pickup location. Checking if turn is needed first.")
+            
+            # Check if we're at an intersection that requires a turn
+            frame = self.camera_line_follower.get_camera_frame()
+            if frame is not None:
+                line_result = self.camera_line_follower.detect_line_with_lookahead(frame)
+                
+                # If we're at an intersection (T-junction), we need to turn first
+                if line_result.get('intersection_now', False) or line_result.get('upcoming_intersection_type') == 'T':
+                    print("At T-junction near pickup. Executing turn to face box.")
+                    self.audio_feedback.speak("Turning to box.")
+                    self._stop_motors()
+                    time.sleep(0.1)
+                    
+                    # Since boxes are always to the right at pickup locations, turn right
+                    self.turn_to_execute = 'right'
+                    self.state = 'turning'
+                    self.turn_start_time = time.time()
+                    return
+            
+            # No intersection or already aligned - proceed with approach
+            print("Box should be ahead - approaching directly.")
             self.audio_feedback.speak("Approaching for pickup.")
             self.state = 'approaching_box'
             self.action_start_time = time.time()
@@ -684,6 +770,9 @@ class RobotController(CameraLineFollowingMixin):
 
         elif self.state == "turning_after_pickup":
             self._handle_turning_after_pickup()
+            
+        elif self.state == "box_fine_alignment":
+            self._handle_box_fine_alignment()
 
         elif self.state == "going_to_dropoff":
             if not self.path_planned_for_dropoff:
@@ -940,7 +1029,7 @@ class RobotController(CameraLineFollowingMixin):
         This prevents over-spinning and provides more precise control.
         """
         # Use much slower speed for post-pickup turn
-        extra_slow_turn_speed = 35  # Much slower than CORNER_SPEED (55)
+        extra_slow_turn_speed = 30  # Slower than CORNER_SPEED for precise 180-degree turns
         
         if direction == "left":
             # Rotate counter-clockwise (left turn)
@@ -1224,13 +1313,18 @@ class RobotController(CameraLineFollowingMixin):
             # No box detected - might need to search or continue approach
             print("No box in view - continuing approach...")
             
-        # Safety timeout
-        APPROACH_TIMEOUT_S = 5.0
+        # Safety timeout - but only if no box is detected at all
+        APPROACH_TIMEOUT_S = 8.0  # Increased timeout
         if time.time() - self.action_start_time > APPROACH_TIMEOUT_S:
-            print("Box approach timed out. Attempting grab anyway.")
-            self.audio_feedback.speak("Approach timeout. Grabbing.")
-            self._stop_motors()
-            self.state = 'grabbing_box'
+            if not result.get('box_detected', False):
+                print("Box approach timed out with no box detected. Attempting grab anyway.")
+                self.audio_feedback.speak("Approach timeout. Grabbing.")
+                self._stop_motors()
+                self.state = 'grabbing_box'
+            else:
+                # If we still see the box but haven't reached pickup position, move forward more aggressively
+                print("Box still visible but not in pickup position. Moving forward aggressively.")
+                self._set_motor_speeds(25, 25, 25, 25)  # Slow forward movement
 
     def _handle_grabbing_box(self):
         """Activate the electromagnet to pick up the box."""
@@ -1258,7 +1352,7 @@ class RobotController(CameraLineFollowingMixin):
     def _handle_reversing_from_box(self):
         """Move backward for a fixed duration after picking up the box."""
         REVERSE_DURATION_S = 1.5  # Longer reverse time to get clear of box area
-        REVERSE_SPEED = -35  # Faster reverse to be more decisive
+        REVERSE_SPEED = -30  # Controlled reverse speed
 
         elapsed_time = time.time() - self.action_start_time
         print(f"REVERSING FROM BOX: {elapsed_time:.1f}s / {REVERSE_DURATION_S}s")
@@ -1275,7 +1369,7 @@ class RobotController(CameraLineFollowingMixin):
     def _handle_turning_after_pickup(self):
         """Perform a 180-degree turn after pickup to go back to dropoff."""
         # After picking up box, robot needs to turn around and go back to dropoff area
-        TURN_DURATION_S = 1.2  # 180-degree turn takes more time than 90-degree
+        TURN_DURATION_S = 2.8  # Increased from 1.2 for a full 180-degree turn
 
         elapsed_time = time.time() - self.action_start_time
         print(f"POST-PICKUP 180-TURN: {elapsed_time:.1f}s / {TURN_DURATION_S}s")
@@ -1299,6 +1393,64 @@ class RobotController(CameraLineFollowingMixin):
             self.state = 'going_to_dropoff'
             self.path_planned_for_dropoff = False  # Reset flag for new dropoff planning
             time.sleep(0.1) # Minimal pause to stabilize
+
+    def _handle_box_fine_alignment(self):
+        """Fine-tune alignment to center the box after initial turn."""
+        ALIGNMENT_TIMEOUT_S = 3.0
+        ALIGNMENT_COMPLETE_THRESHOLD = 0.1  # Box should be centered within 10% of frame center
+        
+        elapsed_time = time.time() - self.action_start_time
+        
+        if elapsed_time >= ALIGNMENT_TIMEOUT_S:
+            print("Box alignment timeout - proceeding with approach")
+            self._stop_motors()
+            self.state = 'approaching_box'
+            self.action_start_time = time.time()
+            return
+        
+        # Get current frame and check box position
+        frame = self.camera_line_follower.get_camera_frame()
+        if frame is None:
+            return
+            
+        result = self.camera_line_follower.detect_line_with_lookahead(frame)
+        
+        if not result.get('box_detected', False):
+            # Lost sight of box - stop alignment
+            print("Box no longer visible - proceeding anyway")
+            self._stop_motors()
+            self.state = 'approaching_box'
+            self.action_start_time = time.time()
+            return
+        
+        # Get box position information
+        box_info = result.get('box_info', {})
+        box_center_x = box_info.get('center_x_ratio', 0.5)  # 0 = left edge, 1 = right edge
+        
+        # Calculate offset from center (0.5 is centered)
+        box_offset = box_center_x - 0.5
+        
+        if abs(box_offset) < ALIGNMENT_COMPLETE_THRESHOLD:
+            # Box is centered enough
+            print(f"Box centered! Offset: {box_offset:.3f}")
+            self._stop_motors()
+            time.sleep(0.1)
+            self.state = 'approaching_box'
+            self.action_start_time = time.time()
+        else:
+            # Continue fine-tuning alignment
+            # Use very slow pivot turn to center the box
+            turn_speed = 20  # Very slow for fine control
+            
+            if box_offset < 0:
+                # Box is to the left, turn left
+                self._set_motor_speeds(-turn_speed, turn_speed, -turn_speed, turn_speed)
+            else:
+                # Box is to the right, turn right
+                self._set_motor_speeds(turn_speed, -turn_speed, turn_speed, -turn_speed)
+            
+            if self.debug and int(elapsed_time * 2) != int((elapsed_time - 0.1) * 2):
+                print(f"Fine-tuning box alignment: offset={box_offset:.3f}, time={elapsed_time:.1f}s")
 
 def main():
     """Main entry point for the robot controller."""

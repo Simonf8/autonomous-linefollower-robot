@@ -820,6 +820,10 @@ class CameraLineFollower:
             'status': 'box_approach' if self.box_approach_active else ('line_following' if near_zone_result.get('line_detected') else 'line_lost')
         }
         
+        # Update memory buffer with current detection for future predictions
+        robot_state = self._get_default_robot_state()
+        self.line_memory_buffer.update_line_detection(result, robot_state, {})
+        
         # Create debug visualization
         if self.debug:
             result['processed_frame'] = self._draw_lookahead_debug(
@@ -1871,7 +1875,29 @@ class CameraLineFollower:
         line_detected = result.get('line_detected', False)
         
         if not line_detected:
-            # Simple line recovery - turn in place to find line
+            # Use memory buffer to predict where line might be
+            if hasattr(self, 'line_memory_buffer'):
+                # Try to get predicted line position from memory
+                predicted_result = self.line_memory_buffer.get_predicted_line_state(320)  # Assuming 320 width
+                if predicted_result and predicted_result.get('line_detected', False):
+                    # Use predicted line position for recovery
+                    predicted_offset = predicted_result.get('line_offset', 0.0)
+                    if self.debug:
+                        print(f"Using memory buffer prediction: offset={predicted_offset:.3f}")
+                    
+                    # Turn towards predicted line position
+                    turn_intensity = min(50, abs(predicted_offset) * 100)
+                    turn_direction = 1 if predicted_offset > 0 else -1
+                    turn_speed = int(turn_intensity * turn_direction)
+                    
+                    recovery_speed = base_speed // 3
+                    left_speed = int(recovery_speed + turn_speed)
+                    right_speed = int(recovery_speed - turn_speed)
+                    
+                    self.line_lost_counter += 1
+                    return (left_speed, right_speed, left_speed, right_speed)
+            
+            # Fallback to simple alternating search if no memory available
             if self.line_lost_counter < 10:
                 search_dir = 1 if (self.line_lost_counter // 3) % 2 == 0 else -1
                 turn_speed = base_speed // 3
