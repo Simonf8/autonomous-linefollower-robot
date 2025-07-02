@@ -316,6 +316,16 @@ class RobotController(CameraLineFollowingMixin):
 
         current_cell = self.position_tracker.get_current_cell()
         target_cell = self.path[-1]
+        
+        # Update camera line follower with upcoming turn sequence
+        if hasattr(self, 'camera_line_follower') and len(self.path) > self.current_target_index:
+            # Calculate turn sequence for remaining path
+            turn_sequence = self._calculate_turn_sequence_for_path(
+                self.path[self.current_target_index:],
+                self.position_tracker.current_direction
+            )
+            if turn_sequence:
+                self.camera_line_follower.set_path_to_destination(turn_sequence)
 
         # --- Waypoint Arrival Check ---
         target_waypoint = self.path[self.current_target_index]
@@ -424,8 +434,8 @@ class RobotController(CameraLineFollowingMixin):
         
         encoder_counts = self.motor_controller.get_encoder_counts() if self.motor_controller else {}
         
-        # Detect line with memory buffer integration
-        self.camera_line_result = self.camera_line_follower.detect_line(frame, robot_state, encoder_counts)
+        # Use the new look-ahead detection system
+        self.camera_line_result = self.camera_line_follower.detect_line_with_lookahead(frame)
         
         # Feed camera results to position tracker for hybrid tracking
         self.position_tracker.set_camera_line_result(self.camera_line_result)
@@ -468,12 +478,17 @@ class RobotController(CameraLineFollowingMixin):
                 self.turn_start_time = time.time()
                 return
         
-        # DISABLE camera intersection detection - let encoder path-following handle all turns
-        # This prevents conflicts between encoder and camera turn detection
-        corner_status = self.camera_line_follower.get_corner_status()
-        if corner_status.get('intersection_detected_for_main', False):
-            print("CAMERA: Intersection detected but ignoring - encoder handles all turns")
-            self.camera_line_follower.clear_intersection_signal()  # Clear to prevent spam
+        # Check if look-ahead system detects an intersection is imminent
+        if self.camera_line_result.get('intersection_now', False):
+            # The look-ahead system has detected we're at an intersection
+            # This can be used for verification or emergency handling
+            print(f"LOOK-AHEAD: Intersection NOW detected - type: {self.camera_line_result.get('upcoming_intersection_type', 'unknown')}")
+            
+        # Check if look-ahead system sees an intersection ahead
+        if self.camera_line_result.get('intersection_ahead', False):
+            countdown = self.camera_line_result.get('intersection_countdown', 0)
+            if self.debug and countdown % 5 == 0:
+                print(f"LOOK-AHEAD: Intersection ahead in {countdown} frames")
 
         # Normal line following if no obstacles or intersections
         # Adjust speed based on proximity to destination
@@ -498,8 +513,8 @@ class RobotController(CameraLineFollowingMixin):
             elif remaining_waypoints <= 2 or distance_to_destination <= 2:
                 current_base_speed = int(BASE_SPEED * 0.9)  # 90% speed when close (minimal slowdown)
         
-        # Use camera line follower for motor speeds only when not handling intersections
-        fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(self.camera_line_result, base_speed=current_base_speed)
+        # Use the new look-ahead motor control system
+        fl, fr, bl, br = self.camera_line_follower.get_motor_speeds_lookahead(self.camera_line_result, base_speed=current_base_speed)
         self._set_motor_speeds(fl, fr, bl, br)
 
     def _execute_arcing_turn(self):
@@ -1091,6 +1106,35 @@ class RobotController(CameraLineFollowingMixin):
                     current_direction = turn_map_right[current_direction]
         
         return corners
+    
+    def _calculate_turn_sequence_for_path(self, path: List[Tuple[int, int]], start_direction: str) -> List[str]:
+        """Calculate the sequence of turns needed for a given path."""
+        if len(path) < 2:
+            return []
+        
+        turn_sequence = []
+        current_direction = start_direction
+        
+        for i in range(len(path) - 1):
+            current_pos = path[i]
+            next_pos = path[i+1]
+            
+            required_turn = self._get_required_turn(current_pos, current_direction, next_pos)
+            
+            if required_turn in ['left', 'right']:
+                turn_sequence.append(required_turn)
+                # Update direction after turn
+                turn_map_right = {'N': 'E', 'E': 'S', 'S': 'W', 'W': 'N'}
+                turn_map_left = {'N': 'W', 'W': 'S', 'S': 'E', 'E': 'N'}
+                if required_turn == 'left':
+                    current_direction = turn_map_left[current_direction]
+                else:
+                    current_direction = turn_map_right[current_direction]
+            elif required_turn == 'forward':
+                # No turn needed, but we could add 'straight' to the sequence if needed
+                pass
+        
+        return turn_sequence
 
     def _handle_locating_box(self):
         """Scan for a box, center it, and then approach it."""
@@ -1141,111 +1185,41 @@ class RobotController(CameraLineFollowingMixin):
 
     def _handle_approaching_box(self):
         """
-        Move forward to the box using YOLO11n detection until it disappears from view.
-        Then reverse and continue. If object detection is off, it moves for a fixed duration.
+        Use the look-ahead system's integrated box detection and approach control.
+        The camera system handles all the complex logic for us.
         """
-        APPROACH_SPEED = 15
-        MAX_APPROACH_DISTANCE = 1.0  # Maximum distance to approach in cells (prevent going off map)
-
-        # Safety check: don't go too far from pickup location
-        current_cell = self.position_tracker.get_current_cell()
-        target_info = self.box_handler.get_current_target()
-        if target_info:
-            target_cell, _ = target_info
-            distance_from_target = abs(current_cell[0] - target_cell[0]) + abs(current_cell[1] - target_cell[1])
-            
-            if distance_from_target > MAX_APPROACH_DISTANCE:
-                print(f"Too far from pickup location ({distance_from_target:.1f} cells). Stopping approach.")
-                self.audio_feedback.speak("Approach limit reached. Grabbing.")
-                self._stop_motors()
-                self.state = 'grabbing_box'
-                return
-
-        # Vision-based approach with YOLO11n
-        if FEATURES['OBJECT_DETECTION_ENABLED']:
-            APPROACH_TIMEOUT_S = 5.0  # Reduced timeout to prevent going too far
-
-            if time.time() - self.action_start_time > APPROACH_TIMEOUT_S:
-                print("Approaching box timed out. Assuming position is correct.")
-                self.audio_feedback.speak("Approach timed out.")
-                self._stop_motors()
-                self.state = 'grabbing_box'
-                return
-
-            frame = self.camera_line_follower.get_camera_frame()
-            if frame is None:
-                self._stop_motors()
-                return
-
-            box_detected = False
-            if self.object_detector:
-                detection_result = self.object_detector.detect_objects(frame)
-                closest_package = self.object_detector.get_closest_package(detection_result)
-                
-                if closest_package:
-                    self.box_lost_counter = 0 # Reset counter when box is seen
-                    box_detected = True
-                    
-                    print(f"YOLO11n DETECTION: Box found - class: {closest_package['class_name']}, conf: {closest_package['confidence']:.2f}, area: {closest_package['area']}")
-                    
-                    # Actively steer towards the box center while approaching
-                    frame_center_x = frame.shape[1] / 2
-                    box_center_x = closest_package['center'][0]
-                    
-                    # Proportional controller for steering correction
-                    error = box_center_x - frame_center_x
-                    kp = 0.25 # Proportional gain for steering
-                    turn_correction = kp * error
-                    
-                    # Clamp the correction to prevent extreme turns
-                    max_correction = APPROACH_SPEED * 0.8
-                    turn_correction = max(-max_correction, min(max_correction, turn_correction))
-
-                    left_speed = int(APPROACH_SPEED - turn_correction)
-                    right_speed = int(APPROACH_SPEED + turn_correction)
-                    
-                    print(f"APPROACH: Steering toward box - error: {error:.1f}, correction: {turn_correction:.1f}")
-                    self._set_motor_speeds(left_speed, right_speed, left_speed, right_speed)
-                else:
-                    # Box was detected in previous frames but is now lost
-                    self.box_lost_counter += 1
-                    box_detected = False
-                    print(f"BOX LOST: Counter at {self.box_lost_counter}")
-
-            # Check if box is at the right distance for grabbing
-            if box_detected and closest_package:
-                box_area = closest_package['area']
-                
-                # Stop when box is reasonably close (area indicates proximity)
-                if box_area > 8000:  # Lowered threshold to stop before getting too close
-                    print(f"Box close enough (area: {box_area}) - stopping to grab.")
-                    self.audio_feedback.speak("Box reached. Grabbing.")
-                    self._stop_motors()
-                    self.state = 'grabbing_box'
-                    return
-                    
-            # If box disappeared, we may have gone past it
-            elif not box_detected and self.box_lost_counter >= 2:  # Reduced frames needed
-                print("Box disappeared from YOLO11n view - stopping to grab.")
-                self.audio_feedback.speak("Box reached. Grabbing.")
-                self._stop_motors()
-                self.state = 'grabbing_box'
-                return
-                
-            # If no box detected yet, keep approaching
-            if not box_detected and self.box_lost_counter == 0:
-                print("No box detected yet, continuing approach...")
-                self._set_motor_speeds(APPROACH_SPEED, APPROACH_SPEED, APPROACH_SPEED, APPROACH_SPEED)
+        # The look-ahead system handles everything for box approach
+        result = self.camera_line_result
         
-        # Time-based (blind) approach when object detection is disabled
+        # Check if we're ready for pickup (box is in position)
+        if result.get('ready_for_pickup', False):
+            print("Look-ahead system signals: Box in pickup position!")
+            self.audio_feedback.speak("Box reached. Grabbing.")
+            self._stop_motors()
+            self.state = 'grabbing_box'
+            return
+            
+        # Check box detection status
+        if result.get('box_detected', False):
+            box_info = result.get('box_info', {})
+            if box_info:
+                print(f"Box detected - Color: {box_info.get('dominant_color', 'unknown')}, "
+                      f"Position: {box_info.get('bottom_y_ratio', 0):.2f}")
+            
+            # The look-ahead system is already controlling motors for approach
+            # We don't need to set motor speeds here - they're already set
+            
         else:
-            APPROACH_DURATION_S = 0.8  # Shorter approach to prevent overshooting
-            if time.time() - self.action_start_time < APPROACH_DURATION_S:
-                self._set_motor_speeds(APPROACH_SPEED, APPROACH_SPEED, APPROACH_SPEED, APPROACH_SPEED)
-            else:
-                print("Blind approach complete. Grabbing box.")
-                self._stop_motors()
-                self.state = 'grabbing_box'
+            # No box detected - might need to search or continue approach
+            print("No box in view - continuing approach...")
+            
+        # Safety timeout
+        APPROACH_TIMEOUT_S = 5.0
+        if time.time() - self.action_start_time > APPROACH_TIMEOUT_S:
+            print("Box approach timed out. Attempting grab anyway.")
+            self.audio_feedback.speak("Approach timeout. Grabbing.")
+            self._stop_motors()
+            self.state = 'grabbing_box'
 
     def _handle_grabbing_box(self):
         """Activate the electromagnet to pick up the box."""
@@ -1261,6 +1235,10 @@ class RobotController(CameraLineFollowingMixin):
         print(f"GRABBING BOX: Collecting package at {current_cell}")
         self.box_handler.collect_package(current_cell)
         time.sleep(0.8) # Shorter wait for electromagnet to engage
+        
+        # Reset the box approach state in camera line follower
+        if hasattr(self, 'camera_line_follower'):
+            self.camera_line_follower.reset_box_approach()
         
         print("GRABBING BOX: Transitioning to reverse state")
         self.state = "reversing_from_box"
@@ -1370,6 +1348,13 @@ def main():
                 'using_prediction': robot.camera_line_result.get('using_prediction', False),
                 'buffer_status': robot.camera_line_result.get('buffer_status', {}),
                 'pid_metrics': robot.camera_line_follower.get_pid_performance_metrics() if hasattr(robot, 'camera_line_follower') else {},
+                # Look-ahead system status
+                'intersection_ahead': robot.camera_line_result.get('intersection_ahead', False),
+                'intersection_countdown': robot.camera_line_result.get('intersection_countdown', 0),
+                'intersection_now': robot.camera_line_result.get('intersection_now', False),
+                'box_detected': robot.camera_line_result.get('box_detected', False),
+                'box_in_position': robot.camera_line_result.get('box_in_position', False),
+                'box_approach_active': robot.camera_line_result.get('box_approach_active', False),
             },
             'obstacle_avoidance': {
                 'enabled': FEATURES['OBSTACLE_AVOIDANCE_ENABLED'],
