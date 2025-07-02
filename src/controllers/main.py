@@ -41,7 +41,7 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-CELL_SIZE_M = 0.064
+CELL_SIZE_M = 0.068
 BASE_SPEED = 35  # Increased for faster straight-line movement
 TURN_SPEED = 30     # Significantly reduced for much slower, controlled turning
 CORNER_SPEED = 15   # Very slow for precise cornering
@@ -696,8 +696,8 @@ class RobotController(CameraLineFollowingMixin):
             self._follow_path()
         elif self.state == "waiting_at_corner":
             self._stop_motors()
-            # Check if 4 seconds have passed
-            if time.time() - self.wait_start_time >= 4.0:
+            # Check if 1 second has passed (reduced from 4 seconds)
+            if time.time() - self.wait_start_time >= 1.0:
                 self.state = 'turning'
                 self.turn_start_time = time.time() # Start the timer for the turn itself
         elif self.state == "turning":
