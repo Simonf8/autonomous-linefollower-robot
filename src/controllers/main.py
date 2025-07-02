@@ -41,7 +41,7 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-CELL_SIZE_M = 0.069
+CELL_SIZE_M = 0.063
 BASE_SPEED = 24
 TURN_SPEED = 24     # Reduced from 25 to 20 for even slower turning
 CORNER_SPEED = 20   # Reduced from 25 to 20 for even slower cornering
@@ -277,9 +277,16 @@ class RobotController(CameraLineFollowingMixin):
             self._stop_motors()
             return
 
-        # --- CAMERA-BASED INTERSECTION DETECTION (PASS-THROUGH LOGIC) ---
+        # --- CAMERA-BASED INTERSECTION DETECTION (DISABLED FOR CORNER STOPPING) ---
+        # DISABLED: The old intersection detection system conflicts with the new corner stopping
+        # Let the new corner stopping system handle ALL intersections
+        
+        # OLD CODE DISABLED:
         # The camera looks ahead, so when it sees an intersection, we continue forward
         # until we PASS the intersection (stop seeing it), then handle the turn.
+        
+        # Comment out the entire old intersection detection block
+        """
         TURN_COOLDOWN_S = 2.0
         can_act_on_intersection = (time.time() - self.last_turn_complete_time) > TURN_COOLDOWN_S
         
@@ -382,6 +389,7 @@ class RobotController(CameraLineFollowingMixin):
                     self.position_tracker.force_set_position(waypoint_just_reached[0], waypoint_just_reached[1])
                 self.current_target_index += 1 # We've passed this waypoint.
                 # Do NOT change state. Continue in 'path_following'.
+        """
 
         # --- ENCODER-BASED WAYPOINT ARRIVAL (FALLBACK) ---
         # This block now only serves as a fallback if the camera misses an intersection.
@@ -470,8 +478,50 @@ class RobotController(CameraLineFollowingMixin):
             elif remaining_waypoints <= 2 or distance_to_destination <= 2:
                 current_base_speed = int(BASE_SPEED * 0.8)  # 80% speed when close
         
-        fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(self.camera_line_result, base_speed=current_base_speed)
-        self._set_motor_speeds(fl, fr, bl, br)
+        # Update corner stopping logic every iteration (this runs the timer)
+        self.camera_line_follower.update_corner_stopping(self.camera_line_result)
+        
+        # Check if camera line follower is stopping at a corner
+        corner_status = self.camera_line_follower.get_corner_status()
+        
+        # Check if intersection was detected and we need to handle turning
+        if corner_status['intersection_detected_for_main'] and not corner_status['is_stopping_at_corner']:
+            # Intersection detected and we finished stopping - time to make a turn decision
+            print("INTERSECTION HANDLING: Camera detected intersection, checking if turn is needed...")
+            
+            # Find the next waypoint to determine turn direction
+            if self.path and self.current_target_index < len(self.path) - 1:
+                current_cell = self.position_tracker.get_current_cell()
+                next_waypoint = self.path[self.current_target_index + 1]
+                
+                # Calculate required turn
+                current_direction = self.position_tracker.current_direction
+                required_turn = self._get_required_turn(current_cell, current_direction, next_waypoint)
+                
+                if required_turn != 'forward':
+                    # We need to turn - enter turning state
+                    print(f"INTERSECTION TURN: Need to turn {required_turn} to reach next waypoint {next_waypoint}")
+                    self.turn_to_execute = required_turn
+                    self.state = 'turning'
+                    self.turn_start_time = time.time()
+                    self.current_target_index += 1  # We've handled this waypoint
+                    self.camera_line_follower.clear_intersection_signal()
+                    return
+                else:
+                    print("INTERSECTION STRAIGHT: Continuing straight through intersection")
+                    self.current_target_index += 1  # We've passed this waypoint
+            
+            # Clear the signal
+            self.camera_line_follower.clear_intersection_signal()
+        
+        if corner_status['is_stopping_at_corner']:
+            # Camera line follower is handling corner stopping - don't override
+            print(f"MAIN CONTROLLER: Respecting corner stop - setting motors to 0,0,0,0 (stop time: {corner_status['current_stop_time']:.1f}s)")
+            self._set_motor_speeds(0, 0, 0, 0)
+        else:
+            # Normal line following
+            fl, fr, bl, br = self.camera_line_follower.get_motor_speeds(self.camera_line_result, base_speed=current_base_speed)
+            self._set_motor_speeds(fl, fr, bl, br)
 
     def _execute_arcing_turn(self):
         """

@@ -560,14 +560,15 @@ class CameraLineFollower:
         self.line_lost_counter = 0
         self.MAX_LINE_LOST_FRAMES = 10
         self.search_direction = 0  # -1 for left, 1 for right, 0 for center
+        self.last_turn_correction = 0  # Track last turn correction for recovery
         
         # Performance tracking
         self.last_detection_time = 0
         self.detection_fps = 0
         
         # PID controller for smooth line following.
-        # Gains are tuned for direct differential drive control.
-        self.pid = PIDController(kp=2.0, ki=0.01, kd=0.5, output_limits=(-100, 100))
+        # Reduced gains for smoother, less aggressive control
+        self.pid = PIDController(kp=0.8, ki=0.02, kd=0.3, output_limits=(-40, 40))
         
         # Detection history for smoothing
         self.line_offset_history = deque(maxlen=5)
@@ -578,6 +579,18 @@ class CameraLineFollower:
         # Result cache to avoid re-computation
         self.last_frame_hash = None
         self.last_result = None
+        
+        # Corner stopping system
+        self.corner_stop_enabled = True
+        self.corner_stop_duration = 2.0  # Stop for 2 seconds at each corner
+        self.corner_stop_start_time = None
+        self.is_stopping_at_corner = False
+        self.last_intersection_state = False
+        self.corner_count = 0
+        self.corners_passed = []  # Track which corners we've passed
+        self.last_intersection_time = 0  # Time when we last detected an intersection
+        self.intersection_cooldown = 0.5  # Very short cooldown - only prevent duplicate detections at same intersection
+        self.intersection_detected_for_main = False  # Signal to main controller that intersection was detected
         
         self.max_line_width = 0.7 # Max line width as a ratio of ROI width
         self.intersection_solidity_threshold = 0.4 # VERY LOW threshold - catch any complex shapes
@@ -598,6 +611,11 @@ class CameraLineFollower:
         self.cap = None
         self.camera_initialized = False
         self.frames_processed = 0
+        
+        # Speed smoothing for more consistent movement
+        self.speed_history = deque(maxlen=3)  # Track last 3 speeds for smoothing
+        self.last_base_speed = 60  # Track last base speed
+        self.last_calculated_speed = 60  # Initialize last calculated speed
 
     def initialize_camera(self) -> bool:
         """Initializes the camera using picamera2."""
@@ -741,11 +759,9 @@ class CameraLineFollower:
                 area = cv2.contourArea(contour)
                 x, y, w, h = cv2.boundingRect(contour)
                 
-                # Only remove very small noise contours, keep intersection parts
-                is_tiny_noise = area < (width * height * 0.02)  # Only remove if less than 2% of image
-                
-                # Remove only tiny noise, keep everything else (including corners)
-                if is_tiny_noise:
+                # Filter out very small contours (noise) - reduced threshold for more sensitivity
+                min_contour_area = 25  # Reduced from 50 to 25 to catch smaller intersection features
+                if area < min_contour_area:
                     cv2.fillPoly(filled_roi, [contour], 0)
         
         # Apply morphological closing to smooth connections
@@ -812,8 +828,8 @@ class CameraLineFollower:
         if not contours:
             return None
 
-        # Filter out very small contours (noise)
-        min_contour_area = 50
+        # Filter out very small contours (noise) - reduced threshold for more sensitivity
+        min_contour_area = 25  # Reduced from 50 to 25 to catch smaller intersection features
         valid_contours = [c for c in contours if cv2.contourArea(c) > min_contour_area]
 
         if not valid_contours:
@@ -826,11 +842,19 @@ class CameraLineFollower:
         is_intersection = False
 
         # --- Case 1: Multiple contours detected ---
-        # This is a strong indicator of an intersection or a broken line.
+        # This could indicate an intersection, but let's be more selective
         if len(valid_contours) >= 2:
-            is_intersection = True
             line1_contour = valid_contours[0]
             line2_contour = valid_contours[1]
+            
+            # Check if both contours are significant in size (lowered threshold)
+            area1 = cv2.contourArea(line1_contour)
+            area2 = cv2.contourArea(line2_contour)
+            min_intersection_area = roi_w * roi_h * 0.02  # Reduced from 0.05 to 0.02 - more sensitive
+            
+            # Only consider it an intersection if both contours are substantial
+            if area1 > min_intersection_area and area2 > min_intersection_area:
+                is_intersection = True
             
             # Combine the two largest contours for analysis
             combined_contour = np.vstack([line1_contour, line2_contour])
@@ -845,11 +869,16 @@ class CameraLineFollower:
             x, y, w, h = cv2.boundingRect(largest_contour)
             area = cv2.contourArea(largest_contour)
             
-            # Simple, robust intersection logic: if the shape is very wide or very tall,
-            # it's an intersection. This is more reliable than solidity/aspect ratio.
-            is_wide = w > roi_w * 0.6
-            is_tall = h > roi_h * 0.7
-            if is_wide or is_tall:
+            # More sensitive intersection logic for detecting T-intersections at grid cells
+            # Lowered thresholds to catch more intersections
+            is_wide = w > roi_w * 0.5  # Reduced from 0.8 to 0.5 - more sensitive
+            is_tall = h > roi_h * 0.5  # Reduced from 0.8 to 0.5 - more sensitive
+            
+            # For a T-intersection, we need significant width OR height (not both)
+            # This catches horizontal T-bars, vertical T-bars, and cross intersections
+            is_t_intersection = is_wide or is_tall or (w > roi_w * 0.6) or (h > roi_h * 0.6)
+            
+            if is_t_intersection:
                 is_intersection = True
         
         if M["m00"] == 0:
@@ -902,12 +931,20 @@ class CameraLineFollower:
         raw_offset = (line_center_x - frame_center) / (frame_width // 2)
         raw_offset = max(-1.0, min(1.0, raw_offset))  # Clamp to valid range
         
-        # Smooth the offset using history
+        # Smooth the offset using adaptive history
         self.center_offset_history.append(raw_offset)
         if len(self.center_offset_history) > self.history_size:
             self.center_offset_history.pop(0)
         
-        smoothed_offset = sum(self.center_offset_history) / len(self.center_offset_history)
+        # Use weighted average - give more weight to recent measurements
+        # This helps with self-correction while still smoothing noise
+        if len(self.center_offset_history) > 1:
+            weights = [0.1, 0.2, 0.3, 0.4]  # Most recent gets highest weight
+            weights = weights[-len(self.center_offset_history):]  # Adjust for actual history length
+            total_weight = sum(weights)
+            smoothed_offset = sum(offset * weight for offset, weight in zip(self.center_offset_history, weights)) / total_weight
+        else:
+            smoothed_offset = raw_offset
         
         # Calculate turn angle (simple proportional control)
         turn_angle = smoothed_offset * 45  # Max 45 degrees turn
@@ -1008,33 +1045,177 @@ class CameraLineFollower:
             'status': 'no_frame'
         }
     
+    def update_corner_stopping(self, result: Dict):
+        """
+        Update corner stopping logic - MUST be called every iteration.
+        This is separate from get_motor_speeds so the timer runs even when main controller overrides motors.
+        """
+        current_time = time.time()
+        is_at_intersection = result.get('is_at_intersection', False)
+
+        # Corner stopping logic - SIMPLIFIED AND FIXED
+        if self.corner_stop_enabled:
+            # FIRST: Handle active corner stopping
+            if self.is_stopping_at_corner and self.corner_stop_start_time is not None:
+                elapsed_time = current_time - self.corner_stop_start_time
+                if elapsed_time >= self.corner_stop_duration:
+                    # Time's up - stop the corner stopping
+                    print(f"CORNER STOP: Finished stopping at intersection {self.corner_count} after {elapsed_time:.1f}s - signaling main controller for turn")
+                    self.is_stopping_at_corner = False
+                    self.corner_stop_start_time = None
+                    # Reset intersection tracking to current state
+                    self.last_intersection_state = is_at_intersection
+                    # Signal main controller that it's time to make a turn decision
+                    self.intersection_detected_for_main = True
+                else:
+                    # Still stopping
+                    print(f"CORNER STOP: Still stopping at intersection {self.corner_count} - {elapsed_time:.1f}/{self.corner_stop_duration}s")
+            
+            # SECOND: Detect new intersections (only when not currently stopping)
+            if not self.is_stopping_at_corner:
+                # Check cooldown - don't detect new intersections too soon after the last one
+                time_since_last_intersection = current_time - self.last_intersection_time
+                
+                # Look for intersection PASSING detection - stop after we pass the T-shape
+                # We want to detect: was seeing intersection → now not seeing intersection
+                intersection_just_passed = (self.last_intersection_state and not is_at_intersection)
+                
+                if intersection_just_passed and time_since_last_intersection > self.intersection_cooldown:
+                    # We just passed an intersection - start stopping
+                    self.is_stopping_at_corner = True
+                    self.corner_stop_start_time = current_time
+                    self.corner_count += 1
+                    self.corners_passed.append(current_time)
+                    self.last_intersection_time = current_time
+                    self.intersection_detected_for_main = True  # Signal to main controller
+                    print(f"INTERSECTION {self.corner_count} PASSED! Stopping for {self.corner_stop_duration} seconds...")
+                elif is_at_intersection and time_since_last_intersection <= self.intersection_cooldown:
+                    # Intersection detected but still in cooldown period - reduce spam
+                    pass  # Removed debug print to reduce log noise
+                elif is_at_intersection:
+                    # Just for debugging - should not reach here
+                    pass  # Removed debug print to reduce log noise
+                
+                # Update intersection state for next iteration
+                self.last_intersection_state = is_at_intersection
+
     def get_motor_speeds(self, result: Dict, base_speed: int = 60) -> Tuple[int, int, int, int]:
         """
         Calculates motor speeds for a differential drive robot based on line detection.
         'line_offset' is the key parameter used for PID control.
         """
+        # Update corner stopping logic first
+        self.update_corner_stopping(result)
+        
+        # If we're stopping at a corner, return zero speeds
+        if self.is_stopping_at_corner:
+            return 0, 0, 0, 0
+
         line_offset = result.get('line_offset', 0.0)
         line_confidence = result.get('line_confidence', 0.0)
 
         if result.get('status') == 'line_lost' or line_confidence < 0.2:
-            # If line is lost or confidence is too low, stop.
-            return 0, 0, 0, 0
+            # Line recovery mechanism - gentle search pattern
+            if self.line_lost_counter < 5:
+                # First few frames: try to continue in last known direction
+                if hasattr(self, 'last_turn_correction'):
+                    recovery_turn = self.last_turn_correction * 0.5  # Gentle continuation
+                else:
+                    recovery_turn = 0
+            elif self.line_lost_counter < 15:
+                # Search left and right alternately
+                search_intensity = min(30, self.line_lost_counter * 2)
+                recovery_turn = search_intensity * (1 if (self.line_lost_counter // 3) % 2 == 0 else -1)
+            else:
+                # If still lost after 15 frames, stop
+                return 0, 0, 0, 0
+            
+            # Apply recovery movement
+            recovery_speed = max(20, base_speed // 3)  # Slow speed during recovery
+            left_speed = int(recovery_speed + recovery_turn)
+            right_speed = int(recovery_speed - recovery_turn)
+            
+            # Increment lost counter
+            self.line_lost_counter += 1
+            
+            return left_speed, right_speed, left_speed, right_speed
+        
+        # Add deadband for small offsets to prevent jittery corrections
+        DEADBAND = 0.05  # Ignore offsets smaller than 5%
+        if abs(line_offset) < DEADBAND:
+            line_offset = 0.0
+            
+        # Reset line lost counter since we found the line
+        self.line_lost_counter = 0
             
         # Calculate the turning correction from the PID controller.
-        # A positive offset (line to the right) should make the robot turn right.
         turn_correction = self.pid.update(line_offset)
         
-        # ADAPTIVE SPEED: Slow down when turning to improve stability.
-        speed_reduction_factor = 1.0 - (abs(line_offset) * 0.5) # Reduce speed less aggressively
-        current_speed = int(base_speed * speed_reduction_factor)
+        # Store last turn correction for recovery mechanism
+        self.last_turn_correction = turn_correction
         
-        # For a right turn (positive offset -> positive correction), we want the right motor to be slower.
+        # Smoother speed reduction - less aggressive than before
+        # Only reduce speed significantly for large offsets
+        if abs(line_offset) > 0.3:  # Only reduce speed for large offsets
+            speed_reduction_factor = 1.0 - (abs(line_offset) * 0.3)  # Less aggressive reduction
+        else:
+            speed_reduction_factor = 1.0  # No speed reduction for small corrections
+        
+        target_speed = int(base_speed * max(0.5, speed_reduction_factor))  # Never go below 50% speed
+        
+        # Speed smoothing - gradually adjust to target speed for consistency
+        self.speed_history.append(target_speed)
+        if len(self.speed_history) > 1:
+            # Use weighted average of recent speeds
+            weights = [0.3, 0.4, 0.3]  # Give most weight to current, some to recent
+            weights = weights[-len(self.speed_history):]
+            total_weight = sum(weights)
+            current_speed = int(sum(speed * weight for speed, weight in zip(self.speed_history, weights)) / total_weight)
+        else:
+            current_speed = target_speed
+        
+        # Limit speed changes to prevent sudden jumps
+        max_speed_change = 10  # Maximum speed change per frame
+        if hasattr(self, 'last_calculated_speed'):
+            speed_diff = current_speed - self.last_calculated_speed
+            if abs(speed_diff) > max_speed_change:
+                current_speed = self.last_calculated_speed + (max_speed_change if speed_diff > 0 else -max_speed_change)
+        
+        self.last_calculated_speed = current_speed
+        
+        # Limit turn correction to prevent extreme motor differences
+        max_turn_correction = current_speed * 0.6  # Max 60% of current speed
+        turn_correction = max(-max_turn_correction, min(max_turn_correction, turn_correction))
+        
+        # Calculate motor speeds with smoother differential
         left_speed = int(current_speed + turn_correction)
         right_speed = int(current_speed - turn_correction)
+        
+        # Ensure motor speeds stay within reasonable bounds
+        left_speed = max(-100, min(100, left_speed))
+        right_speed = max(-100, min(100, right_speed))
 
-        # The main controller expects four motor speeds, so we duplicate the values
-        # for the front and back wheels on each side.
         return left_speed, right_speed, left_speed, right_speed
+    
+    def get_corner_status(self) -> Dict:
+        """Get current corner stopping status for debugging/monitoring."""
+        current_stop_time = 0
+        if self.is_stopping_at_corner and self.corner_stop_start_time:
+            current_stop_time = time.time() - self.corner_stop_start_time
+            
+        return {
+            'corner_stop_enabled': self.corner_stop_enabled,
+            'is_stopping_at_corner': self.is_stopping_at_corner,
+            'corner_count': self.corner_count,
+            'corners_passed': len(self.corners_passed),
+            'current_stop_time': current_stop_time,
+            'stop_duration': self.corner_stop_duration,
+            'intersection_detected_for_main': self.intersection_detected_for_main
+        }
+    
+    def clear_intersection_signal(self):
+        """Clear the intersection detection signal after main controller handles it."""
+        self.intersection_detected_for_main = False
 
 
 class CameraLineFollowingMixin:
