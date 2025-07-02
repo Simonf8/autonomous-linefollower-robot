@@ -1460,7 +1460,7 @@ class RobotController(CameraLineFollowingMixin):
 
     def _handle_reversing_from_box(self):
         """Move backward for a fixed duration after picking up the box."""
-        REVERSE_DURATION_S = 1.5  # Longer reverse time to get clear of box area
+        REVERSE_DURATION_S = 3.0  # Even longer reverse to get well clear of box area
         REVERSE_SPEED = -30  # Controlled reverse speed
 
         elapsed_time = time.time() - self.action_start_time
@@ -1478,21 +1478,21 @@ class RobotController(CameraLineFollowingMixin):
     def _handle_turning_after_pickup(self):
         """Perform a 180-degree turn after pickup to go back to dropoff."""
         # After picking up box, robot needs to turn around and go back to dropoff area
-        TURN_DURATION_S = 4.0  # Increased for a complete 180-degree turn
+        TURN_DURATION_S = 2.5  # Reduced to 2.5s to avoid over-turning
 
         elapsed_time = time.time() - self.action_start_time
         print(f"POST-PICKUP 180-TURN: {elapsed_time:.1f}s / {TURN_DURATION_S}s")
         
         if elapsed_time < TURN_DURATION_S:
             # 180-degree turn to face back towards dropoff area - PURE PIVOT TURN (no forward movement)
-            # Use much stronger turn speed for 180-degree turn
-            STRONG_TURN_SPEED = 50  # Strong pivot turn speed
+            # Use stronger turn speed to ensure complete 180-degree turn
+            TURN_SPEED = 50  # Increased speed to ensure complete turn
             
             # Pure pivot turn - robot should NOT move forward, only rotate
-            fl_speed = STRONG_TURN_SPEED     # Front left: forward
-            fr_speed = -STRONG_TURN_SPEED    # Front right: reverse
-            bl_speed = STRONG_TURN_SPEED     # Back left: forward
-            br_speed = -STRONG_TURN_SPEED    # Back right: reverse
+            fl_speed = TURN_SPEED     # Front left: forward
+            fr_speed = -TURN_SPEED    # Front right: reverse
+            bl_speed = TURN_SPEED     # Back left: forward
+            br_speed = -TURN_SPEED    # Back right: reverse
             
             self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
             
