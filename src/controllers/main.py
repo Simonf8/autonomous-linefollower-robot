@@ -28,7 +28,7 @@ from camera_obstacle_avoidance import CameraObstacleAvoidance
 # Enable/disable features for easy testing and debugging
 FEATURES = {
     'BOX_MISSION_ENABLED': True,
-    'OBJECT_DETECTION_ENABLED': False,
+    'OBJECT_DETECTION_ENABLED': True,
     'OBSTACLE_AVOIDANCE_ENABLED': True,  # Enabled for line blocking detection
     'VISION_SYSTEM_ENABLED': False, # Disabled to use encoders
     'CAMERA_LINE_FOLLOWING_ENABLED': True, 
@@ -80,7 +80,7 @@ MAZE_GRID = [
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 13
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0]  # Row 14
 ]
-START_CELL = (2, 0) # Start position (col, row)
+START_CELL = (0, 12) # Start position (col, row)
 if not FEATURES['BOX_MISSION_ENABLED']:
     END_CELL = (18, 14)   # End position for non-box missions
 else:
@@ -145,12 +145,17 @@ class RobotController(CameraLineFollowingMixin):
         else:
             self.box_handler = None
 
-        self.object_detector = None
+        if FEATURES['OBJECT_DETECTION_ENABLED']:
+            self.object_detector = ObjectDetector()
+        else:
+            self.object_detector = None
+        
         self.frame = None
         self.processed_frame = None
         self.frame_lock = threading.Lock()
 
         self.detections = {}
+        self.box_detection_result = None
         self.last_intersection_time = 0
         self.motor_speeds = {'fl': 0, 'fr': 0, 'bl': 0, 'br': 0}
         self.camera_line_result = {}
@@ -173,6 +178,7 @@ class RobotController(CameraLineFollowingMixin):
         self.turn_to_execute = None # Stores the next turn ('left' or 'right')
         self.turn_start_time = 0
         self.wait_start_time = 0
+        self.action_start_time = 0 # For timed actions like approaching/reversing from box
         self.last_turn_complete_time = 0 # Cooldown timer for turns
         self.corner_cell_to_highlight = None # The cell where a turn is planned
         self.total_corners_in_path = 0 # How many turns are in the planned path
@@ -353,7 +359,9 @@ class RobotController(CameraLineFollowingMixin):
                 'just_passed': False,
                 'first_seen_time': 0,
                 'last_seen_time': 0,
-                'stable_not_seeing_count': 0
+                'stable_not_seeing_count': 0,
+                'can_act_is': 0,
+                'can_act_is_last_time': 0
             }
         
         # Update intersection visibility from camera
@@ -766,13 +774,24 @@ class RobotController(CameraLineFollowingMixin):
         elif self.state == "at_pickup":
             print("At pickup location. Engaging electromagnet.")
             self.audio_feedback.speak("Picking up box.")
-            if self.motor_controller:
-                self.motor_controller.electromagnet_on()
-            
-            current_cell = self.position_tracker.get_current_cell()
-            self.box_handler.collect_package(current_cell)
-            time.sleep(1.0) # Wait for electromagnet to engage
-            self.state = "going_to_dropoff"
+            self._stop_motors()
+            self.state = "locating_box"
+            self.turn_start_time = time.time() # Use for timeout
+
+        elif self.state == "locating_box":
+            self._handle_locating_box()
+
+        elif self.state == "approaching_box":
+            self._handle_approaching_box()
+
+        elif self.state == "grabbing_box":
+            self._handle_grabbing_box()
+        
+        elif self.state == "reversing_from_box":
+            self._handle_reversing_from_box()
+
+        elif self.state == "turning_after_pickup":
+            self._handle_turning_after_pickup()
 
         elif self.state == "going_to_dropoff":
             target_info = self.box_handler.get_current_target()
@@ -1165,6 +1184,103 @@ class RobotController(CameraLineFollowingMixin):
                     current_direction = turn_map_right[current_direction]
         
         return corners
+
+    def _handle_locating_box(self):
+        """Scan for a box, center it, and then approach it."""
+        LOCATING_TIMEOUT_S = 15.0
+        
+        if time.time() - self.turn_start_time > LOCATING_TIMEOUT_S:
+            print("Could not find a box within the timeout.")
+            self.audio_feedback.speak("Box not found.")
+            self.state = "error"
+            return
+
+        frame = self.camera_line_follower.get_camera_frame()
+        if frame is None:
+            return
+
+        if self.object_detector:
+            self.box_detection_result = self.object_detector.detect_objects(frame)
+            
+            if self.box_detection_result and self.box_detection_result['package_detected']:
+                closest_package = self.object_detector.get_closest_package(self.box_detection_result)
+                if closest_package:
+                    # Box found, now center it
+                    frame_center_x = frame.shape[1] / 2
+                    box_center_x = closest_package['center'][0]
+                    
+                    centering_tolerance = 20 # pixels
+                    
+                    if abs(box_center_x - frame_center_x) > centering_tolerance:
+                        # Box is not centered, pivot to center it
+                        if box_center_x < frame_center_x:
+                            self._perform_pivot_turn('left')
+                        else:
+                            self._perform_pivot_turn('right')
+                    else:
+                        # Box is centered, proceed to approach
+                        print("Box centered. Approaching.")
+                        self.audio_feedback.speak("Approaching box.")
+                        self._stop_motors()
+                        self.state = 'approaching_box'
+                        self.action_start_time = time.time()
+                return
+
+        # If no box is found, keep pivoting slowly to scan
+        self._perform_pivot_turn('left')
+
+    def _handle_approaching_box(self):
+        """Move forward for a fixed duration to get close to the box."""
+        APPROACH_DURATION_S = 2.0
+        APPROACH_SPEED = 15
+
+        if time.time() - self.action_start_time < APPROACH_DURATION_S:
+            self._set_motor_speeds(APPROACH_SPEED, APPROACH_SPEED, APPROACH_SPEED, APPROACH_SPEED)
+        else:
+            self._stop_motors()
+            self.state = 'grabbing_box'
+
+    def _handle_grabbing_box(self):
+        """Activate the electromagnet to pick up the box."""
+        print("Grabbing box with electromagnet.")
+        self.audio_feedback.speak("Grabbing box.")
+        if self.motor_controller:
+            self.motor_controller.electromagnet_on()
+        
+        current_cell = self.position_tracker.get_current_cell()
+        self.box_handler.collect_package(current_cell)
+        time.sleep(1.0) # Wait for electromagnet to engage
+        
+        self.state = "reversing_from_box"
+        self.action_start_time = time.time()
+
+    def _handle_reversing_from_box(self):
+        """Move backward for a fixed duration after picking up the box."""
+        REVERSE_DURATION_S = 2.0
+        REVERSE_SPEED = -15
+
+        if time.time() - self.action_start_time < REVERSE_DURATION_S:
+            self._set_motor_speeds(REVERSE_SPEED, REVERSE_SPEED, REVERSE_SPEED, REVERSE_SPEED)
+        else:
+            self._stop_motors()
+            self.state = 'turning_after_pickup'
+            self.action_start_time = time.time()
+
+    def _handle_turning_after_pickup(self):
+        """Perform a 180-degree turn."""
+        TURN_DURATION_S = 4.0 # Estimated time for a 180-degree pivot turn
+
+        if time.time() - self.action_start_time < TURN_DURATION_S:
+            self._perform_pivot_turn('right') # or 'left'
+        else:
+            self._stop_motors()
+            # Update direction in position tracker (180 degrees)
+            current_dir = self.position_tracker.current_direction
+            opposite_directions = {'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E'}
+            new_direction = opposite_directions.get(current_dir, current_dir)
+            self.position_tracker.current_direction = new_direction
+
+            self.state = 'going_to_dropoff'
 
 def main():
     """Main entry point for the robot controller."""
