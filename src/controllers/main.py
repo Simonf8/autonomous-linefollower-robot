@@ -328,33 +328,25 @@ class RobotController(CameraLineFollowingMixin):
         current_cell = self.position_tracker.get_current_cell()
         target_cell = self.path[-1]
         
-        # Check if robot has package and is close to any dropoff location
-        if FEATURES['BOX_MISSION_ENABLED'] and self.box_handler.has_package:
-            # Check if we're near any dropoff location (within 2 cells)
-            for dropoff_location in DROPOFF_LOCATIONS:
-                distance = abs(current_cell[0] - dropoff_location[0]) + abs(current_cell[1] - dropoff_location[1])
-                if distance <= 2:  # Within 2 cells of dropoff
-                    print(f"Near dropoff location {dropoff_location} (distance: {distance}). Dropping box!")
-                    self.audio_feedback.speak("Dropping box at dropoff area.")
-                    
-                    # Deactivate electromagnet immediately
-                    if self.motor_controller:
-                        self.motor_controller.electromagnet_off()
-                        print("Electromagnet deactivated - box dropped!")
-                    
-                    # Update box handler
-                    self.box_handler.deliver_package(current_cell)
-                    time.sleep(1.0)  # Wait for box to release
-                    
-                    # Check if mission is complete or go to next pickup
-                    if self.box_handler.is_mission_complete():
-                        self.state = "mission_complete"
-                        self._stop_motors()
-                        return
-                    else:
-                        print("Box dropped! Going to next pickup.")
-                        self.state = "going_to_pickup"
-                        return
+        # Check if robot's actual position differs from expected path position
+        if self.path and self.current_target_index < len(self.path):
+            expected_position = self.path[self.current_target_index]
+            actual_position = current_cell
+            
+            # Calculate distance between expected and actual position
+            position_error = abs(actual_position[0] - expected_position[0]) + abs(actual_position[1] - expected_position[1])
+            
+            # If robot is significantly off the planned path, replan
+            if position_error > 2:  # More than 2 cells off the planned path
+                print(f"PATH DEVIATION: Robot at {actual_position}, expected at {expected_position} (error: {position_error} cells)")
+                print("PATH DEVIATION: Replanning path from current position")
+                self.audio_feedback.speak("Replanning route.")
+                
+                # Reset path planning and replan from current position
+                self.path = []
+                self.current_target_index = 0
+                self._plan_path_to_target(target_cell)
+                return
         
         # Update camera line follower with upcoming turn sequence
         if hasattr(self, 'camera_line_follower') and len(self.path) > self.current_target_index:
@@ -431,8 +423,29 @@ class RobotController(CameraLineFollowingMixin):
                 # The final state transition is handled by the `current_cell == target_cell` check below
                 pass
 
-        # Remove early transition - let robot follow path all the way to the box
-        # The box will be visible after the turn, no need to search for it early
+        # Check if robot with package is close to any dropoff location (within 2 cells)
+        if FEATURES['BOX_MISSION_ENABLED'] and self.box_handler.has_package:
+            for dropoff_location in self.box_handler.dropoff_locations:
+                distance_to_dropoff = abs(current_cell[0] - dropoff_location[0]) + abs(current_cell[1] - dropoff_location[1])
+                if distance_to_dropoff <= 2:  # Within 2 cells of dropoff
+                    print(f"EARLY DROPOFF: Robot at {current_cell} is within 2 cells of dropoff {dropoff_location} (distance: {distance_to_dropoff})")
+                    print("EARLY DROPOFF: Deactivating electromagnet and dropping box")
+                    self.audio_feedback.speak("Dropping box near target.")
+                    
+                    # Deactivate electromagnet immediately
+                    if self.motor_controller:
+                        self.motor_controller.electromagnet_off()
+                    
+                    # Deliver the package
+                    self.box_handler.deliver_package(current_cell)
+                    time.sleep(1.0)  # Wait for box to release
+                    
+                    # Check if mission is complete or go to next pickup
+                    if self.box_handler.is_mission_complete():
+                        self.state = "mission_complete"
+                    else:
+                        self.state = "going_to_pickup"
+                    return
 
         # Check for arrival at the final destination of the current path segment
         if current_cell == target_cell:
