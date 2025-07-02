@@ -27,7 +27,7 @@ class PiMotorController:
         }
         
         # GPIO pin for the electromagnet
-        self.electromagnet_pin = 25
+        self.electromagnet_pin = 16
         
         # Apply motor trims if provided. These are used to calibrate for motor speed
         # differences. If a motor is too fast, lower its trim value below 1.0.
