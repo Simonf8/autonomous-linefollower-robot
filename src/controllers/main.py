@@ -41,16 +41,20 @@ FEATURES = {
 # ================================
 # ROBOT CONFIGURATION
 # ================================
-CELL_SIZE_M = 0.063
-BASE_SPEED = 24
-TURN_SPEED = 24     # Reduced from 25 to 20 for even slower turning
-CORNER_SPEED = 20   # Reduced from 25 to 20 for even slower cornering
+CELL_SIZE_M = 0.064
+BASE_SPEED = 35  # Increased for faster straight-line movement
+TURN_SPEED = 30     # Significantly reduced for much slower, controlled turning
+CORNER_SPEED = 15   # Very slow for precise cornering
+
+# If corners are still too fast, you can further reduce these values:
+# TURN_SPEED = 10   # Ultra-slow turning
+# CORNER_SPEED = 8  # Ultra-slow cornering
 
 # Hardware-specific trims to account for motor differences.
 # Values are multipliers (1.0 = no change, 0.9 = 10% slower).
 MOTOR_TRIMS =  {
     'left': 1.0,   
-    'right': 1.0, 
+    'right': 0.95, 
 }
 
 # Maze and Mission Configuration
@@ -182,6 +186,7 @@ class RobotController(CameraLineFollowingMixin):
             # Average left side (fl + bl) and right side (fr + br)
             left_speed = int((fl + bl) / 2)
             right_speed = int((fr + br) / 2)
+            # MOTOR FIX: Back to normal - left motor = left_speed, right motor = right_speed
             self.motor_controller.send_motor_speeds(left_speed, right_speed)
 
     def _setup_vision(self):
@@ -217,6 +222,12 @@ class RobotController(CameraLineFollowingMixin):
         
         # Reset timers and state for the new mission
         self.last_cell_update_time = time.time()
+
+        # Clear line memory buffer and reset PID controller for fresh start
+        if FEATURES['CAMERA_LINE_FOLLOWING_ENABLED'] and hasattr(self, 'camera_line_follower'):
+            self.camera_line_follower.clear_line_memory_buffer()
+            self.camera_line_follower.reset_pid_controller()
+            print("Line memory buffer cleared and adaptive PID reset for new mission")
 
         # Start position tracker only when mission begins
         if not self.position_tracker.running:
@@ -272,9 +283,9 @@ class RobotController(CameraLineFollowingMixin):
         # The primary goal is to reach the final destination.
         if current_cell == self.path[-1]:
             print(f"Reached final destination: {current_cell}")
-            self.audio_feedback.speak("Final destination reached!")
-            self.state = "mission_complete"
-            self._stop_motors()
+            self.audio_feedback.speak("Final destination reached! Aligning with line...")
+            self.state = "destination_alignment"
+            self.turn_start_time = time.time()
             return
 
         # --- CAMERA-BASED INTERSECTION DETECTION (DISABLED FOR CORNER STOPPING) ---
@@ -421,7 +432,19 @@ class RobotController(CameraLineFollowingMixin):
             self._frame_skip_counter = 0
         self._frame_skip_counter += 1
         
-        self.camera_line_result = self.camera_line_follower.detect_line(frame)
+        # Prepare robot state and encoder data for line detection with memory buffer
+        current_cell = self.position_tracker.get_current_cell()
+        robot_state = {
+            'position': current_cell,
+            'direction': self.position_tracker.current_direction,
+            'motor_speeds': {'left': self.motor_speeds.get('fl', 0), 'right': self.motor_speeds.get('fr', 0)},
+            'timestamp': time.time()
+        }
+        
+        encoder_counts = self.motor_controller.get_encoder_counts() if self.motor_controller else {}
+        
+        # Detect line with memory buffer integration
+        self.camera_line_result = self.camera_line_follower.detect_line(frame, robot_state, encoder_counts)
         
         # Feed camera results to position tracker for hybrid tracking
         self.position_tracker.set_camera_line_result(self.camera_line_result)
@@ -563,7 +586,19 @@ class RobotController(CameraLineFollowingMixin):
             self._stop_motors()
             return
 
-        self.camera_line_result = self.camera_line_follower.detect_line(frame)
+        # Prepare robot state for line detection with memory buffer
+        current_cell = self.position_tracker.get_current_cell()
+        robot_state = {
+            'position': current_cell,
+            'direction': self.position_tracker.current_direction,
+            'motor_speeds': {'left': self.motor_speeds.get('fl', 0), 'right': self.motor_speeds.get('fr', 0)},
+            'timestamp': time.time()
+        }
+        
+        encoder_counts = self.motor_controller.get_encoder_counts() if self.motor_controller else {}
+        
+        # Detect line with memory buffer integration
+        self.camera_line_result = self.camera_line_follower.detect_line(frame, robot_state, encoder_counts)
         
         # Feed camera results to position tracker for hybrid tracking
         self.position_tracker.set_camera_line_result(self.camera_line_result)
@@ -604,10 +639,10 @@ class RobotController(CameraLineFollowingMixin):
         Execute a more reliable, time-based arcing turn for general navigation.
         This removes dependency on vision for turn completion, making it more robust.
         """
-        # Define a fixed duration for the arcing turn to approximate 90 degrees.
+        # Define a longer duration for slower, more controlled turns
         # This provides more consistent turning behavior.
-        ARCING_TURN_DURATION_S = 1.2
-        TURN_TIMEOUT_S = 2.0  # A shorter timeout as a safeguard.
+        ARCING_TURN_DURATION_S = 2.0  # Increased from 1.2 to 2.0 for slower turns
+        TURN_TIMEOUT_S = 3.0  # Increased timeout to match longer turn duration
 
         time_in_turn = time.time() - self.turn_start_time
 
@@ -671,6 +706,9 @@ class RobotController(CameraLineFollowingMixin):
         elif self.state == "obstacle_turn_around":
             self.position_tracker.set_moving(True)
             self._execute_180_turn()
+        elif self.state == "destination_alignment":
+            self.position_tracker.set_moving(True)
+            self._execute_destination_alignment()
         elif self.state == "mission_complete":
             self.audio_feedback.speak("Mission complete.")
             self._stop_motors()
@@ -738,18 +776,20 @@ class RobotController(CameraLineFollowingMixin):
 
     def _pivot_corner_turn(self, corner_direction: str, line_error: int):
         """Turn in place like a tank - pure rotation."""
+        slow_turn_speed = CORNER_SPEED  # Use even slower corner speed for pivot turns
+        
         if corner_direction == "left":
             # Rotate counter-clockwise (left turn)
-            fl_speed = -TURN_SPEED    # Front left: reverse
-            fr_speed = TURN_SPEED     # Front right: forward
-            bl_speed = -TURN_SPEED    # Back left: reverse  
-            br_speed = TURN_SPEED     # Back right: forward
+            fl_speed = -slow_turn_speed    # Front left: reverse
+            fr_speed = slow_turn_speed     # Front right: forward
+            bl_speed = -slow_turn_speed    # Back left: reverse  
+            br_speed = slow_turn_speed     # Back right: forward
         else:  # right turn
             # Rotate clockwise (right turn)
-            fl_speed = TURN_SPEED     # Front left: forward
-            fr_speed = -TURN_SPEED    # Front right: reverse
-            bl_speed = TURN_SPEED     # Back left: forward
-            br_speed = -TURN_SPEED    # Back right: reverse
+            fl_speed = slow_turn_speed     # Front left: forward
+            fr_speed = -slow_turn_speed    # Front right: reverse
+            bl_speed = slow_turn_speed     # Back left: forward
+            br_speed = -slow_turn_speed    # Back right: reverse
         
         self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
         return True
@@ -830,8 +870,8 @@ class RobotController(CameraLineFollowingMixin):
         Commands motor speeds for a smooth, car-like arcing turn.
         This uses omni-wheel kinematics for combined forward and rotational motion.
         """
-        vx = BASE_SPEED * 0.6  # Reduced from 0.8 to 0.6 for slower forward speed during turns
-        omega = TURN_SPEED     # Rotational speed for the turn
+        vx = BASE_SPEED * 0.3  # Much slower forward speed during turns for better control
+        omega = TURN_SPEED * 0.8     # Reduce rotational speed for smoother turns
 
         # Based on the kinematic model in camera_line_follower, a left
         # turn requires a negative omega to make the right wheels spin faster.
@@ -856,21 +896,85 @@ class RobotController(CameraLineFollowingMixin):
         Commands motor speeds for a precise pivot turn in place.
         This rotates the robot without forward motion for maximum precision.
         """
-        # Use the same pivot logic as the existing _pivot_corner_turn method
+        # Use slower corner speed for controlled precision turning
+        slow_turn_speed = CORNER_SPEED
+        
         if direction == "left":
             # Rotate counter-clockwise (left turn)
-            fl_speed = -TURN_SPEED    # Front left: reverse
-            fr_speed = TURN_SPEED     # Front right: forward
-            bl_speed = -TURN_SPEED    # Back left: reverse  
-            br_speed = TURN_SPEED     # Back right: forward
+            fl_speed = -slow_turn_speed    # Front left: reverse
+            fr_speed = slow_turn_speed     # Front right: forward
+            bl_speed = -slow_turn_speed    # Back left: reverse  
+            br_speed = slow_turn_speed     # Back right: forward
         else:  # right turn
             # Rotate clockwise (right turn)
-            fl_speed = TURN_SPEED     # Front left: forward
-            fr_speed = -TURN_SPEED    # Front right: reverse
-            bl_speed = TURN_SPEED     # Back left: forward
-            br_speed = -TURN_SPEED    # Back right: reverse
+            fl_speed = slow_turn_speed     # Front left: forward
+            fr_speed = -slow_turn_speed    # Front right: reverse
+            bl_speed = slow_turn_speed     # Back left: forward
+            br_speed = -slow_turn_speed    # Back right: reverse
         
         self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+
+    def _execute_destination_alignment(self):
+        """
+        Turn at destination until line is found and centered.
+        """
+        MAX_TURN_DURATION = 8.0   # Reduced timeout for destination alignment
+        MIN_TURN_DURATION = 0.5    # Shorter minimum for destination
+        
+        time_in_turn = time.time() - self.turn_start_time
+        
+        # Get current camera frame to check for line
+        frame = self.camera_line_follower.get_camera_frame()
+        line_found_and_centered = False
+        
+        if frame is not None and time_in_turn > MIN_TURN_DURATION:
+            # Prepare robot state for line detection
+            current_cell = self.position_tracker.get_current_cell()
+            robot_state = {
+                'position': current_cell,
+                'direction': self.position_tracker.current_direction,
+                'motor_speeds': {'left': self.motor_speeds.get('fl', 0), 'right': self.motor_speeds.get('fr', 0)},
+                'timestamp': time.time()
+            }
+            
+            encoder_counts = self.motor_controller.get_encoder_counts() if self.motor_controller else {}
+            
+            # Detect line with full processing
+            line_result = self.camera_line_follower.detect_line(frame, robot_state, encoder_counts)
+            line_found = line_result.get('line_detected', False)
+            
+            if line_found:
+                line_offset = line_result.get('line_offset', 1.0)
+                # Line must be well-centered for destination alignment
+                if abs(line_offset) < 0.15:  # Stricter centering requirement
+                    line_found_and_centered = True
+                    if self.debug:
+                        print(f"DESTINATION: Line found and centered! Offset: {line_offset:.3f}")
+        
+        if time_in_turn < MAX_TURN_DURATION and not line_found_and_centered:
+            # Continue turning slowly - pivot turn (rotate in place)
+            slow_turn_speed = CORNER_SPEED  # Use slower speed for precise alignment
+            fl_speed = slow_turn_speed     # Front left: forward
+            fr_speed = -slow_turn_speed    # Front right: reverse
+            bl_speed = slow_turn_speed     # Back left: forward
+            br_speed = -slow_turn_speed    # Back right: reverse
+            
+            self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+            
+            if self.debug and int(time_in_turn * 2) != int((time_in_turn - 0.1) * 2):  # Print every 0.5 seconds
+                print(f"DESTINATION ALIGNMENT: Turning to find line: {time_in_turn:.1f}s / {MAX_TURN_DURATION}s")
+        else:
+            # Alignment complete - either line found or timed out
+            if line_found_and_centered:
+                print("Destination alignment complete! Line centered.")
+                self.audio_feedback.speak("Mission complete! Line aligned.")
+            else:
+                print("Destination alignment timed out.")
+                self.audio_feedback.speak("Mission complete! Alignment timeout.")
+            
+            self._stop_motors()
+            self.state = "mission_complete"
+            time.sleep(0.5)  # Brief pause to stabilize
 
     def _execute_180_turn(self):
         """
@@ -1020,6 +1124,9 @@ def main():
                 'line_offset': robot.camera_line_result.get('line_offset', 0),
                 'is_at_intersection': robot.camera_line_result.get('is_at_intersection', False),
                 'intersection_count': robot.position_tracker.intersection_count,
+                'using_prediction': robot.camera_line_result.get('using_prediction', False),
+                'buffer_status': robot.camera_line_result.get('buffer_status', {}),
+                'pid_metrics': robot.camera_line_follower.get_pid_performance_metrics() if hasattr(robot, 'camera_line_follower') else {},
             },
             'obstacle_avoidance': {
                 'enabled': FEATURES['OBSTACLE_AVOIDANCE_ENABLED'],
@@ -1234,6 +1341,78 @@ def main():
                 'frame_size': f"{frame.shape[1]}x{frame.shape[0]}"
             }
         })
+
+    @app.route('/tune_pid', methods=['POST'])
+    def tune_pid():
+        """Adjust adaptive PID controller tuning parameters."""
+        if not FEATURES['CAMERA_LINE_FOLLOWING_ENABLED'] or not hasattr(robot, 'camera_line_follower'):
+            return jsonify({
+                'status': 'error',
+                'message': 'Camera line follower not available'
+            }), 400
+        
+        data = request.get_json()
+        
+        try:
+            kp = data.get('kp')
+            ki = data.get('ki')
+            kd = data.get('kd')
+            
+            # Validate parameters
+            if kp is not None and (kp < 0 or kp > 5.0):
+                raise ValueError("kp must be between 0 and 5.0")
+            if ki is not None and (ki < 0 or ki > 1.0):
+                raise ValueError("ki must be between 0 and 1.0")
+            if kd is not None and (kd < 0 or kd > 2.0):
+                raise ValueError("kd must be between 0 and 2.0")
+            
+            # Update PID tuning
+            robot.camera_line_follower.pid.set_tuning(kp=kp, ki=ki, kd=kd)
+            
+            # Get current status
+            pid_status = robot.camera_line_follower.get_pid_status()
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'PID tuning updated successfully',
+                'current_tuning': pid_status['base_gains']
+            })
+            
+        except ValueError as e:
+            return jsonify({
+                'status': 'error',
+                'message': str(e)
+            }), 400
+        except Exception as e:
+            return jsonify({
+                'status': 'error',
+                'message': f'Failed to update PID tuning: {str(e)}'
+            }), 500
+
+    @app.route('/get_pid_status')
+    def get_pid_status():
+        """Get current adaptive PID controller status and performance metrics."""
+        if not FEATURES['CAMERA_LINE_FOLLOWING_ENABLED'] or not hasattr(robot, 'camera_line_follower'):
+            return jsonify({
+                'status': 'error',
+                'message': 'Camera line follower not available'
+            }), 400
+        
+        try:
+            pid_status = robot.camera_line_follower.get_pid_status()
+            pid_metrics = robot.camera_line_follower.get_pid_performance_metrics()
+            
+            return jsonify({
+                'status': 'success',
+                'pid_status': pid_status,
+                'performance_metrics': pid_metrics
+            })
+            
+        except Exception as e:
+            return jsonify({
+                'status': 'error',
+                'message': f'Failed to get PID status: {str(e)}'
+            }), 500
 
     @app.route('/grid_feed')
     def grid_feed():
