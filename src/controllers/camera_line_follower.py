@@ -473,9 +473,50 @@ class CameraLineFollower:
         # Morphological operations kernel
         self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         
-        # Region of Interest (ROI) settings.
-        # This is a critical parameter to prevent the camera from looking too far ahead.
-        # We are focusing on the area from 30% down to 80% down the frame.
+        # LOOK-AHEAD ZONE CONFIGURATION
+        # Far zone: For detecting upcoming intersections and obstacles
+        self.FAR_ZONE_START = 0.10    # Top 10% to 40% for look-ahead
+        self.FAR_ZONE_END = 0.40
+        
+        # Near zone: For actual line following (where robot currently is)
+        self.NEAR_ZONE_START = 0.60   # 60% to 80% for current position
+        self.NEAR_ZONE_END = 0.80
+        
+        # Middle zone (40% to 60%) is ignored - transition area
+        
+        # Look-ahead timing parameters
+        self.FRAMES_TO_INTERSECTION = 15  # Frames between detection and arrival
+        self.intersection_countdown = 0
+        self.upcoming_intersection_type = None  # 'left', 'right', 'T', or None
+        
+        # Box detection look-ahead
+        self.box_detected_ahead = False
+        self.box_countdown = 0
+        self.FRAMES_TO_BOX = 20  # Frames between box detection and arrival
+        
+        # Box approach parameters
+        self.box_approach_active = False
+        self.box_in_position = False
+        self.BOX_PICKUP_ZONE = 0.90  # Box should be in bottom 10% of frame for pickup
+        
+        # Blue and yellow box detection - primarily blue
+        self.BOX_COLOR_RANGES = [
+            # Blue ranges (primary color)
+            (np.array([100, 100, 50]), np.array([130, 255, 255])),  # Standard blue
+            (np.array([90, 50, 50]), np.array([120, 255, 255])),    # Wider blue range
+            # Yellow ranges (secondary color)
+            (np.array([20, 100, 100]), np.array([35, 255, 255])),   # Yellow
+            (np.array([15, 50, 50]), np.array([40, 255, 255])),     # Wider yellow range
+        ]
+        self.MIN_BOX_AREA = 500  # Minimum area to consider as box
+        
+        # Path correction parameters
+        self.path_correction_enabled = True
+        self.turn_direction_pattern = ['right', 'right', 'left', 'right']  # Example pattern
+        self.current_turn_index = 0
+        self.intersections_seen = 0
+        
+        # Region of Interest (ROI) settings - DEPRECATED but kept for compatibility
         self.ROI_START_RATIO = 0.30   # Start ROI at 30% down the frame 
         self.ARM_EXCLUSION_RATIO = 0.80  # Bottom 20% is arm area
         
@@ -692,6 +733,329 @@ class CameraLineFollower:
         except Exception as e:
             print(f"Error capturing frame: {e}")
             return None
+
+    def detect_line_with_lookahead(self, frame: Optional[np.ndarray] = None) -> Dict:
+        """
+        Simplified line detection with look-ahead strategy.
+        Uses two zones: far zone for upcoming events, near zone for current line following.
+        """
+        self.frames_processed += 1
+        
+        if frame is None:
+            frame = self.get_camera_frame()
+            if frame is None:
+                return self._get_fallback_result()
+
+        height, width, _ = frame.shape
+        
+        # Define zones
+        far_zone_start = int(height * self.FAR_ZONE_START)
+        far_zone_end = int(height * self.FAR_ZONE_END)
+        near_zone_start = int(height * self.NEAR_ZONE_START)
+        near_zone_end = int(height * self.NEAR_ZONE_END)
+        
+        # Extract zones
+        far_zone = frame[far_zone_start:far_zone_end, :]
+        near_zone = frame[near_zone_start:near_zone_end, :]
+        
+        # Process near zone for line following
+        near_zone_result = self._process_zone_simple(near_zone, zone_type='near')
+        
+        # Process far zone for intersection detection
+        far_zone_result = self._process_zone_simple(far_zone, zone_type='far')
+        
+        # Update countdowns
+        if self.intersection_countdown > 0:
+            self.intersection_countdown -= 1
+            if self.debug and self.intersection_countdown % 5 == 0:
+                print(f"Intersection arriving in {self.intersection_countdown} frames")
+        
+        if self.box_countdown > 0:
+            self.box_countdown -= 1
+            
+        # Check for new intersection in far zone
+        if far_zone_result.get('is_intersection', False) and self.intersection_countdown == 0:
+            self.intersection_countdown = self.FRAMES_TO_INTERSECTION
+            self.upcoming_intersection_type = far_zone_result.get('intersection_type', 'T')
+            if self.debug:
+                print(f"Intersection detected ahead! Type: {self.upcoming_intersection_type}")
+        
+        # Check for box detection
+        box_in_far = far_zone_result.get('box_detected', False)
+        box_in_near = near_zone_result.get('box_detected', False)
+        
+        # Handle box approach logic
+        if box_in_far and not self.box_approach_active:
+            # Start box approach when first detected in far zone
+            self.box_approach_active = True
+            if self.debug:
+                print("Box detected ahead! Starting approach...")
+        
+        # Check if box is in pickup position (very bottom of near zone)
+        if box_in_near and near_zone_result.get('box_info', {}).get('in_pickup_position', False):
+            self.box_in_position = True
+            if self.debug:
+                box_y_ratio = near_zone_result['box_info']['bottom_y_ratio']
+                print(f"Box in pickup position! Bottom at {box_y_ratio:.2f} of near zone")
+        else:
+            self.box_in_position = False
+        
+        # Build combined result
+        result = {
+            'line_detected': near_zone_result.get('line_detected', False),
+            'line_offset': near_zone_result.get('line_offset', 0.0),
+            'line_center_x': near_zone_result.get('line_center_x', width // 2),
+            'line_confidence': near_zone_result.get('confidence', 0.0),
+            'intersection_ahead': self.intersection_countdown > 0,
+            'intersection_countdown': self.intersection_countdown,
+            'intersection_now': self.intersection_countdown == 1,  # Next frame will be at intersection
+            'upcoming_intersection_type': self.upcoming_intersection_type,
+            'far_zone_intersection': far_zone_result.get('is_intersection', False),
+            'box_detected': box_in_near or box_in_far,
+            'box_in_far': box_in_far,
+            'box_in_near': box_in_near,
+            'box_approach_active': self.box_approach_active,
+            'box_in_position': self.box_in_position,
+            'box_info': near_zone_result.get('box_info', {}) if box_in_near else far_zone_result.get('box_info', {}),
+            'status': 'box_approach' if self.box_approach_active else ('line_following' if near_zone_result.get('line_detected') else 'line_lost')
+        }
+        
+        # Create debug visualization
+        if self.debug:
+            result['processed_frame'] = self._draw_lookahead_debug(
+                frame, near_zone_result, far_zone_result, 
+                near_zone_start, near_zone_end, far_zone_start, far_zone_end
+            )
+        
+        return result
+    
+    def _process_zone_simple(self, zone: np.ndarray, zone_type: str = 'near') -> Dict:
+        """
+        Simple zone processing for either near (line following) or far (intersection detection).
+        Also detects boxes for pickup.
+        """
+        if zone is None or zone.shape[0] == 0:
+            return {'line_detected': False, 'is_intersection': False, 'box_detected': False}
+            
+        # Convert to grayscale and threshold for line detection
+        gray = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, binary = cv2.threshold(blurred, self.BLACK_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+        
+        # Basic morphological operations to clean up
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        
+        # Find contours for line
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Also check for box (yellow object)
+        box_detected, box_info = self._detect_box_in_zone(zone)
+        
+        if not contours:
+            return {
+                'line_detected': False, 
+                'is_intersection': False,
+                'box_detected': box_detected,
+                'box_info': box_info
+            }
+        
+        # Filter small contours
+        min_area = 100 if zone_type == 'near' else 200
+        valid_contours = [c for c in contours if cv2.contourArea(c) > min_area]
+        
+        if not valid_contours:
+            return {
+                'line_detected': False, 
+                'is_intersection': False,
+                'box_detected': box_detected,
+                'box_info': box_info
+            }
+        
+        # Get largest contour
+        largest_contour = max(valid_contours, key=cv2.contourArea)
+        x, y, w, h = cv2.boundingRect(largest_contour)
+        
+        zone_height, zone_width = zone.shape[:2]
+        
+        # Calculate line center
+        line_center_x = x + w // 2
+        line_offset = (line_center_x - zone_width // 2) / (zone_width // 2)
+        
+        # Simple intersection detection
+        is_intersection = False
+        intersection_type = None
+        
+        if zone_type == 'far':
+            # Check for intersection patterns
+            width_ratio = w / zone_width
+            height_ratio = h / zone_height
+            
+            # T-intersection: very wide line
+            if width_ratio > 0.7:
+                is_intersection = True
+                intersection_type = 'T'
+            # Multiple large contours might indicate intersection
+            elif len(valid_contours) >= 2:
+                second_largest = sorted(valid_contours, key=cv2.contourArea, reverse=True)[1]
+                if cv2.contourArea(second_largest) > cv2.contourArea(largest_contour) * 0.5:
+                    is_intersection = True
+                    intersection_type = 'split'
+        
+        return {
+            'line_detected': True,
+            'line_center_x': line_center_x,
+            'line_offset': line_offset,
+            'confidence': 1.0,
+            'is_intersection': is_intersection,
+            'intersection_type': intersection_type,
+            'contour': largest_contour,
+            'bbox': (x, y, w, h),
+            'box_detected': box_detected,
+            'box_info': box_info
+        }
+    
+    def _detect_box_in_zone(self, zone: np.ndarray) -> Tuple[bool, Dict]:
+        """
+        Detect blue/yellow box in the given zone.
+        Returns (box_detected, box_info)
+        """
+        # Convert to HSV for color detection
+        hsv = cv2.cvtColor(zone, cv2.COLOR_BGR2HSV)
+        
+        # Create combined mask for all color ranges
+        combined_mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+        
+        # Add each color range to the combined mask
+        for lower, upper in self.BOX_COLOR_RANGES:
+            mask = cv2.inRange(hsv, lower, upper)
+            combined_mask = cv2.bitwise_or(combined_mask, mask)
+        
+        # Clean up mask
+        kernel = np.ones((5, 5), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+        
+        # Find contours
+        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return False, {}
+        
+        # Find largest colored contour
+        largest_contour = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest_contour)
+        
+        if area < self.MIN_BOX_AREA:
+            return False, {}
+        
+        # Get box properties
+        x, y, w, h = cv2.boundingRect(largest_contour)
+        zone_height, zone_width = zone.shape[:2]
+        
+        # Calculate box position relative to zone
+        box_center_x = x + w // 2
+        box_center_y = y + h // 2
+        box_bottom_y = y + h
+        
+        # Check if box is in pickup position (very bottom of frame)
+        in_pickup_position = (box_bottom_y / zone_height) > 0.8
+        
+        # Determine dominant color (blue or yellow)
+        roi = hsv[y:y+h, x:x+w]
+        blue_pixels = 0
+        yellow_pixels = 0
+        
+        # Count blue pixels
+        for lower, upper in self.BOX_COLOR_RANGES[:2]:  # First two are blue ranges
+            mask = cv2.inRange(roi, lower, upper)
+            blue_pixels += cv2.countNonZero(mask)
+        
+        # Count yellow pixels
+        for lower, upper in self.BOX_COLOR_RANGES[2:]:  # Last two are yellow ranges
+            mask = cv2.inRange(roi, lower, upper)
+            yellow_pixels += cv2.countNonZero(mask)
+        
+        dominant_color = 'blue' if blue_pixels > yellow_pixels else 'yellow'
+        
+        return True, {
+            'bbox': (x, y, w, h),
+            'area': area,
+            'center': (box_center_x, box_center_y),
+            'bottom_y_ratio': box_bottom_y / zone_height,
+            'in_pickup_position': in_pickup_position,
+            'contour': largest_contour,
+            'dominant_color': dominant_color,
+            'color_ratio': blue_pixels / (blue_pixels + yellow_pixels + 1)  # Avoid division by zero
+        }
+    
+    def _draw_lookahead_debug(self, frame, near_result, far_result, 
+                              near_start, near_end, far_start, far_end):
+        """Draw debug overlay showing both zones."""
+        debug_frame = frame.copy()
+        height, width = frame.shape[:2]
+        
+        # Draw zone boundaries
+        cv2.line(debug_frame, (0, far_start), (width, far_start), (255, 255, 0), 2)
+        cv2.line(debug_frame, (0, far_end), (width, far_end), (255, 255, 0), 2)
+        cv2.putText(debug_frame, "FAR ZONE (Look-ahead)", (10, far_start + 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        
+        cv2.line(debug_frame, (0, near_start), (width, near_start), (0, 255, 0), 2)
+        cv2.line(debug_frame, (0, near_end), (width, near_end), (0, 255, 0), 2)
+        cv2.putText(debug_frame, "NEAR ZONE (Current)", (10, near_start + 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        # Draw center line
+        cv2.line(debug_frame, (width//2, 0), (width//2, height), (128, 128, 128), 1)
+        
+        # Draw detected lines in each zone
+        if near_result.get('line_detected'):
+            x, y, w, h = near_result['bbox']
+            cv2.rectangle(debug_frame, (x, y + near_start), (x + w, y + h + near_start), 
+                         (0, 255, 0), 2)
+            center_x = x + w // 2
+            cv2.circle(debug_frame, (center_x, near_start + (near_end - near_start)//2), 
+                      5, (0, 255, 0), -1)
+        
+        if far_result.get('line_detected'):
+            x, y, w, h = far_result['bbox']
+            cv2.rectangle(debug_frame, (x, y + far_start), (x + w, y + h + far_start), 
+                         (255, 255, 0), 2)
+            if far_result.get('is_intersection'):
+                cv2.putText(debug_frame, f"INTERSECTION: {far_result.get('intersection_type', 'unknown')}", 
+                           (x, y + far_start - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        
+        # Draw box detection
+        if near_result.get('box_detected'):
+            box_info = near_result['box_info']
+            x, y, w, h = box_info['bbox']
+            cv2.rectangle(debug_frame, (x, y + near_start), (x + w, y + h + near_start), 
+                         (0, 165, 255), 3)  # Orange for box
+            cv2.putText(debug_frame, f"BOX {box_info['bottom_y_ratio']:.2f}", 
+                       (x, y + near_start - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+            if box_info.get('in_pickup_position'):
+                cv2.putText(debug_frame, "PICKUP POSITION!", 
+                           (x, y + h + near_start + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        if far_result.get('box_detected'):
+            box_info = far_result['box_info']
+            x, y, w, h = box_info['bbox']
+            cv2.rectangle(debug_frame, (x, y + far_start), (x + w, y + h + far_start), 
+                         (0, 165, 255), 2)  # Orange for box
+            cv2.putText(debug_frame, "BOX AHEAD", 
+                       (x, y + far_start - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+        
+        # Draw status
+        status_y = 30
+        cv2.putText(debug_frame, f"Line Offset: {near_result.get('line_offset', 0):.3f}", 
+                   (10, status_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        if self.intersection_countdown > 0:
+            cv2.putText(debug_frame, f"INTERSECTION IN: {self.intersection_countdown} frames", 
+                       (10, status_y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        
+        return debug_frame
 
     def detect_line(self, frame: Optional[np.ndarray] = None, robot_state: Dict = None, encoder_counts: Dict = None) -> Dict:
         """
@@ -1349,6 +1713,201 @@ class CameraLineFollower:
                 # Update intersection state for next iteration
                 self.last_intersection_state = is_at_intersection
 
+    def set_path_to_destination(self, turn_sequence: List[str]):
+        """
+        Set the turn sequence to reach the destination.
+        
+        Args:
+            turn_sequence: List of turn directions ['left', 'right', 'straight'] for each intersection
+        
+        Example:
+            # To go right, right, left, right at intersections:
+            camera_line_follower.set_path_to_destination(['right', 'right', 'left', 'right'])
+        """
+        self.turn_direction_pattern = turn_sequence
+        self.current_turn_index = 0
+        self.intersections_seen = 0
+        if self.debug:
+            print(f"Path updated: {turn_sequence}")
+    
+    def get_next_turn_direction(self) -> str:
+        """Get the next turn direction from the pattern."""
+        if not self.path_correction_enabled or not self.turn_direction_pattern:
+            return 'right'  # Default turn
+        
+        if self.current_turn_index < len(self.turn_direction_pattern):
+            direction = self.turn_direction_pattern[self.current_turn_index]
+            return direction
+        else:
+            # Pattern complete, default to right
+            return 'right'
+    
+    def update_path_dynamically(self, current_position: Tuple[int, int], 
+                               destination: Tuple[int, int], 
+                               current_direction: str = 'N'):
+        """
+        Dynamically update the path based on current position and destination.
+        
+        Args:
+            current_position: (x, y) current grid position
+            destination: (x, y) destination grid position
+            current_direction: Current facing direction ('N', 'S', 'E', 'W')
+        """
+        # Simple pathfinding logic - can be made more sophisticated
+        dx = destination[0] - current_position[0]
+        dy = destination[1] - current_position[1]
+        
+        new_path = []
+        
+        # Determine turn sequence based on position difference
+        # This is a simple example - you can make it more sophisticated
+        if current_direction == 'N':  # Facing North
+            if dx > 0:  # Need to go East
+                new_path.append('right')
+            elif dx < 0:  # Need to go West
+                new_path.append('left')
+            else:  # dx == 0
+                if dy < 0:  # Need to go South (turn around)
+                    new_path.append('right')  # or 'left', then another turn
+                else:
+                    new_path.append('straight')
+        elif current_direction == 'E':  # Facing East
+            if dy > 0:  # Need to go North
+                new_path.append('left')
+            elif dy < 0:  # Need to go South
+                new_path.append('right')
+            else:  # dy == 0
+                if dx < 0:  # Need to go West (turn around)
+                    new_path.append('right')
+                else:
+                    new_path.append('straight')
+        # Add similar logic for 'S' and 'W' directions
+        
+        # Update the path
+        self.set_path_to_destination(new_path)
+        
+        if self.debug:
+            print(f"Path dynamically updated from {current_position} to {destination}")
+            print(f"New path: {new_path}")
+    
+    def get_path_status(self) -> Dict:
+        """Get current path navigation status."""
+        return {
+            'path_correction_enabled': self.path_correction_enabled,
+            'turn_pattern': self.turn_direction_pattern,
+            'current_turn_index': self.current_turn_index,
+            'intersections_seen': self.intersections_seen,
+            'next_turn': self.get_next_turn_direction() if self.current_turn_index < len(self.turn_direction_pattern) else None,
+            'turns_remaining': len(self.turn_direction_pattern) - self.current_turn_index
+        }
+    
+    def get_motor_speeds_lookahead(self, result: Dict, base_speed: int = 60) -> Tuple[int, int, int, int]:
+        """
+        Simplified motor control using look-ahead strategy.
+        Returns motor speeds and action recommendation.
+        """
+        # PRIORITY 1: Box pickup positioning
+        if result.get('box_approach_active', False):
+            if result.get('box_in_position', False):
+                # Box is at the very bottom of frame - STOP for pickup
+                if self.debug:
+                    print("BOX IN PICKUP POSITION - STOP")
+                # Signal that we're ready for pickup
+                result['ready_for_pickup'] = True
+                return (0, 0, 0, 0)
+            elif result.get('box_in_near', False):
+                # Box is in near zone but not at bottom yet - creep forward slowly
+                box_info = result.get('box_info', {})
+                box_y_ratio = box_info.get('bottom_y_ratio', 0.5)
+                
+                # Very slow approach speed - slower as we get closer
+                approach_speed = int(base_speed * 0.2 * (1.0 - box_y_ratio))
+                approach_speed = max(10, approach_speed)  # Minimum creep speed
+                
+                if self.debug:
+                    print(f"Box approach - creeping forward at speed {approach_speed}, box at {box_y_ratio:.2f}")
+                
+                # Still try to stay centered on line if visible
+                line_offset = result.get('line_offset', 0.0)
+                turn_factor = line_offset * 0.3  # Gentle corrections
+                
+                left_speed = int(approach_speed * (1 + turn_factor))
+                right_speed = int(approach_speed * (1 - turn_factor))
+                
+                return (left_speed, right_speed, left_speed, right_speed)
+            else:
+                # Box detected in far zone - continue normal speed but prepare
+                if self.debug:
+                    print("Box detected ahead - approaching at normal speed")
+                # Continue with normal line following below
+        
+        # PRIORITY 2: Intersection handling
+        if result.get('intersection_now', False) and not result.get('box_approach_active', False):
+            # Get the next turn direction from the pattern
+            turn_direction = self.get_next_turn_direction()
+            turn_speed = base_speed // 2
+            
+            if self.debug:
+                print(f"EXECUTING INTERSECTION TURN - {turn_direction.upper()}")
+            
+            # Update turn index for next intersection
+            self.current_turn_index += 1
+            self.intersections_seen += 1
+            
+            # Execute turn based on direction
+            if turn_direction == 'right':
+                return (turn_speed, -turn_speed, turn_speed, -turn_speed)
+            elif turn_direction == 'left':
+                return (-turn_speed, turn_speed, -turn_speed, turn_speed)
+            elif turn_direction == 'straight':
+                # Go straight through intersection
+                return (base_speed, base_speed, base_speed, base_speed)
+            else:
+                # Default to right turn if unknown direction
+                return (turn_speed, -turn_speed, turn_speed, -turn_speed)
+        
+        # PRIORITY 3: Normal line following
+        line_offset = result.get('line_offset', 0.0)
+        line_detected = result.get('line_detected', False)
+        
+        if not line_detected:
+            # Simple line recovery - turn in place to find line
+            if self.line_lost_counter < 10:
+                search_dir = 1 if (self.line_lost_counter // 3) % 2 == 0 else -1
+                turn_speed = base_speed // 3
+                self.line_lost_counter += 1
+                return (turn_speed * search_dir, -turn_speed * search_dir, 
+                       turn_speed * search_dir, -turn_speed * search_dir)
+            else:
+                # Stop if line lost for too long
+                return (0, 0, 0, 0)
+        
+        # Reset line lost counter
+        self.line_lost_counter = 0
+        
+        # Simple proportional control for line following
+        turn_factor = line_offset * 0.5  # Simple P control
+        
+        # Calculate differential speeds
+        left_speed = int(base_speed * (1 + turn_factor))
+        right_speed = int(base_speed * (1 - turn_factor))
+        
+        # Clamp speeds
+        left_speed = max(-100, min(100, left_speed))
+        right_speed = max(-100, min(100, right_speed))
+        
+        # Slow down if intersection is approaching (but not during box approach)
+        if result.get('intersection_ahead', False) and not result.get('box_approach_active', False):
+            countdown = result.get('intersection_countdown', 0)
+            if countdown < 5:  # Start slowing down 5 frames before intersection
+                slow_factor = countdown / 5.0  # Linear slowdown
+                left_speed = int(left_speed * (0.5 + 0.5 * slow_factor))
+                right_speed = int(right_speed * (0.5 + 0.5 * slow_factor))
+                if self.debug:
+                    print(f"Slowing for intersection: {slow_factor:.2f}")
+        
+        return (left_speed, right_speed, left_speed, right_speed)
+    
     def get_motor_speeds(self, result: Dict, base_speed: int = 60) -> Tuple[int, int, int, int]:
         """
         Enhanced motor speed calculation with aggressive line centering.
@@ -1520,6 +2079,14 @@ class CameraLineFollower:
         """Clear the intersection detection signal after main controller handles it."""
         self.intersection_detected_for_main = False
     
+    def reset_box_approach(self):
+        """Reset box approach state after successful pickup."""
+        self.box_approach_active = False
+        self.box_in_position = False
+        self.box_countdown = 0
+        if self.debug:
+            print("Box approach state reset")
+    
     def clear_line_memory_buffer(self):
         """Clear the line memory buffer - useful for mission restart."""
         self.line_memory_buffer.clear_buffer()
@@ -1588,6 +2155,34 @@ class CameraLineFollowingMixin:
         
         # Send motor speeds
         self.motor_controller.send_motor_speeds(fl, fr, bl, br)
+    
+    def follow_line_with_lookahead(self, frame, base_speed=LINE_FOLLOW_SPEED):
+        """
+        Uses the simplified look-ahead strategy for line following.
+        
+        Args:
+            frame: The camera frame to process.
+            base_speed: The base speed for the robot.
+            
+        Returns:
+            dict: Result containing line detection info and intersection status
+        """
+        if frame is None or not hasattr(self, 'camera_line_follower'):
+            return {'status': 'no_camera'}
+
+        # Use the new look-ahead detection
+        self.camera_line_result = self.camera_line_follower.detect_line_with_lookahead(frame)
+        
+        # Get motor speeds using look-ahead strategy
+        fl, fr, bl, br = self.camera_line_follower.get_motor_speeds_lookahead(
+            self.camera_line_result,
+            base_speed=base_speed
+        )
+        
+        # Send motor speeds
+        self.motor_controller.send_motor_speeds(fl, fr, bl, br)
+        
+        return self.camera_line_result
 
     def get_camera_line_status(self) -> Dict:
         """Return the latest line detection result."""
