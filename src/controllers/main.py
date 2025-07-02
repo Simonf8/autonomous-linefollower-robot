@@ -1196,6 +1196,13 @@ def main():
         # Get audio feedback status
         audio_status = robot.audio_feedback.get_status()
 
+        box_states_serializable = {}
+        if robot.box_handler:
+            for box_id, box_info in robot.box_handler.box_states.items():
+                info_copy = box_info.copy()
+                info_copy['state'] = info_copy['state'].value
+                box_states_serializable[box_id] = info_copy
+
         data = {
             'state': robot.state,
             'x': x,
@@ -1237,7 +1244,7 @@ def main():
             },
             'box_mission': {
                 'enabled': FEATURES['BOX_MISSION_ENABLED'],
-                'boxes': robot.box_handler.box_states if robot.box_handler else {},
+                'boxes': box_states_serializable,
                 'has_package': robot.box_handler.has_package if robot.box_handler else False
             }
         }
@@ -1517,6 +1524,7 @@ def main():
                 path = robot.path
                 corner_cell = robot.corner_cell_to_highlight # Get the corner cell to highlight
                 boxes = robot.box_handler.box_states if robot.box_handler else {}
+                has_package = robot.box_handler.has_package if robot.box_handler else False
                 
                 grid_img = generate_grid_image(
                     pathfinder=robot.pathfinder,
@@ -1525,7 +1533,8 @@ def main():
                     start_cell=START_CELL,
                     end_cell=END_CELL,
                     corner_cell=corner_cell,
-                    boxes=boxes
+                    boxes=boxes,
+                    has_package=has_package
                 )
                 
                 _, buffer = cv2.imencode('.jpg', grid_img)
@@ -1537,7 +1546,7 @@ def main():
                 time.sleep(0.1)
         return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-    def generate_grid_image(pathfinder, robot_cell, path, start_cell, end_cell, corner_cell=None, boxes=None):
+    def generate_grid_image(pathfinder, robot_cell, path, start_cell, end_cell, corner_cell=None, boxes=None, has_package=False):
         """Generates the grid image for the web UI."""
         grid = np.array(pathfinder.get_grid())
         cell_size = 20
@@ -1558,7 +1567,7 @@ def main():
                     color = (0, 255, 255) # Yellow for available boxes
                 elif box_info['state'].value == 'delivered':
                     loc = box_info['dropoff_location']
-                    color = (255, 165, 0) # Orange for delivered boxes
+                    color = (0, 0, 255) # Red for delivered boxes
                 else: # Collected, on the robot
                     continue
 
@@ -1623,7 +1632,8 @@ def main():
             arrow_end_y = int(center_y + arrow_length * np.sin(angle))
             
             # Draw the main body of the robot as a circle
-            cv2.circle(grid_img, (center_x, center_y), cell_size // 4, (203, 102, 255), -1)
+            robot_color = (0, 255, 255) if has_package else (203, 102, 255)
+            cv2.circle(grid_img, (center_x, center_y), cell_size // 4, robot_color, -1)
             
             # Draw a white border around the robot for better visibility
             cv2.circle(grid_img, (center_x, center_y), cell_size // 4, (255, 255, 255), 2)
