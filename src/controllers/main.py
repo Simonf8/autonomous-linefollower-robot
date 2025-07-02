@@ -27,6 +27,7 @@ from camera_obstacle_avoidance import CameraObstacleAvoidance
 # ================================
 # Enable/disable features for easy testing and debugging
 FEATURES = {
+    'BOX_MISSION_ENABLED': True,
     'OBJECT_DETECTION_ENABLED': False,
     'OBSTACLE_AVOIDANCE_ENABLED': True,  # Enabled for line blocking detection
     'VISION_SYSTEM_ENABLED': False, # Disabled to use encoders
@@ -57,6 +58,10 @@ MOTOR_TRIMS =  {
     'right': 0.98, 
 }
 
+# Box Mission Configuration
+PICKUP_LOCATIONS = [(20, 14), (18, 14), (16, 14), (14, 14)]
+DROPOFF_LOCATIONS = [(0, 0), (2, 0), (4, 0), (6, 0)]
+
 # Maze and Mission Configuration
 MAZE_GRID = [
     [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1], # Row 0
@@ -75,8 +80,8 @@ MAZE_GRID = [
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 13
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0]  # Row 14
 ]
-START_CELL = (0, 0) # Start position (col, row)
-END_CELL = (20, 14)   # End position (col, row)
+START_CELL = (2, 0) # Start position (col, row)
+END_CELL = (18, 14)   # End position (col, row)
 
 # START_DIRECTION must be a cardinal direction: 'N', 'S', 'E', or 'W'.
 # This tells the robot its initial orientation on the map grid.
@@ -128,6 +133,14 @@ class RobotController(CameraLineFollowingMixin):
             self.obstacle_avoidance = CameraObstacleAvoidance(debug=FEATURES['DEBUG_VISUALIZATION_ENABLED'])
         else:
             self.obstacle_avoidance = None
+
+        if FEATURES['BOX_MISSION_ENABLED']:
+            self.box_handler = BoxHandler(
+                pickup_locations=PICKUP_LOCATIONS,
+                dropoff_locations=DROPOFF_LOCATIONS
+            )
+        else:
+            self.box_handler = None
 
         self.object_detector = None
         self.frame = None
@@ -234,7 +247,10 @@ class RobotController(CameraLineFollowingMixin):
             self.position_tracker.start()
             
         # Pose is now managed by the encoder localizer
-        self.state = "planning"
+        if FEATURES['BOX_MISSION_ENABLED']:
+            self.state = "going_to_pickup"
+        else:
+            self.state = "planning"
 
     def _process_vision(self):
         """Process the latest camera frame for events."""
@@ -242,12 +258,12 @@ class RobotController(CameraLineFollowingMixin):
         # directly to the line following logic.
         pass
 
-    def _plan_path_to_target(self):
-        """Plan the path to the target cell."""
+    def _plan_path_to_target(self, target_cell):
+        """Plan the path to the specified target cell."""
         current_cell = self.position_tracker.get_current_cell()
-        print(f"Planning path from {current_cell} to {END_CELL}...")
+        print(f"Planning path from {current_cell} to {target_cell}...")
         
-        path_nodes = self.pathfinder.find_path(current_cell, END_CELL)
+        path_nodes = self.pathfinder.find_path(current_cell, target_cell)
         
         if path_nodes:
             self.path = path_nodes
@@ -267,19 +283,44 @@ class RobotController(CameraLineFollowingMixin):
             self.audio_feedback.speak(path_message)
             
         else:
-            print(f"Failed to plan path from {current_cell} to {END_CELL}")
+            print(f"Failed to plan path from {current_cell} to {target_cell}")
             self.audio_feedback.speak("Path planning failed")
             self.state = "error"
 
     def _follow_path(self):
         """Follow the planned path using encoder-based cell transitions and camera-based line centering."""
         if not self.path or self.current_target_index >= len(self.path):
-            self.state = "mission_complete"
+            # This case should ideally not be hit if logic is correct,
+            # as arrival at the destination cell should change state first.
             self._stop_motors()
+            # Determine what to do next based on mission
+            if FEATURES['BOX_MISSION_ENABLED']:
+                if self.box_handler.has_package:
+                    self.state = "at_dropoff"
+                else:
+                    self.state = "at_pickup"
+            else:
+                self.state = "mission_complete"
             return
 
         current_cell = self.position_tracker.get_current_cell()
+        target_cell = self.path[-1]
 
+        # Check for arrival at the final destination of the current path segment
+        if current_cell == target_cell:
+            print(f"Reached target destination: {current_cell}")
+            self.audio_feedback.speak("Target reached.")
+            
+            if FEATURES['BOX_MISSION_ENABLED']:
+                if self.box_handler.has_package:
+                    self.state = "at_dropoff"
+                else:
+                    self.state = "at_pickup"
+            else:
+                self.state = "mission_complete" # Fallback for non-box mission
+            self._stop_motors()
+            return
+        
         # The primary goal is to reach the final destination.
         if current_cell == self.path[-1]:
             print(f"Reached final destination: {current_cell}")
@@ -690,7 +731,7 @@ class RobotController(CameraLineFollowingMixin):
             self._stop_motors()
             self.position_tracker.set_moving(False)
         elif self.state == "planning":
-            self._plan_path_to_target()
+            self._plan_path_to_target(END_CELL)
         elif self.state == "path_following":
             self.position_tracker.set_moving(True)
             self._follow_path()
@@ -709,6 +750,53 @@ class RobotController(CameraLineFollowingMixin):
         elif self.state == "destination_alignment":
             self.position_tracker.set_moving(True)
             self._execute_destination_alignment()
+        elif self.state == "going_to_pickup":
+            target_info = self.box_handler.get_current_target()
+            if target_info:
+                target_cell, mission_type = target_info
+                if mission_type == "PICKUP":
+                    self._plan_path_to_target(target_cell)
+                else: # Should not happen in this state
+                    self.state = "error"
+            else:
+                self.state = "mission_complete"
+        elif self.state == "at_pickup":
+            print("At pickup location. Engaging electromagnet.")
+            self.audio_feedback.speak("Picking up box.")
+            if self.motor_controller:
+                self.motor_controller.electromagnet_on()
+            
+            current_cell = self.position_tracker.get_current_cell()
+            self.box_handler.collect_package(current_cell)
+            time.sleep(1.0) # Wait for electromagnet to engage
+            self.state = "going_to_dropoff"
+
+        elif self.state == "going_to_dropoff":
+            target_info = self.box_handler.get_current_target()
+            if target_info:
+                target_cell, mission_type = target_info
+                if mission_type == "DROPOFF":
+                    self._plan_path_to_target(target_cell)
+                else: # Should not happen
+                    self.state = "error"
+            else:
+                self.state = "mission_complete" # Should not happen
+
+        elif self.state == "at_dropoff":
+            print("At dropoff location. Disengaging electromagnet.")
+            self.audio_feedback.speak("Delivering box.")
+            if self.motor_controller:
+                self.motor_controller.electromagnet_off()
+            
+            current_cell = self.position_tracker.get_current_cell()
+            self.box_handler.deliver_package(current_cell)
+            time.sleep(1.0) # Wait for box to release
+            
+            if self.box_handler.is_mission_complete():
+                self.state = "mission_complete"
+            else:
+                self.state = "going_to_pickup"
+
         elif self.state == "mission_complete":
             self.audio_feedback.speak("Mission complete.")
             self._stop_motors()
@@ -1132,6 +1220,7 @@ def main():
                 'enabled': FEATURES['OBSTACLE_AVOIDANCE_ENABLED'],
             },
             'motors': robot.motor_speeds,
+            'electromagnet_on': robot.motor_controller.get_electromagnet_status() if robot.motor_controller else False,
             'encoders': encoder_counts,
             'audio_feedback': {
                 'enabled': audio_status.get('enabled', False),
@@ -1145,6 +1234,11 @@ def main():
                 'turn_to_execute': robot.turn_to_execute,
                 'total_corners': robot.total_corners_in_path,
                 'corners_passed': robot.corners_passed
+            },
+            'box_mission': {
+                'enabled': FEATURES['BOX_MISSION_ENABLED'],
+                'boxes': robot.box_handler.box_states if robot.box_handler else {},
+                'has_package': robot.box_handler.has_package if robot.box_handler else False
             }
         }
         return jsonify(data)
@@ -1422,6 +1516,7 @@ def main():
                 robot_cell = robot.position_tracker.get_current_cell()
                 path = robot.path
                 corner_cell = robot.corner_cell_to_highlight # Get the corner cell to highlight
+                boxes = robot.box_handler.box_states if robot.box_handler else {}
                 
                 grid_img = generate_grid_image(
                     pathfinder=robot.pathfinder,
@@ -1429,7 +1524,8 @@ def main():
                     path=path,
                     start_cell=START_CELL,
                     end_cell=END_CELL,
-                    corner_cell=corner_cell
+                    corner_cell=corner_cell,
+                    boxes=boxes
                 )
                 
                 _, buffer = cv2.imencode('.jpg', grid_img)
@@ -1441,7 +1537,7 @@ def main():
                 time.sleep(0.1)
         return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-    def generate_grid_image(pathfinder, robot_cell, path, start_cell, end_cell, corner_cell=None):
+    def generate_grid_image(pathfinder, robot_cell, path, start_cell, end_cell, corner_cell=None, boxes=None):
         """Generates the grid image for the web UI."""
         grid = np.array(pathfinder.get_grid())
         cell_size = 20
@@ -1454,6 +1550,27 @@ def main():
                 cv2.rectangle(grid_img, (c * cell_size, r * cell_size), 
                               ((c + 1) * cell_size, (r + 1) * cell_size), color, -1)
         
+        # Draw boxes based on their state
+        if boxes:
+            for box_id, box_info in boxes.items():
+                if box_info['state'].value == 'available':
+                    loc = box_info['pickup_location']
+                    color = (0, 255, 255) # Yellow for available boxes
+                elif box_info['state'].value == 'delivered':
+                    loc = box_info['dropoff_location']
+                    color = (255, 165, 0) # Orange for delivered boxes
+                else: # Collected, on the robot
+                    continue
+
+                if loc:
+                    cx, cy = loc
+                    # Draw a circle for the box
+                    center_x = cx * cell_size + cell_size // 2
+                    center_y = cy * cell_size + cell_size // 2
+                    cv2.circle(grid_img, (center_x, center_y), cell_size // 3, color, -1)
+                    cv2.circle(grid_img, (center_x, center_y), cell_size // 3, (0,0,0), 1)
+
+
         # Highlight the corner cell if one is detected
         if corner_cell:
             cx, cy = corner_cell

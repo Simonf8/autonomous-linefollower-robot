@@ -3,6 +3,7 @@ import time
 import atexit
 import signal
 import sys
+from gpiozero import OutputDevice
 
 class PiMotorController:
     """
@@ -25,6 +26,9 @@ class PiMotorController:
             'right': {'A': 3, 'B': 2},     # Right Encoder
         }
         
+        # GPIO pin for the electromagnet
+        self.electromagnet_pin = 25
+        
         # Apply motor trims if provided. These are used to calibrate for motor speed
         # differences. If a motor is too fast, lower its trim value below 1.0.
         self.trims = trims if trims else {'left': 1.0, 'right': 1.0}
@@ -32,6 +36,14 @@ class PiMotorController:
         self.motors = {}
         self.encoders = {}
         self._setup_motors_and_encoders()
+        
+        # Setup electromagnet
+        try:
+            self.electromagnet = OutputDevice(self.electromagnet_pin, active_high=True, initial_value=False)
+            print(f"Electromagnet initialized on GPIO {self.electromagnet_pin}.")
+        except Exception as e:
+            print(f"Failed to initialize electromagnet: {e}")
+            self.electromagnet = None
         
         # Register cleanup handlers
         atexit.register(self._cleanup)
@@ -100,6 +112,11 @@ class PiMotorController:
             for encoder in self.encoders.values():
                 encoder.close()
             self.encoders.clear()
+            
+            if self.electromagnet:
+                print("Cleaning up electromagnet resource...")
+                self.electromagnet.off()
+                self.electromagnet.close()
             
             # The .close() calls on individual devices are sufficient.
             # The 'reset()' method is not available on the LGPIOFactory.
@@ -207,4 +224,30 @@ class PiMotorController:
         
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit with cleanup."""
-        self._cleanup() 
+        self._cleanup()
+
+    def electromagnet_on(self):
+        """Activates the electromagnet."""
+        if self.electromagnet:
+            self.electromagnet.on()
+            print("Electromagnet ON")
+        else:
+            print("Warning: Electromagnet not initialized.")
+
+    def electromagnet_off(self):
+        """Deactivates the electromagnet."""
+        if self.electromagnet:
+            self.electromagnet.off()
+            print("Electromagnet OFF")
+        else:
+            print("Warning: Electromagnet not initialized.")
+
+    def get_electromagnet_status(self) -> bool:
+        """Returns the current status of the electromagnet (on/off)."""
+        if self.electromagnet:
+            return self.electromagnet.is_active
+        return False
+
+    def move_forward(self, speed: int = 50):
+        """Move robot forward at specified speed."""
+        self.send_motor_speeds(speed, speed) 
