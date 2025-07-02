@@ -170,8 +170,9 @@ class RobotController(CameraLineFollowingMixin):
             debug=FEATURES['DEBUG_VISUALIZATION_ENABLED']
         )
 
-        # Pathfinder setup
-        self.pathfinder = Pathfinder(grid=MAZE_GRID, cell_size_m=CELL_SIZE_M)
+        # Pathfinder setup with turn penalty for preferring straight lines
+        # Turn penalty: 0 = shortest path, 3 = moderate preference for straight, 5+ = strong preference
+        self.pathfinder = Pathfinder(grid=MAZE_GRID, cell_size_m=CELL_SIZE_M, turn_penalty=4.0)
 
         self.path = []
         self.current_target_index = 0
@@ -274,7 +275,8 @@ class RobotController(CameraLineFollowingMixin):
         current_cell = self.position_tracker.get_current_cell()
         print(f"Planning path from {current_cell} to {target_cell}...")
         
-        path_nodes = self.pathfinder.find_path(current_cell, target_cell)
+        # Use the new pathfinding that prefers straight lines
+        path_nodes = self.pathfinder.find_path(current_cell, target_cell, prefer_straight=True)
         
         if path_nodes:
             self.path = path_nodes
@@ -288,6 +290,15 @@ class RobotController(CameraLineFollowingMixin):
             
             # Check if the path is a straight line to determine the following strategy.
             self.is_straight_corridor = self._is_path_straight(self.path)
+            
+            # Get path analysis for debugging
+            turn_count = self.pathfinder.count_turns_in_path(self.path)
+            segments = self.pathfinder.get_path_segments(self.path)
+            
+            # Log path segments
+            print(f"Path analysis: {turn_count} turns, {len(segments)} segments")
+            for i, (length, direction) in enumerate(segments):
+                print(f"  Segment {i+1}: {length} cells {direction}")
             
             path_message = f"Path planned with {len(self.path)} waypoints and {self.total_corners_in_path} corners."
             print(path_message)
