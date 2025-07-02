@@ -14,7 +14,9 @@ except ImportError:
     Picamera2 = None
 
 # This is needed by the mixin
-from pid import PIDController 
+from pid import PIDController
+from adaptive_pid import AdaptivePIDController
+from line_memory_buffer import LineMemoryBuffer 
 
 # Shared configuration
 LINE_FOLLOW_SPEED = 45
@@ -457,12 +459,16 @@ class CameraLineFollower:
     def __init__(self, camera_index=1, width=720, height=480, fps=30, debug=False):
         self.debug = debug
         
-        # Line detection parameters
+        # Enhanced line detection parameters for better centering accuracy
         self.BLACK_THRESHOLD = 80  # Threshold for detecting black lines
         self.BLUR_SIZE = (5, 5)
         self.MIN_CONTOUR_AREA = 500
         self.MIN_LINE_WIDTH = 10
         self.MAX_LINE_WIDTH = 200
+        
+        # Enhanced centering parameters
+        self.CENTERING_PRECISION_MODE = True  # Enable high-precision centering
+        self.MULTI_THRESHOLD_DETECTION = True  # Use multiple thresholds for better line detection
         
         # Morphological operations kernel
         self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
@@ -545,9 +551,15 @@ class CameraLineFollower:
             'center_tolerance': 0.6  # Arm typically appears within 60% of center
         }
         
-        # Line following parameters
+        # Line following parameters - REDUCED for immediate response
         self.center_offset_history = []
-        self.history_size = 5  # Smooth over last 5 measurements
+        self.history_size = 3  # Reduced to 3 for faster response to changes
+        
+        # Stuck detection to reset bias when not making progress
+        self.stuck_detection_history = []
+        self.stuck_detection_size = 6  # Reduced from 10 to 6 for faster detection
+        self.stuck_threshold = 0.03  # Reduced threshold for earlier detection
+        self.last_reset_time = 0  # Track when we last reset to prevent spam
         
         # Corner detection parameters
         self.CORNER_THRESHOLD = 0.4  # Line offset ratio to detect corner
@@ -566,9 +578,14 @@ class CameraLineFollower:
         self.last_detection_time = 0
         self.detection_fps = 0
         
-        # PID controller for smooth line following.
-        # Reduced gains for smoother, less aggressive control
-        self.pid = PIDController(kp=0.8, ki=0.02, kd=0.3, output_limits=(-40, 40))
+        # Enhanced Adaptive PID controller for IMMEDIATE response to any drift
+        # Tuned for aggressive correction as soon as robot moves off center
+        self.pid = AdaptivePIDController(
+            base_kp=2.0, base_ki=0.08, base_kd=0.6,  # Increased all gains for immediate response
+            output_limits=(-60, 60),  # Increased output limits for stronger corrections
+            sample_time=0.033,  # ~30 FPS
+            debug=self.debug
+        )
         
         # Detection history for smoothing
         self.line_offset_history = deque(maxlen=5)
@@ -616,6 +633,13 @@ class CameraLineFollower:
         self.speed_history = deque(maxlen=3)  # Track last 3 speeds for smoothing
         self.last_base_speed = 60  # Track last base speed
         self.last_calculated_speed = 60  # Initialize last calculated speed
+        
+        # Line Memory Buffer for lookahead with memory
+        self.line_memory_buffer = LineMemoryBuffer(
+            buffer_size=20,
+            max_prediction_time=2.0,
+            debug=self.debug
+        )
 
     def initialize_camera(self) -> bool:
         """Initializes the camera using picamera2."""
@@ -669,17 +693,18 @@ class CameraLineFollower:
             print(f"Error capturing frame: {e}")
             return None
 
-    def detect_line(self, frame: Optional[np.ndarray] = None) -> Dict:
+    def detect_line(self, frame: Optional[np.ndarray] = None, robot_state: Dict = None, encoder_counts: Dict = None, is_straight_path: bool = False) -> Dict:
         """
-        Main line detection function.
+        Main line detection function with memory buffer integration.
         Takes a raw camera frame, processes it, and returns line following data.
+        Includes lookahead capability using buffered line positions when direct detection fails.
         """
         self.frames_processed += 1
         
         if frame is None:
             frame = self.get_camera_frame()
             if frame is None:
-                return self._calculate_line_following_params(None, 0, 0)
+                return self._get_fallback_result()
 
         height, width, _ = frame.shape
         
@@ -692,14 +717,46 @@ class CameraLineFollower:
         final_mask = self._preprocess_roi(roi)
 
         # 3. Find line and intersection information from the mask
-        line_info = self._find_line_in_roi(final_mask)
+        line_info = self._find_line_in_roi(final_mask, is_straight_path)
         
         # 4. Calculate final motor control parameters
         result = self._calculate_line_following_params(line_info, width, roi_start_y)
         if line_info:
             result.update(line_info)
 
-        # 5. Create debug view
+        # 5. Update line memory buffer with current detection and robot state
+        if robot_state is None:
+            robot_state = self._get_default_robot_state()
+        
+        self.line_memory_buffer.update_line_detection(result, robot_state, encoder_counts)
+        
+        # 6. If direct line detection failed, try to get prediction from memory buffer
+        if not result.get('line_detected', False) or result.get('line_confidence', 0) < 0.3:
+            predicted_result = self.line_memory_buffer.get_predicted_line_state(width)
+            if predicted_result:
+                # Merge predicted result with current result, keeping some original data
+                result.update(predicted_result)
+                result['using_prediction'] = True
+                
+                # Check if we're in severe offset recovery mode
+                line_offset = result.get('line_offset', 0)
+                if abs(line_offset) > 0.4:
+                    result['severe_offset_recovery'] = True
+                    if self.debug:
+                        print(f"CAMERA LINE FOLLOWER: Severe offset recovery mode - offset: {line_offset:.3f}")
+                
+                if self.debug:
+                    print(f"CAMERA LINE FOLLOWER: Using predicted line state - conf: {predicted_result['line_confidence']:.2f}")
+            else:
+                result['using_prediction'] = False
+        else:
+            result['using_prediction'] = False
+
+        # 7. Add buffer status to result for monitoring
+        buffer_status = self.line_memory_buffer.get_buffer_status()
+        result['buffer_status'] = buffer_status
+        
+        # 8. Create debug view
         if self.debug:
             result['processed_frame'] = self._draw_debug_overlay(frame, result, roi_start_y, final_mask)
 
@@ -818,7 +875,7 @@ class CameraLineFollower:
         
         return filtered_binary_roi
 
-    def _find_line_in_roi(self, binary_roi: np.ndarray) -> Optional[Dict]:
+    def _find_line_in_roi(self, binary_roi: np.ndarray, is_straight_path: bool = False) -> Optional[Dict]:
         """
         Analyzes the binary mask of the ROI to find the line and detect intersections.
         This uses a simplified, robust logic for intersection detection.
@@ -835,75 +892,123 @@ class CameraLineFollower:
         if not valid_contours:
             return None
 
-        # Sort by area, largest first
-        valid_contours = sorted(valid_contours, key=cv2.contourArea, reverse=True)
-        
-        roi_h, roi_w = binary_roi.shape
-        is_intersection = False
-
-        # --- Case 1: Multiple contours detected ---
-        # This could indicate an intersection, but let's be more selective
-        if len(valid_contours) >= 2:
-            line1_contour = valid_contours[0]
-            line2_contour = valid_contours[1]
-            
-            # Check if both contours are significant in size (lowered threshold)
-            area1 = cv2.contourArea(line1_contour)
-            area2 = cv2.contourArea(line2_contour)
-            min_intersection_area = roi_w * roi_h * 0.02  # Reduced from 0.05 to 0.02 - more sensitive
-            
-            # Only consider it an intersection if both contours are substantial
-            if area1 > min_intersection_area and area2 > min_intersection_area:
-                is_intersection = True
-            
-            # Combine the two largest contours for analysis
-            combined_contour = np.vstack([line1_contour, line2_contour])
-            M = cv2.moments(combined_contour)
-            x, y, w, h = cv2.boundingRect(combined_contour)
-            area = cv2.contourArea(combined_contour)
-
-        # --- Case 2: One large contour detected ---
+        # If on a straight path, be much less sensitive to intersections.
+        if is_straight_path:
+            intersection_area_threshold = self.intersection_area_threshold * 1.5
+            intersection_solidity_threshold = self.intersection_solidity_threshold * 0.75
         else:
-            largest_contour = valid_contours[0]
-            M = cv2.moments(largest_contour)
-            x, y, w, h = cv2.boundingRect(largest_contour)
-            area = cv2.contourArea(largest_contour)
-            
-            # More sensitive intersection logic for detecting T-intersections at grid cells
-            # Lowered thresholds to catch more intersections
-            is_wide = w > roi_w * 0.5  # Reduced from 0.8 to 0.5 - more sensitive
-            is_tall = h > roi_h * 0.5  # Reduced from 0.8 to 0.5 - more sensitive
-            
-            # For a T-intersection, we need significant width OR height (not both)
-            # This catches horizontal T-bars, vertical T-bars, and cross intersections
-            is_t_intersection = is_wide or is_tall or (w > roi_w * 0.6) or (h > roi_h * 0.6)
-            
-            if is_t_intersection:
-                is_intersection = True
-        
-        if M["m00"] == 0:
-            return None
-        
-        cx = int(M["m10"] / M["m00"])
-        cy = int(M["m01"] / M["m00"])
+            intersection_area_threshold = self.intersection_area_threshold
+            intersection_solidity_threshold = self.intersection_solidity_threshold
 
-        # If it's an intersection, use the bottom-slice logic to find a stable navigation point
-        if is_intersection:
-            sub_roi_h = roi_h // 3
-            sub_roi_y_start = roi_h - sub_roi_h
-            bottom_slice = binary_roi[sub_roi_y_start:, :]
-            M_bottom = cv2.moments(bottom_slice)
-            if M_bottom["m00"] > 0:
-                cx = int(M_bottom["m10"] / M_bottom["m00"])
+        # Find the largest contour, which is assumed to be the line/lane.
+        main_contour = max(valid_contours, key=cv2.contourArea)
+        area = cv2.contourArea(main_contour)
+        hull_area = cv2.contourArea(cv2.convexHull(main_contour))
+        solidity = float(area) / hull_area if hull_area > 0 else 0
+
+        # Check for intersection based on the properties of the largest contour
+        is_at_intersection = False
+        if area > intersection_area_threshold and solidity < intersection_solidity_threshold and aspect_ratio > self.intersection_aspect_ratio_threshold:
+            is_at_intersection = True
+        
+        # --- Precise Centering Calculation ---
+        # This is done AFTER intersection detection to use the main contour
+        if is_at_intersection:
+            # Calculate precise line center using multiple methods for better self-correction.
+            # Combines centroid, contour fitting, and edge analysis for maximum accuracy.
+            roi_h, roi_w = binary_roi.shape
+            
+            # Method 1: Standard centroid from moments
+            centroid_cx = int(moments["m10"] / moments["m00"])
+            centroid_cy = int(moments["m01"] / moments["m00"])
+            
+            # Method 2: Contour-based center using minimum enclosing rectangle
+            rect = cv2.minAreaRect(main_contour)
+            box = cv2.boxPoints(rect)
+            box = np.array(box, dtype=int)  # Fixed: replaced np.int0 with np.array(dtype=int)
+            rect_cx = int(rect[0][0])  # Center x of the rotated rectangle
+            rect_cy = int(rect[0][1])  # Center y of the rotated rectangle
+            
+            # Method 3: Horizontal scanning for line center (most reliable for line following)
+            scan_centers = []
+            scan_start_y = max(0, roi_h // 4)  # Start from 25% down
+            scan_end_y = min(roi_h, roi_h * 3 // 4)  # End at 75% down
+            
+            for y in range(scan_start_y, scan_end_y, 2):  # Sample every 2 pixels
+                row = binary_roi[y, :]
+                white_pixels = np.where(row > 128)[0]  # Find white pixels in this row
+                
+                if len(white_pixels) > 5:  # Need minimum pixels for reliable center
+                    # Calculate weighted center of this row
+                    left_edge = white_pixels[0]
+                    right_edge = white_pixels[-1]
+                    row_center = (left_edge + right_edge) // 2
+                    scan_centers.append(row_center)
+            
+            # Calculate average scan center if we have enough data
+            if len(scan_centers) >= 3:
+                scan_cx = int(np.median(scan_centers))  # Use median for robustness
+            else:
+                scan_cx = centroid_cx  # Fallback to centroid
+            
+            # Method 4: Edge-based center calculation for very precise centering
+            # Apply edge detection to find line boundaries
+            edges = cv2.Canny(binary_roi, 50, 150)
+            
+            # Find leftmost and rightmost edges in the middle section of ROI
+            middle_y_start = roi_h // 3
+            middle_y_end = roi_h * 2 // 3
+            middle_section = edges[middle_y_start:middle_y_end, :]
+            
+            edge_centers = []
+            for y in range(0, middle_section.shape[0], 3):  # Sample every 3 pixels
+                row_edges = np.where(middle_section[y, :] > 0)[0]
+                if len(row_edges) >= 2:
+                    # Find leftmost and rightmost significant edges
+                    left_edge = row_edges[0]
+                    right_edge = row_edges[-1]
+                    if right_edge - left_edge > 10:  # Minimum line width
+                        edge_center = (left_edge + right_edge) // 2
+                        edge_centers.append(edge_center)
+            
+            if len(edge_centers) >= 2:
+                edge_cx = int(np.mean(edge_centers))
+            else:
+                edge_cx = centroid_cx  # Fallback
+            
+            # Combine all methods with weighted average for final result
+            final_cx = int(0.4 * scan_cx + 0.3 * edge_cx + 0.2 * centroid_cx + 0.1 * rect_cx)
+            final_cy = int(0.8 * centroid_cy + 0.2 * rect_cy)
+            
+            # Clamp to valid coordinates
+            final_cx = max(0, min(roi_w - 1, final_cx))
+            final_cy = max(0, min(roi_h - 1, final_cy))
+            
+            if self.debug and abs(final_cx - centroid_cx) > 5:
+                print(f"PRECISE CENTERING: Adjusted center from {centroid_cx} to {final_cx} "
+                      f"(scan: {scan_cx}, edge: {edge_cx}, rect: {rect_cx})")
+            
+            return final_cx, final_cy
+        
+        # If it's not an intersection, use the bottom-slice logic to find a stable navigation point
+        roi_h, roi_w = binary_roi.shape
+        sub_roi_h = roi_h // 3
+        sub_roi_y_start = roi_h - sub_roi_h
+        bottom_slice = binary_roi[sub_roi_y_start:, :]
+        M_bottom = cv2.moments(bottom_slice)
+        if M_bottom["m00"] > 0:
+            bottom_cx = int(M_bottom["m10"] / M_bottom["m00"])
+            # Use weighted average of intersection center and bottom slice center
+            cx = int(0.7 * bottom_cx + 0.3 * centroid_cx)  # Prioritize bottom slice for stability
 
         return {
             'center': (cx, cy),
-            'contour': valid_contours[0], # Return the largest for drawing
+            'contour': main_contour, # Return the largest for drawing
             'contours': valid_contours,
             'bbox': (x, y, w, h),
             'area': area,
             'confidence': 1.0, # Simplified confidence
-            'is_at_intersection': is_intersection
+            'is_at_intersection': is_at_intersection
         }
     
     def _calculate_line_following_params(self, line_info: Optional[Dict], 
@@ -931,28 +1036,89 @@ class CameraLineFollower:
         raw_offset = (line_center_x - frame_center) / (frame_width // 2)
         raw_offset = max(-1.0, min(1.0, raw_offset))  # Clamp to valid range
         
-        # Smooth the offset using adaptive history
+        # Enhanced smoothing with self-correction bias and stuck detection
         self.center_offset_history.append(raw_offset)
         if len(self.center_offset_history) > self.history_size:
             self.center_offset_history.pop(0)
         
-        # Use weighted average - give more weight to recent measurements
-        # This helps with self-correction while still smoothing noise
+        # Stuck detection - track if we're making progress
+        self.stuck_detection_history.append(abs(raw_offset))
+        if len(self.stuck_detection_history) > self.stuck_detection_size:
+            self.stuck_detection_history.pop(0)
+        
+        # Check if we're stuck (offset not decreasing over time)
+        is_stuck = False
+        current_time = time.time()
+        reset_cooldown = 1.5  # Minimum 1.5 seconds between resets
+        
+        if len(self.stuck_detection_history) >= self.stuck_detection_size and (current_time - self.last_reset_time) > reset_cooldown:
+            recent_avg = sum(self.stuck_detection_history[-3:]) / 3  # Use last 3 samples
+            older_avg = sum(self.stuck_detection_history[:3]) / 3   # Compare to first 3 samples
+            # If recent offset is not significantly smaller than older offset, we're stuck
+            if recent_avg >= older_avg - self.stuck_threshold and recent_avg > 0.25:  # Lower threshold
+                is_stuck = True
+                self.last_reset_time = current_time  # Update reset time
+                if self.debug:
+                    print(f"STUCK DETECTED: Recent avg {recent_avg:.3f} vs older avg {older_avg:.3f} - resetting bias system")
+        
+        # Use adaptive weighted average that prioritizes correction for large offsets
         if len(self.center_offset_history) > 1:
-            weights = [0.1, 0.2, 0.3, 0.4]  # Most recent gets highest weight
+            # For large offsets, give MORE weight to recent measurements for faster correction
+            abs_raw_offset = abs(raw_offset)
+            if abs_raw_offset > 0.4:  # Large offset - prioritize immediate correction
+                weights = [0.05, 0.1, 0.2, 0.65]  # Heavy weight on most recent
+                correction_boost = 1.3  # Boost the correction signal
+            elif abs_raw_offset > 0.2:  # Medium offset - moderate correction bias
+                weights = [0.1, 0.15, 0.25, 0.5]  # Moderate weight on recent
+                correction_boost = 1.1
+            else:  # Small offset - normal smoothing
+                weights = [0.1, 0.2, 0.3, 0.4]  # Standard weights
+                correction_boost = 1.0
+            
             weights = weights[-len(self.center_offset_history):]  # Adjust for actual history length
             total_weight = sum(weights)
             smoothed_offset = sum(offset * weight for offset, weight in zip(self.center_offset_history, weights)) / total_weight
+            
+            # Apply correction boost for large offsets
+            smoothed_offset *= correction_boost
+            
+            # Add additional self-correction bias - if consistently off-center, increase correction TOWARDS center
+            # BUT: Reset bias system if we're stuck to prevent getting trapped in correction loops
+            if is_stuck:
+                # Clear history to reset the bias system
+                self.center_offset_history = self.center_offset_history[-1:]  # Keep only latest measurement
+                smoothed_offset = raw_offset  # Use raw offset without bias
+                # Also reset PID to prevent windup
+                self.pid.reset()
+                if self.debug:
+                    print("BIAS RESET: Cleared correction history and PID integral due to stuck detection")
+            elif len(self.center_offset_history) >= 2:  # React faster with only 2 samples
+                recent_offsets = self.center_offset_history[-2:]  # Use last 2 instead of 3 for faster response
+                avg_recent = sum(recent_offsets) / len(recent_offsets)
+                
+                # IMMEDIATE BIAS CORRECTION: Add extra correction bias for ANY consistent drift
+                if abs(avg_recent) > 0.05:  # Much lower threshold - catch ANY drift from center
+                    bias_factor = min(0.25, abs(avg_recent) * 0.8)  # Stronger bias factor for immediate correction
+                    # FIXED: Bias should be OPPOSITE to the offset to correct towards center
+                    correction_bias = bias_factor * (-1 if avg_recent > 0 else 1)
+                    smoothed_offset += correction_bias
+                    
+                    if self.debug and abs(correction_bias) > 0.03:
+                        print(f"IMMEDIATE BIAS: Adding strong bias {correction_bias:.3f} to counter drift {avg_recent:.3f}")
         else:
             smoothed_offset = raw_offset
         
-        # Calculate turn angle (simple proportional control)
-        turn_angle = smoothed_offset * 45  # Max 45 degrees turn
+        # Clamp final offset to valid range
+        smoothed_offset = max(-1.0, min(1.0, smoothed_offset))
+        
+        # Calculate turn angle (enhanced proportional control)
+        turn_angle = smoothed_offset * 45
         
         return {
             'line_detected': True,
             'line_center_x': line_center_x,
             'line_offset': smoothed_offset,
+            'raw_offset': raw_offset,  # Include raw offset for debugging
             'line_confidence': line_info['confidence'],
             'status': 'line_following',
             'is_at_intersection': line_info.get('is_at_intersection', False),
@@ -1014,14 +1180,24 @@ class CameraLineFollower:
         aspect_ratio = result.get('aspect_ratio', -1.0)
         area = result.get('area', 0)
         confidence = result.get('line_confidence', 0.0)
+        
+        # Get buffer status for display
+        buffer_status = result.get('buffer_status', {})
+        using_prediction = result.get('using_prediction', False)
+        
+        # Get PID performance metrics for display
+        pid_metrics = self.get_pid_performance_metrics()
+        
         stats_text = [
-            f"Offset: {result.get('line_offset', 0.0):.3f}",
-            f"S: {solidity:.2f}",
-            f"AR: {aspect_ratio:.2f}",
-            f"Area: {area}",
-            f"Conf: {confidence:.2f}",
-            f"Intersection: {result.get('is_at_intersection', False)}",
+            f"Offset: {result.get('line_offset', 0.0):.3f} | Raw: {result.get('raw_offset', 0.0):.3f}",
+            f"S: {solidity:.2f} | AR: {aspect_ratio:.2f} | Area: {area}",
+            f"Conf: {confidence:.2f} | Pred: {'YES' if using_prediction else 'NO'}",
             f"Status: {result.get('status', 'unknown')}",
+            f"Precision Mode: {'ON' if self.CENTERING_PRECISION_MODE else 'OFF'}",
+            f"Buffer: {buffer_status.get('buffer_size', 0)}/{buffer_status.get('max_buffer_size', 0)}",
+            f"PID: kp={pid_metrics.get('kp', 0):.2f} ki={pid_metrics.get('ki', 0):.3f} kd={pid_metrics.get('kd', 0):.2f}",
+            f"PID Out: {pid_metrics.get('output', 0):.1f} | Int: {pid_metrics.get('integral', 0):.1f}",
+            f"Intersection: {result.get('is_at_intersection', False)}",
             f"Arm Filter: {'ON' if self.ARM_FILTERING_ENABLED else 'OFF'}"
         ]
 
@@ -1043,6 +1219,36 @@ class CameraLineFollower:
             'corner_confidence': 0.0,
             'turn_angle': 0.0,
             'status': 'no_frame'
+        }
+    
+    def _get_fallback_result(self) -> Dict:
+        """Get fallback result when no camera frame is available."""
+        # Try to get prediction from memory buffer if available
+        predicted_result = self.line_memory_buffer.get_predicted_line_state()
+        if predicted_result:
+            predicted_result['status'] = 'predicted_no_camera'
+            predicted_result['using_prediction'] = True
+            return predicted_result
+        else:
+            # Return basic failure result
+            return {
+                'line_detected': False,
+                'line_center_x': self.width // 2 if hasattr(self, 'width') else 160,
+                'line_offset': 0.0,
+                'line_confidence': 0.0,
+                'is_at_intersection': False,
+                'status': 'no_camera',
+                'using_prediction': False,
+                'buffer_status': self.line_memory_buffer.get_buffer_status()
+            }
+    
+    def _get_default_robot_state(self) -> Dict:
+        """Get default robot state when none is provided."""
+        return {
+            'position': (0, 0),
+            'direction': 'N',
+            'motor_speeds': {'left': 0, 'right': 0},
+            'timestamp': time.time()
         }
     
     def update_corner_stopping(self, result: Dict):
@@ -1101,8 +1307,8 @@ class CameraLineFollower:
 
     def get_motor_speeds(self, result: Dict, base_speed: int = 60) -> Tuple[int, int, int, int]:
         """
-        Calculates motor speeds for a differential drive robot based on line detection.
-        'line_offset' is the key parameter used for PID control.
+        Enhanced motor speed calculation with aggressive line centering.
+        Prioritizes getting back to line center when robot drifts off.
         """
         # Update corner stopping logic first
         self.update_corner_stopping(result)
@@ -1112,26 +1318,54 @@ class CameraLineFollower:
             return 0, 0, 0, 0
 
         line_offset = result.get('line_offset', 0.0)
+        raw_offset = result.get('raw_offset', line_offset)
         line_confidence = result.get('line_confidence', 0.0)
 
         if result.get('status') == 'line_lost' or line_confidence < 0.2:
-            # Line recovery mechanism - gentle search pattern
-            if self.line_lost_counter < 5:
-                # First few frames: try to continue in last known direction
-                if hasattr(self, 'last_turn_correction'):
-                    recovery_turn = self.last_turn_correction * 0.5  # Gentle continuation
+            # Enhanced line recovery mechanism with intelligent search patterns
+            if self.line_lost_counter < 2:  # Reduced from 3 to 2
+                # Immediate response: try to continue in last known direction with increased intensity
+                if hasattr(self, 'last_turn_correction') and abs(self.last_turn_correction) > 5:
+                    recovery_turn = self.last_turn_correction * 0.8  # More aggressive continuation
                 else:
                     recovery_turn = 0
-            elif self.line_lost_counter < 15:
-                # Search left and right alternately
-                search_intensity = min(30, self.line_lost_counter * 2)
+            elif self.line_lost_counter < 5:  # Reduced from 8 to 5
+                # Smart search: look in direction of last known offset
+                if hasattr(self, 'last_known_offset') and abs(self.last_known_offset) > 0.1:
+                    # Search in direction where line was last seen
+                    search_direction = 1 if self.last_known_offset > 0 else -1
+                    search_intensity = min(35, 15 + self.line_lost_counter * 3)
+                    recovery_turn = search_intensity * search_direction
+                else:
+                    # Standard alternating search but more intensive
+                    search_intensity = min(35, self.line_lost_counter * 4)
+                    recovery_turn = search_intensity * (1 if (self.line_lost_counter // 2) % 2 == 0 else -1)
+            elif self.line_lost_counter < 10:  # Reduced from 20 to 10
+                # Wider search pattern
+                search_intensity = min(50, 20 + self.line_lost_counter * 2)
                 recovery_turn = search_intensity * (1 if (self.line_lost_counter // 3) % 2 == 0 else -1)
             else:
-                # If still lost after 15 frames, stop
-                return 0, 0, 0, 0
+                # If still lost, pivot in place to find the line.
+                recovery_speed = 0  # Stop forward motion
+                search_intensity = 35  # A moderate pivot speed
+
+                # Turn towards the side where the line was last seen.
+                if hasattr(self, 'last_known_offset') and self.last_known_offset != 0:
+                    search_direction = 1 if self.last_known_offset > 0 else -1
+                else:
+                    # If we have no clue, just oscillate.
+                    search_direction = 1 if (self.line_lost_counter // 10) % 2 == 0 else -1
+                
+                recovery_turn = search_intensity * search_direction
+                
+                left_speed = int(recovery_speed + recovery_turn)
+                right_speed = int(recovery_speed - recovery_turn)
+
+                self.line_lost_counter += 1
+                return left_speed, right_speed, left_speed, right_speed
             
-            # Apply recovery movement
-            recovery_speed = max(20, base_speed // 3)  # Slow speed during recovery
+            # Apply recovery movement with dynamic speed
+            recovery_speed = max(25, base_speed // 2)  # Higher minimum speed for better recovery
             left_speed = int(recovery_speed + recovery_turn)
             right_speed = int(recovery_speed - recovery_turn)
             
@@ -1140,28 +1374,49 @@ class CameraLineFollower:
             
             return left_speed, right_speed, left_speed, right_speed
         
-        # Add deadband for small offsets to prevent jittery corrections
-        DEADBAND = 0.05  # Ignore offsets smaller than 5%
-        if abs(line_offset) < DEADBAND:
-            line_offset = 0.0
-            
         # Reset line lost counter since we found the line
         self.line_lost_counter = 0
-            
-        # Calculate the turning correction from the PID controller.
-        turn_correction = self.pid.update(line_offset)
+        
+        # Store current offset for future recovery reference
+        self.last_known_offset = line_offset
+        
+        # Prepare robot state for adaptive PID
+        robot_state = {
+            'motor_speeds': {'left': base_speed, 'right': base_speed},  # Approximate current speeds
+            'timestamp': time.time()
+        }
+        
+        # Get additional parameters for adaptive PID
+        using_prediction = result.get('using_prediction', False)
+        
+        # Calculate the turning correction using the enhanced adaptive PID controller
+        turn_correction = self.pid.update(
+            error=line_offset,
+            robot_state=robot_state,
+            line_confidence=line_confidence,
+            using_prediction=using_prediction
+        )
         
         # Store last turn correction for recovery mechanism
         self.last_turn_correction = turn_correction
         
-        # Smoother speed reduction - less aggressive than before
-        # Only reduce speed significantly for large offsets
-        if abs(line_offset) > 0.3:  # Only reduce speed for large offsets
-            speed_reduction_factor = 1.0 - (abs(line_offset) * 0.3)  # Less aggressive reduction
-        else:
-            speed_reduction_factor = 1.0  # No speed reduction for small corrections
+        # Improved speed control that maintains enough speed for effective correction
+        is_severe_recovery = result.get('severe_offset_recovery', False)
+        abs_offset = abs(line_offset)
         
-        target_speed = int(base_speed * max(0.5, speed_reduction_factor))  # Never go below 50% speed
+        if is_severe_recovery:
+            # Severe offset recovery: moderate speed reduction but keep enough speed for correction
+            speed_reduction_factor = 0.7  # Reduce to 70% speed but maintain correction ability
+        elif abs_offset > 0.4:  # Large offset - need speed to execute correction
+            speed_reduction_factor = 0.85  # Only slight reduction to maintain correction power
+        elif abs_offset > 0.3:  # Medium offset - moderate reduction
+            speed_reduction_factor = 0.95  # Reduce to 95% speed  
+        elif using_prediction:
+            speed_reduction_factor = 0.95  # Slightly slower when using predictions
+        else:
+            speed_reduction_factor = 1.0  # Full speed for well-centered line following
+        
+        target_speed = int(base_speed * max(0.6, speed_reduction_factor))  # Higher minimum speed for effective correction
         
         # Speed smoothing - gradually adjust to target speed for consistency
         self.speed_history.append(target_speed)
@@ -1183,17 +1438,37 @@ class CameraLineFollower:
         
         self.last_calculated_speed = current_speed
         
-        # Limit turn correction to prevent extreme motor differences
-        max_turn_correction = current_speed * 0.6  # Max 60% of current speed
+        # Enhanced turn correction limiting that allows stronger corrections for large offsets
+        confidence_factor = max(0.4, line_confidence)  # Scale from 0.4 to 1.0
+        
+        # IMMEDIATE RESPONSE LIMITS - allow strong corrections for any drift from center
+        if abs_offset < 0.03:  # Truly centered - gentle limits
+            max_turn_correction = current_speed * 0.25  # 25% of speed for true center
+        elif abs_offset < 0.08:  # ANY drift from center - strong correction power
+            max_turn_correction = current_speed * 0.55  # 55% of speed for immediate response
+        elif abs_offset < 0.15:  # Small drift - very strong correction power
+            max_turn_correction = current_speed * 0.7   # 70% of speed for quick recovery
+        elif abs_offset < 0.25:  # Medium drift - maximum correction power
+            max_turn_correction = current_speed * 0.85  # 85% of speed to get back to center
+        elif abs_offset > 0.35:  # Large offset - ultra-maximum correction power
+            max_turn_correction = current_speed * 0.95  # 95% of speed for emergency correction
+        else:  # Normal drift - strong correction
+            max_turn_correction = current_speed * (0.6 + 0.2 * confidence_factor)  # 60% to 80% of speed
+        
+        # The adaptive PID already limits its output, but we add a secondary limit for safety
         turn_correction = max(-max_turn_correction, min(max_turn_correction, turn_correction))
         
-        # Calculate motor speeds with smoother differential
+        # Calculate motor speeds with smoother differential - FIXED DIRECTION
         left_speed = int(current_speed + turn_correction)
         right_speed = int(current_speed - turn_correction)
         
         # Ensure motor speeds stay within reasonable bounds
         left_speed = max(-100, min(100, left_speed))
         right_speed = max(-100, min(100, right_speed))
+        
+        # Debug output for large offsets to troubleshoot stopping issues
+        if self.debug and abs_offset > 0.3:
+            print(f"MOTOR SPEEDS: Base={base_speed} Target={target_speed} Current={current_speed} | Turn={turn_correction:.1f} | Motors: L={left_speed} R={right_speed}")
 
         return left_speed, right_speed, left_speed, right_speed
     
@@ -1216,6 +1491,30 @@ class CameraLineFollower:
     def clear_intersection_signal(self):
         """Clear the intersection detection signal after main controller handles it."""
         self.intersection_detected_for_main = False
+    
+    def clear_line_memory_buffer(self):
+        """Clear the line memory buffer - useful for mission restart."""
+        self.line_memory_buffer.clear_buffer()
+        
+    def reset_pid_controller(self):
+        """Reset the adaptive PID controller - useful for mission restart."""
+        self.pid.reset()
+        
+    def get_line_memory_status(self) -> Dict:
+        """Get current line memory buffer status for monitoring."""
+        return self.line_memory_buffer.get_buffer_status()
+        
+    def get_line_trend_analysis(self) -> Dict:
+        """Get line movement trend analysis from the buffer."""
+        return self.line_memory_buffer.get_line_trend()
+    
+    def get_pid_status(self) -> Dict:
+        """Get current adaptive PID controller status."""
+        return self.pid.get_status()
+    
+    def get_pid_performance_metrics(self) -> Dict:
+        """Get detailed PID performance metrics for debugging."""
+        return self.pid.get_performance_metrics()
 
 
 class CameraLineFollowingMixin:
