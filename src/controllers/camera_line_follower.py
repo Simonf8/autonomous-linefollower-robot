@@ -962,8 +962,10 @@ class CameraLineFollower:
         box_center_y = y + h // 2
         box_bottom_y = y + h
         
-        # Check if box is in pickup position (very bottom of frame)
-        in_pickup_position = (box_bottom_y / zone_height) > 0.8
+        # Check if box is in pickup position (bottom of frame) - just a bit more contact needed
+        # Use two thresholds: close enough for approach, and very close for pickup
+        close_to_pickup = (box_bottom_y / zone_height) > 0.78  # Start push a bit earlier
+        in_pickup_position = (box_bottom_y / zone_height) > 0.995  # Must be at absolute edge of frame (just 2cm more)
         
         # Determine dominant color (blue or yellow)
         roi = hsv[y:y+h, x:x+w]
@@ -986,7 +988,9 @@ class CameraLineFollower:
             'bbox': (x, y, w, h),
             'area': area,
             'center': (box_center_x, box_center_y),
+            'center_x_ratio': box_center_x / zone_width,  # Add horizontal position ratio
             'bottom_y_ratio': box_bottom_y / zone_height,
+            'close_to_pickup': close_to_pickup,  # Add intermediate threshold
             'in_pickup_position': in_pickup_position,
             'contour': largest_contour,
             'dominant_color': dominant_color,
@@ -1820,16 +1824,31 @@ class CameraLineFollower:
                 result['ready_for_pickup'] = True
                 return (0, 0, 0, 0)
             elif result.get('box_in_near', False):
-                # Box is in near zone but not at bottom yet - creep forward slowly
+                # Box is in near zone but not at bottom yet - move forward EXTREMELY aggressively
                 box_info = result.get('box_info', {})
                 box_y_ratio = box_info.get('bottom_y_ratio', 0.5)
+                close_to_pickup = box_info.get('close_to_pickup', False)
                 
-                # Very slow approach speed - slower as we get closer
-                approach_speed = int(base_speed * 0.2 * (1.0 - box_y_ratio))
-                approach_speed = max(10, approach_speed)  # Minimum creep speed
+                # Controlled aggressive approach - push firmly but not too hard
+                if box_y_ratio < 0.6:
+                    # Box is far, move at good speed
+                    approach_speed = int(base_speed * 0.8)
+                elif box_y_ratio < 0.8:
+                    # Box is getting closer, moderate speed
+                    approach_speed = int(base_speed * 0.6)
+                elif close_to_pickup and box_y_ratio < 0.995:
+                    # Box is close to pickup zone, push a bit more firmly to close the 2cm gap
+                    approach_speed = int(base_speed * 0.55)
+                    print(f"CLOSING GAP: Box at {box_y_ratio:.3f}, closing final gap at speed {approach_speed}")
+                else:
+                    # Box is very close, final push with just a bit more force to close that 2cm
+                    approach_speed = int(base_speed * 0.45)
+                    print(f"FINAL 2CM PUSH: Box at {box_y_ratio:.3f}, final 2cm push at speed {approach_speed}")
+                
+                approach_speed = max(30, approach_speed)  # Reasonable minimum speed
                 
                 if self.debug:
-                    print(f"Box approach - creeping forward at speed {approach_speed}, box at {box_y_ratio:.2f}")
+                    print(f"Box approach - moving forward at speed {approach_speed}, box at {box_y_ratio:.2f}")
                 
                 # Still try to stay centered on line if visible
                 line_offset = result.get('line_offset', 0.0)

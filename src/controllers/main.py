@@ -80,7 +80,7 @@ MAZE_GRID = [
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 13
     [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0]  # Row 14
 ]
-START_CELL = (0, 12) # Start position (col, row)
+START_CELL = (13, 2) # Start position (col, row)
 if not FEATURES['BOX_MISSION_ENABLED']:
     END_CELL = (20, 14)   # End position for non-box missions
 else:
@@ -413,8 +413,11 @@ class RobotController(CameraLineFollowingMixin):
             
             if FEATURES['BOX_MISSION_ENABLED']:
                 if self.box_handler.has_package:
+                    print(f"PATH_FOLLOWING: Has package, transitioning to at_dropoff")
                     self.state = "at_dropoff"
                 else:
+                    print(f"PATH_FOLLOWING: No package, transitioning to at_pickup")
+                    print(f"PATH_FOLLOWING: Target cell {target_cell} is pickup location: {target_cell in self.box_handler.pickup_locations}")
                     self.state = "at_pickup"
             else:
                 self.state = "mission_complete" # Fallback for non-box mission
@@ -447,6 +450,11 @@ class RobotController(CameraLineFollowingMixin):
         
         # Use the new look-ahead detection system
         self.camera_line_result = self.camera_line_follower.detect_line_with_lookahead(frame)
+        
+        # Debug: Check if we're in approaching_box state and log camera results
+        if self.state == "approaching_box" and self.camera_line_result.get('box_detected', False):
+            box_info = self.camera_line_result.get('box_info', {})
+            print(f"PATH_FOLLOWING: Box detected - bottom_y_ratio={box_info.get('bottom_y_ratio', 'N/A')}, ready_for_pickup={self.camera_line_result.get('ready_for_pickup', False)}")
         
         # Feed camera results to position tracker for hybrid tracking
         self.position_tracker.set_camera_line_result(self.camera_line_result)
@@ -506,6 +514,17 @@ class RobotController(CameraLineFollowingMixin):
                     self.state = 'turning'
                     self.turn_start_time = time.time()
                     return
+            
+            # EMERGENCY FIX: If we're at row 14 (pickup row) and see an intersection, turn right
+            current_cell = self.position_tracker.get_current_cell()
+            if current_cell[1] == 14:  # Row 14 is the pickup row
+                print(f"EMERGENCY: At pickup row 14, cell {current_cell} - forcing right turn at intersection")
+                self._stop_motors()
+                time.sleep(0.1)
+                self.turn_to_execute = 'right'
+                self.state = 'turning'
+                self.turn_start_time = time.time()
+                return
             
         # Check if look-ahead system sees an intersection ahead
         if self.camera_line_result.get('intersection_ahead', False):
@@ -720,9 +739,13 @@ class RobotController(CameraLineFollowingMixin):
             self.position_tracker.set_moving(True)
             self._execute_destination_alignment()
         elif self.state == "going_to_pickup":
+            current_cell = self.position_tracker.get_current_cell()
+            print(f"GOING_TO_PICKUP: Robot at cell {current_cell}")
             target_info = self.box_handler.get_current_target()
+            print(f"GOING_TO_PICKUP: target_info={target_info}")
             if target_info:
                 target_cell, mission_type = target_info
+                print(f"GOING_TO_PICKUP: Planning path from {current_cell} to {target_cell}")
                 if mission_type == "PICKUP":
                     self._plan_path_to_target(target_cell)
                 else: # Should not happen in this state
@@ -730,12 +753,19 @@ class RobotController(CameraLineFollowingMixin):
             else:
                 self.state = "mission_complete"
         elif self.state == "at_pickup":
+            current_cell = self.position_tracker.get_current_cell()
+            print("=" * 60)
+            print(f"AT_PICKUP STATE: Robot at cell {current_cell}")
+            print(f"AT_PICKUP STATE: Pickup locations: {self.box_handler.pickup_locations}")
+            print(f"AT_PICKUP STATE: Robot direction: {self.position_tracker.current_direction}")
+            print("=" * 60)
             print("At pickup location. Checking if turn is needed first.")
             
             # Check if we're at an intersection that requires a turn
             frame = self.camera_line_follower.get_camera_frame()
             if frame is not None:
                 line_result = self.camera_line_follower.detect_line_with_lookahead(frame)
+                print(f"AT_PICKUP: Line result - intersection_now: {line_result.get('intersection_now', False)}, intersection_type: {line_result.get('upcoming_intersection_type', 'none')}")
                 
                 # If we're at an intersection (T-junction), we need to turn first
                 if line_result.get('intersection_now', False) or line_result.get('upcoming_intersection_type') == 'T':
@@ -760,6 +790,7 @@ class RobotController(CameraLineFollowingMixin):
             self._handle_locating_box()
 
         elif self.state == "approaching_box":
+            print(f"APPROACHING_BOX STATE: Robot at cell {self.position_tracker.get_current_cell()}")
             self._handle_approaching_box()
 
         elif self.state == "grabbing_box":
@@ -775,10 +806,13 @@ class RobotController(CameraLineFollowingMixin):
             self._handle_box_fine_alignment()
 
         elif self.state == "going_to_dropoff":
+            print(f"GOING_TO_DROPOFF: has_package={self.box_handler.has_package}, path_planned={self.path_planned_for_dropoff}")
             if not self.path_planned_for_dropoff:
                 target_info = self.box_handler.get_current_target()
+                print(f"GOING_TO_DROPOFF: target_info={target_info}")
                 if target_info:
                     target_cell, mission_type = target_info
+                    print(f"GOING_TO_DROPOFF: target_cell={target_cell}, mission_type={mission_type}")
                     if mission_type == "DROPOFF":
                         print(f"Planning path to dropoff at {target_cell}")
                         # Force update position tracker after the left turn
@@ -789,6 +823,7 @@ class RobotController(CameraLineFollowingMixin):
                         # Note: _plan_path_to_target() will change state to "path_following" if successful
                     else: # Should not happen
                         print(f"ERROR: Expected DROPOFF mission but got {mission_type}")
+                        print(f"ERROR: Box handler state - has_package: {self.box_handler.has_package}")
                         self.state = "error"
                 else:
                     print("ERROR: No target info available for dropoff")
@@ -1046,6 +1081,28 @@ class RobotController(CameraLineFollowingMixin):
         
         self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
 
+    def _perform_strong_pivot_turn(self, direction: str):
+        """
+        Commands motor speeds for a stronger pivot turn to ensure complete 180-degree rotation.
+        """
+        # Use stronger speed for reliable 180-degree turn
+        strong_turn_speed = 45  # Stronger than slow turn for more reliable completion
+        
+        if direction == "left":
+            # Rotate counter-clockwise (left turn)
+            fl_speed = -strong_turn_speed    # Front left: reverse
+            fr_speed = strong_turn_speed     # Front right: forward
+            bl_speed = -strong_turn_speed    # Back left: reverse  
+            br_speed = strong_turn_speed     # Back right: forward
+        else:  # right turn
+            # Rotate clockwise (right turn)
+            fl_speed = strong_turn_speed     # Front left: forward
+            fr_speed = -strong_turn_speed    # Front right: reverse
+            bl_speed = strong_turn_speed     # Back left: forward
+            br_speed = -strong_turn_speed    # Back right: reverse
+        
+        self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+
     def _execute_destination_alignment(self):
         """
         Turn at destination until line is found and centered.
@@ -1291,6 +1348,11 @@ class RobotController(CameraLineFollowingMixin):
         # The look-ahead system handles everything for box approach
         result = self.camera_line_result
         
+        print(f"APPROACH_BOX: ready_for_pickup={result.get('ready_for_pickup', False)}, box_detected={result.get('box_detected', False)}")
+        if result.get('box_detected', False):
+            box_info = result.get('box_info', {})
+            print(f"APPROACH_BOX: Box info - bottom_y_ratio={box_info.get('bottom_y_ratio', 'N/A')}, in_pickup_position={box_info.get('in_pickup_position', 'N/A')}")
+        
         # Check if we're ready for pickup (box is in position)
         if result.get('ready_for_pickup', False):
             print("Look-ahead system signals: Box in pickup position!")
@@ -1310,25 +1372,36 @@ class RobotController(CameraLineFollowingMixin):
             # We don't need to set motor speeds here - they're already set
             
         else:
-            # No box detected - might need to search or continue approach
-            print("No box in view - continuing approach...")
+            # No box detected - move forward slowly to search
+            print("No box in view - moving forward to search...")
+            self._set_motor_speeds(20, 20, 20, 20)  # Slow forward search
             
-        # Safety timeout - but only if no box is detected at all
-        APPROACH_TIMEOUT_S = 8.0  # Increased timeout
+        # Safety timeout - push forward firmly if needed
+        APPROACH_TIMEOUT_S = 15.0  # Reasonable timeout
         if time.time() - self.action_start_time > APPROACH_TIMEOUT_S:
             if not result.get('box_detected', False):
-                print("Box approach timed out with no box detected. Attempting grab anyway.")
-                self.audio_feedback.speak("Approach timeout. Grabbing.")
+                print("Box approach timed out with no box detected. Making final forward push.")
+                self.audio_feedback.speak("Final push forward.")
+                # Make a final firm push forward
+                self._set_motor_speeds(40, 40, 40, 40)  # Firm push speed
+                time.sleep(1.0)  # Reasonable push time
                 self._stop_motors()
                 self.state = 'grabbing_box'
             else:
-                # If we still see the box but haven't reached pickup position, move forward more aggressively
-                print("Box still visible but not in pickup position. Moving forward aggressively.")
-                self._set_motor_speeds(25, 25, 25, 25)  # Slow forward movement
+                # If we still see the box but haven't reached pickup position, push firmly
+                print("Box still visible but not in pickup position. Making firm final push to contact box.")
+                self.audio_feedback.speak("Final push to contact box.")
+                self._set_motor_speeds(45, 45, 45, 45)  # Firm final push
+                time.sleep(0.8)  # Reasonable push time
+                self._stop_motors()
+                print("Final push complete. Proceeding to grab.")
+                self.state = 'grabbing_box'
 
     def _handle_grabbing_box(self):
         """Activate the electromagnet to pick up the box."""
-        print("GRABBING BOX STATE: Entered state.")
+        print("=" * 50)
+        print("GRABBING BOX STATE: ENTERED!")
+        print("=" * 50)
         self.audio_feedback.speak("Grabbing box.")
         if self.motor_controller:
             print("GRABBING BOX STATE: Motor controller found. Activating electromagnet.")
@@ -1338,14 +1411,50 @@ class RobotController(CameraLineFollowingMixin):
         
         current_cell = self.position_tracker.get_current_cell()
         print(f"GRABBING BOX: Collecting package at {current_cell}")
-        self.box_handler.collect_package(current_cell)
-        time.sleep(0.8) # Shorter wait for electromagnet to engage
+        
+        # Check box handler state before and after
+        print(f"GRABBING BOX: Box handler has_package BEFORE: {self.box_handler.has_package}")
+        print(f"GRABBING BOX: Attempting to collect package at cell {current_cell}")
+        print(f"GRABBING BOX: Available pickup locations: {self.box_handler.pickup_locations}")
+        
+        # Check if current cell matches any pickup location
+        for i, pickup_loc in enumerate(self.box_handler.pickup_locations):
+            distance = abs(current_cell[0] - pickup_loc[0]) + abs(current_cell[1] - pickup_loc[1])
+            print(f"GRABBING BOX: Distance to pickup {i} at {pickup_loc}: {distance}")
+        
+        success = self.box_handler.collect_package(current_cell, tolerance=2)  # Allow 2 cells tolerance
+        print(f"GRABBING BOX: Collection success: {success}")
+        print(f"GRABBING BOX: Box handler has_package AFTER: {self.box_handler.has_package}")
+        
+        # If collection failed, try forcing it at the current location
+        if not success and not self.box_handler.has_package:
+            print("GRABBING BOX: First collection attempt failed. Trying force collection...")
+            # Try with even more tolerance
+            success = self.box_handler.collect_package(current_cell, tolerance=3)
+            print(f"GRABBING BOX: Force collection success: {success}")
+            print(f"GRABBING BOX: Box handler has_package AFTER force: {self.box_handler.has_package}")
+        
+        # Push forward firmly to ensure good contact with box
+        print("GRABBING BOX: Making firm contact with box")
+        self._set_motor_speeds(38, 38, 38, 38)  # Slightly stronger to close that 2cm gap
+        time.sleep(0.9)  # Push a bit longer to ensure contact
+        self._stop_motors()
+        
+        # Short pause then second push to close any remaining gap
+        time.sleep(0.2)
+        print("GRABBING BOX: Second push to close final gap")
+        self._set_motor_speeds(30, 30, 30, 30)  # Stronger second push to close the gap
+        time.sleep(0.6)  # Longer second push
+        self._stop_motors()
+        
+        time.sleep(1.5) # Wait for electromagnet to securely engage with box
         
         # Reset the box approach state in camera line follower
         if hasattr(self, 'camera_line_follower'):
             self.camera_line_follower.reset_box_approach()
         
         print("GRABBING BOX: Transitioning to reverse state")
+        print("=" * 50)
         self.state = "reversing_from_box"
         self.action_start_time = time.time()
 
@@ -1369,14 +1478,26 @@ class RobotController(CameraLineFollowingMixin):
     def _handle_turning_after_pickup(self):
         """Perform a 180-degree turn after pickup to go back to dropoff."""
         # After picking up box, robot needs to turn around and go back to dropoff area
-        TURN_DURATION_S = 2.8  # Increased from 1.2 for a full 180-degree turn
+        TURN_DURATION_S = 4.0  # Increased for a complete 180-degree turn
 
         elapsed_time = time.time() - self.action_start_time
         print(f"POST-PICKUP 180-TURN: {elapsed_time:.1f}s / {TURN_DURATION_S}s")
         
         if elapsed_time < TURN_DURATION_S:
-            # 180-degree turn to face back towards dropoff area
-            self._perform_slow_pivot_turn('right') 
+            # 180-degree turn to face back towards dropoff area - PURE PIVOT TURN (no forward movement)
+            # Use much stronger turn speed for 180-degree turn
+            STRONG_TURN_SPEED = 50  # Strong pivot turn speed
+            
+            # Pure pivot turn - robot should NOT move forward, only rotate
+            fl_speed = STRONG_TURN_SPEED     # Front left: forward
+            fr_speed = -STRONG_TURN_SPEED    # Front right: reverse
+            bl_speed = STRONG_TURN_SPEED     # Back left: forward
+            br_speed = -STRONG_TURN_SPEED    # Back right: reverse
+            
+            self._set_motor_speeds(fl_speed, fr_speed, bl_speed, br_speed)
+            
+            # Disable position tracking during turn to prevent cell updates
+            self.position_tracker.set_moving(False)
         else:
             self._stop_motors()
             print("Completed 180-degree turn after pickup.")
@@ -1389,10 +1510,13 @@ class RobotController(CameraLineFollowingMixin):
             self.position_tracker.current_direction = new_direction
             print(f"DIRECTION UPDATE: Changed from {current_dir} to {new_direction} after 180-turn")
 
+            # Re-enable position tracking
+            self.position_tracker.set_moving(True)
+            
             print("TRANSITIONING TO DROPOFF STATE")
             self.state = 'going_to_dropoff'
             self.path_planned_for_dropoff = False  # Reset flag for new dropoff planning
-            time.sleep(0.1) # Minimal pause to stabilize
+            time.sleep(0.2) # Longer pause to stabilize after turn
 
     def _handle_box_fine_alignment(self):
         """Fine-tune alignment to center the box after initial turn."""
