@@ -693,7 +693,7 @@ class CameraLineFollower:
             print(f"Error capturing frame: {e}")
             return None
 
-    def detect_line(self, frame: Optional[np.ndarray] = None, robot_state: Dict = None, encoder_counts: Dict = None, is_straight_path: bool = False) -> Dict:
+    def detect_line(self, frame: Optional[np.ndarray] = None, robot_state: Dict = None, encoder_counts: Dict = None) -> Dict:
         """
         Main line detection function with memory buffer integration.
         Takes a raw camera frame, processes it, and returns line following data.
@@ -717,7 +717,7 @@ class CameraLineFollower:
         final_mask = self._preprocess_roi(roi)
 
         # 3. Find line and intersection information from the mask
-        line_info = self._find_line_in_roi(final_mask, is_straight_path)
+        line_info = self._find_line_in_roi(final_mask)
         
         # 4. Calculate final motor control parameters
         result = self._calculate_line_following_params(line_info, width, roi_start_y)
@@ -875,7 +875,7 @@ class CameraLineFollower:
         
         return filtered_binary_roi
 
-    def _find_line_in_roi(self, binary_roi: np.ndarray, is_straight_path: bool = False) -> Optional[Dict]:
+    def _find_line_in_roi(self, binary_roi: np.ndarray) -> Optional[Dict]:
         """
         Analyzes the binary mask of the ROI to find the line and detect intersections.
         This uses a simplified, robust logic for intersection detection.
@@ -892,124 +892,168 @@ class CameraLineFollower:
         if not valid_contours:
             return None
 
-        # If on a straight path, be much less sensitive to intersections.
-        if is_straight_path:
-            intersection_area_threshold = self.intersection_area_threshold * 1.5
-            intersection_solidity_threshold = self.intersection_solidity_threshold * 0.75
-        else:
-            intersection_area_threshold = self.intersection_area_threshold
-            intersection_solidity_threshold = self.intersection_solidity_threshold
-
-        # Find the largest contour, which is assumed to be the line/lane.
-        main_contour = max(valid_contours, key=cv2.contourArea)
-        area = cv2.contourArea(main_contour)
-        hull_area = cv2.contourArea(cv2.convexHull(main_contour))
-        solidity = float(area) / hull_area if hull_area > 0 else 0
-
-        # Check for intersection based on the properties of the largest contour
-        is_at_intersection = False
-        if area > intersection_area_threshold and solidity < intersection_solidity_threshold and aspect_ratio > self.intersection_aspect_ratio_threshold:
-            is_at_intersection = True
+        # Sort by area, largest first
+        valid_contours = sorted(valid_contours, key=cv2.contourArea, reverse=True)
         
-        # --- Precise Centering Calculation ---
-        # This is done AFTER intersection detection to use the main contour
-        if is_at_intersection:
-            # Calculate precise line center using multiple methods for better self-correction.
-            # Combines centroid, contour fitting, and edge analysis for maximum accuracy.
-            roi_h, roi_w = binary_roi.shape
-            
-            # Method 1: Standard centroid from moments
-            centroid_cx = int(moments["m10"] / moments["m00"])
-            centroid_cy = int(moments["m01"] / moments["m00"])
-            
-            # Method 2: Contour-based center using minimum enclosing rectangle
-            rect = cv2.minAreaRect(main_contour)
-            box = cv2.boxPoints(rect)
-            box = np.array(box, dtype=int)  # Fixed: replaced np.int0 with np.array(dtype=int)
-            rect_cx = int(rect[0][0])  # Center x of the rotated rectangle
-            rect_cy = int(rect[0][1])  # Center y of the rotated rectangle
-            
-            # Method 3: Horizontal scanning for line center (most reliable for line following)
-            scan_centers = []
-            scan_start_y = max(0, roi_h // 4)  # Start from 25% down
-            scan_end_y = min(roi_h, roi_h * 3 // 4)  # End at 75% down
-            
-            for y in range(scan_start_y, scan_end_y, 2):  # Sample every 2 pixels
-                row = binary_roi[y, :]
-                white_pixels = np.where(row > 128)[0]  # Find white pixels in this row
-                
-                if len(white_pixels) > 5:  # Need minimum pixels for reliable center
-                    # Calculate weighted center of this row
-                    left_edge = white_pixels[0]
-                    right_edge = white_pixels[-1]
-                    row_center = (left_edge + right_edge) // 2
-                    scan_centers.append(row_center)
-            
-            # Calculate average scan center if we have enough data
-            if len(scan_centers) >= 3:
-                scan_cx = int(np.median(scan_centers))  # Use median for robustness
-            else:
-                scan_cx = centroid_cx  # Fallback to centroid
-            
-            # Method 4: Edge-based center calculation for very precise centering
-            # Apply edge detection to find line boundaries
-            edges = cv2.Canny(binary_roi, 50, 150)
-            
-            # Find leftmost and rightmost edges in the middle section of ROI
-            middle_y_start = roi_h // 3
-            middle_y_end = roi_h * 2 // 3
-            middle_section = edges[middle_y_start:middle_y_end, :]
-            
-            edge_centers = []
-            for y in range(0, middle_section.shape[0], 3):  # Sample every 3 pixels
-                row_edges = np.where(middle_section[y, :] > 0)[0]
-                if len(row_edges) >= 2:
-                    # Find leftmost and rightmost significant edges
-                    left_edge = row_edges[0]
-                    right_edge = row_edges[-1]
-                    if right_edge - left_edge > 10:  # Minimum line width
-                        edge_center = (left_edge + right_edge) // 2
-                        edge_centers.append(edge_center)
-            
-            if len(edge_centers) >= 2:
-                edge_cx = int(np.mean(edge_centers))
-            else:
-                edge_cx = centroid_cx  # Fallback
-            
-            # Combine all methods with weighted average for final result
-            final_cx = int(0.4 * scan_cx + 0.3 * edge_cx + 0.2 * centroid_cx + 0.1 * rect_cx)
-            final_cy = int(0.8 * centroid_cy + 0.2 * rect_cy)
-            
-            # Clamp to valid coordinates
-            final_cx = max(0, min(roi_w - 1, final_cx))
-            final_cy = max(0, min(roi_h - 1, final_cy))
-            
-            if self.debug and abs(final_cx - centroid_cx) > 5:
-                print(f"PRECISE CENTERING: Adjusted center from {centroid_cx} to {final_cx} "
-                      f"(scan: {scan_cx}, edge: {edge_cx}, rect: {rect_cx})")
-            
-            return final_cx, final_cy
-        
-        # If it's not an intersection, use the bottom-slice logic to find a stable navigation point
         roi_h, roi_w = binary_roi.shape
-        sub_roi_h = roi_h // 3
-        sub_roi_y_start = roi_h - sub_roi_h
-        bottom_slice = binary_roi[sub_roi_y_start:, :]
-        M_bottom = cv2.moments(bottom_slice)
-        if M_bottom["m00"] > 0:
-            bottom_cx = int(M_bottom["m10"] / M_bottom["m00"])
-            # Use weighted average of intersection center and bottom slice center
-            cx = int(0.7 * bottom_cx + 0.3 * centroid_cx)  # Prioritize bottom slice for stability
+        is_intersection = False
+
+        # --- Case 1: Multiple contours detected ---
+        # This could indicate an intersection, but let's be more selective
+        if len(valid_contours) >= 2:
+            line1_contour = valid_contours[0]
+            line2_contour = valid_contours[1]
+            
+            # Check if both contours are significant in size (lowered threshold)
+            area1 = cv2.contourArea(line1_contour)
+            area2 = cv2.contourArea(line2_contour)
+            min_intersection_area = roi_w * roi_h * 0.02  # Reduced from 0.05 to 0.02 - more sensitive
+            
+            # Only consider it an intersection if both contours are substantial
+            if area1 > min_intersection_area and area2 > min_intersection_area:
+                is_intersection = True
+            
+            # Combine the two largest contours for analysis
+            combined_contour = np.vstack([line1_contour, line2_contour])
+            M = cv2.moments(combined_contour)
+            x, y, w, h = cv2.boundingRect(combined_contour)
+            area = cv2.contourArea(combined_contour)
+
+        # --- Case 2: One large contour detected ---
+        else:
+            largest_contour = valid_contours[0]
+            M = cv2.moments(largest_contour)
+            x, y, w, h = cv2.boundingRect(largest_contour)
+            area = cv2.contourArea(largest_contour)
+            
+            # More sensitive intersection logic for detecting T-intersections at grid cells
+            # Lowered thresholds to catch more intersections
+            is_wide = w > roi_w * 0.5  # Reduced from 0.8 to 0.5 - more sensitive
+            is_tall = h > roi_h * 0.5  # Reduced from 0.8 to 0.5 - more sensitive
+            
+            # For a T-intersection, we need significant width OR height (not both)
+            # This catches horizontal T-bars, vertical T-bars, and cross intersections
+            is_t_intersection = is_wide or is_tall or (w > roi_w * 0.6) or (h > roi_h * 0.6)
+            
+            if is_t_intersection:
+                is_intersection = True
+        
+        if M["m00"] == 0:
+            return None
+        
+        # Enhanced line center calculation for better self-correction
+        if self.CENTERING_PRECISION_MODE:
+            cx, cy = self._calculate_precise_line_center(binary_roi, M, valid_contours[0], is_intersection)
+        else:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+
+        # If it's an intersection, use the bottom-slice logic to find a stable navigation point
+        if is_intersection:
+            sub_roi_h = roi_h // 3
+            sub_roi_y_start = roi_h - sub_roi_h
+            bottom_slice = binary_roi[sub_roi_y_start:, :]
+            M_bottom = cv2.moments(bottom_slice)
+            if M_bottom["m00"] > 0:
+                bottom_cx = int(M_bottom["m10"] / M_bottom["m00"])
+                # Use weighted average of intersection center and bottom slice center
+                cx = int(0.7 * bottom_cx + 0.3 * cx)  # Prioritize bottom slice for stability
 
         return {
             'center': (cx, cy),
-            'contour': main_contour, # Return the largest for drawing
+            'contour': valid_contours[0], # Return the largest for drawing
             'contours': valid_contours,
             'bbox': (x, y, w, h),
             'area': area,
             'confidence': 1.0, # Simplified confidence
-            'is_at_intersection': is_at_intersection
+            'is_at_intersection': is_intersection
         }
+    
+    def _calculate_precise_line_center(self, binary_roi: np.ndarray, moments: Dict, 
+                                     main_contour: np.ndarray, is_intersection: bool) -> Tuple[int, int]:
+        """
+        Calculate precise line center using multiple methods for better self-correction.
+        Combines centroid, contour fitting, and edge analysis for maximum accuracy.
+        """
+        roi_h, roi_w = binary_roi.shape
+        
+        # Method 1: Standard centroid from moments
+        centroid_cx = int(moments["m10"] / moments["m00"])
+        centroid_cy = int(moments["m01"] / moments["m00"])
+        
+        # Method 2: Contour-based center using minimum enclosing rectangle
+        rect = cv2.minAreaRect(main_contour)
+        box = cv2.boxPoints(rect)
+        box = np.array(box, dtype=int)  # Fixed: replaced np.int0 with np.array(dtype=int)
+        rect_cx = int(rect[0][0])  # Center x of the rotated rectangle
+        rect_cy = int(rect[0][1])  # Center y of the rotated rectangle
+        
+        # Method 3: Horizontal scanning for line center (most reliable for line following)
+        scan_centers = []
+        scan_start_y = max(0, roi_h // 4)  # Start from 25% down
+        scan_end_y = min(roi_h, roi_h * 3 // 4)  # End at 75% down
+        
+        for y in range(scan_start_y, scan_end_y, 2):  # Sample every 2 pixels
+            row = binary_roi[y, :]
+            white_pixels = np.where(row > 128)[0]  # Find white pixels in this row
+            
+            if len(white_pixels) > 5:  # Need minimum pixels for reliable center
+                # Calculate weighted center of this row
+                left_edge = white_pixels[0]
+                right_edge = white_pixels[-1]
+                row_center = (left_edge + right_edge) // 2
+                scan_centers.append(row_center)
+        
+        # Calculate average scan center if we have enough data
+        if len(scan_centers) >= 3:
+            scan_cx = int(np.median(scan_centers))  # Use median for robustness
+        else:
+            scan_cx = centroid_cx  # Fallback to centroid
+        
+        # Method 4: Edge-based center calculation for very precise centering
+        # Apply edge detection to find line boundaries
+        edges = cv2.Canny(binary_roi, 50, 150)
+        
+        # Find leftmost and rightmost edges in the middle section of ROI
+        middle_y_start = roi_h // 3
+        middle_y_end = roi_h * 2 // 3
+        middle_section = edges[middle_y_start:middle_y_end, :]
+        
+        edge_centers = []
+        for y in range(0, middle_section.shape[0], 3):  # Sample every 3 pixels
+            row_edges = np.where(middle_section[y, :] > 0)[0]
+            if len(row_edges) >= 2:
+                # Find leftmost and rightmost significant edges
+                left_edge = row_edges[0]
+                right_edge = row_edges[-1]
+                if right_edge - left_edge > 10:  # Minimum line width
+                    edge_center = (left_edge + right_edge) // 2
+                    edge_centers.append(edge_center)
+        
+        if len(edge_centers) >= 2:
+            edge_cx = int(np.mean(edge_centers))
+        else:
+            edge_cx = centroid_cx  # Fallback
+        
+        # Combine all methods with weighted average for final result
+        if is_intersection:
+            # For intersections, prioritize scan-based method (most stable)
+            final_cx = int(0.5 * scan_cx + 0.3 * centroid_cx + 0.2 * edge_cx)
+            final_cy = centroid_cy  # Use standard centroid for y
+        else:
+            # For normal line following, use more balanced combination
+            final_cx = int(0.4 * scan_cx + 0.3 * edge_cx + 0.2 * centroid_cx + 0.1 * rect_cx)
+            final_cy = int(0.8 * centroid_cy + 0.2 * rect_cy)
+        
+        # Clamp to valid coordinates
+        final_cx = max(0, min(roi_w - 1, final_cx))
+        final_cy = max(0, min(roi_h - 1, final_cy))
+        
+        if self.debug and abs(final_cx - centroid_cx) > 5:
+            print(f"PRECISE CENTERING: Adjusted center from {centroid_cx} to {final_cx} "
+                  f"(scan: {scan_cx}, edge: {edge_cx}, rect: {rect_cx})")
+        
+        return final_cx, final_cy
     
     def _calculate_line_following_params(self, line_info: Optional[Dict], 
                                        frame_width: int, roi_start_y: int) -> Dict:
@@ -1345,24 +1389,8 @@ class CameraLineFollower:
                 search_intensity = min(50, 20 + self.line_lost_counter * 2)
                 recovery_turn = search_intensity * (1 if (self.line_lost_counter // 3) % 2 == 0 else -1)
             else:
-                # If still lost, pivot in place to find the line.
-                recovery_speed = 0  # Stop forward motion
-                search_intensity = 35  # A moderate pivot speed
-
-                # Turn towards the side where the line was last seen.
-                if hasattr(self, 'last_known_offset') and self.last_known_offset != 0:
-                    search_direction = 1 if self.last_known_offset > 0 else -1
-                else:
-                    # If we have no clue, just oscillate.
-                    search_direction = 1 if (self.line_lost_counter // 10) % 2 == 0 else -1
-                
-                recovery_turn = search_intensity * search_direction
-                
-                left_speed = int(recovery_speed + recovery_turn)
-                right_speed = int(recovery_speed - recovery_turn)
-
-                self.line_lost_counter += 1
-                return left_speed, right_speed, left_speed, right_speed
+                # If still lost after 10 frames, stop and try memory buffer prediction
+                return 0, 0, 0, 0
             
             # Apply recovery movement with dynamic speed
             recovery_speed = max(25, base_speed // 2)  # Higher minimum speed for better recovery

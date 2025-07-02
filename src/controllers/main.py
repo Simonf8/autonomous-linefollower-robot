@@ -54,7 +54,7 @@ CORNER_SPEED = 15   # Very slow for precise cornering
 # Values are multipliers (1.0 = no change, 0.9 = 10% slower).
 MOTOR_TRIMS =  {
     'left': 1.0,   
-    'right': 0.95, 
+    'right': 0.98, 
 }
 
 # Maze and Mission Configuration
