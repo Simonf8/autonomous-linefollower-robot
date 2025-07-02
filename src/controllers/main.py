@@ -328,6 +328,34 @@ class RobotController(CameraLineFollowingMixin):
         current_cell = self.position_tracker.get_current_cell()
         target_cell = self.path[-1]
         
+        # Check if robot has package and is close to any dropoff location
+        if FEATURES['BOX_MISSION_ENABLED'] and self.box_handler.has_package:
+            # Check if we're near any dropoff location (within 2 cells)
+            for dropoff_location in DROPOFF_LOCATIONS:
+                distance = abs(current_cell[0] - dropoff_location[0]) + abs(current_cell[1] - dropoff_location[1])
+                if distance <= 2:  # Within 2 cells of dropoff
+                    print(f"Near dropoff location {dropoff_location} (distance: {distance}). Dropping box!")
+                    self.audio_feedback.speak("Dropping box at dropoff area.")
+                    
+                    # Deactivate electromagnet immediately
+                    if self.motor_controller:
+                        self.motor_controller.electromagnet_off()
+                        print("Electromagnet deactivated - box dropped!")
+                    
+                    # Update box handler
+                    self.box_handler.deliver_package(current_cell)
+                    time.sleep(1.0)  # Wait for box to release
+                    
+                    # Check if mission is complete or go to next pickup
+                    if self.box_handler.is_mission_complete():
+                        self.state = "mission_complete"
+                        self._stop_motors()
+                        return
+                    else:
+                        print("Box dropped! Going to next pickup.")
+                        self.state = "going_to_pickup"
+                        return
+        
         # Update camera line follower with upcoming turn sequence
         if hasattr(self, 'camera_line_follower') and len(self.path) > self.current_target_index:
             # Calculate turn sequence for remaining path
