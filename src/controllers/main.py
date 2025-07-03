@@ -28,8 +28,8 @@ from camera_obstacle_avoidance import CameraObstacleAvoidance
 # Enable/disable features for easy testing and debugging
 FEATURES = {
     'BOX_MISSION_ENABLED': True,
-    'OBJECT_DETECTION_ENABLED': True,
-    'OBSTACLE_AVOIDANCE_ENABLED': False,  # Enabled for line blocking detection
+    'OBJECT_DETECTION_ENABLED': False,
+    'OBSTACLE_AVOIDANCE_ENABLED': True,  # Enabled for line blocking detection
     'VISION_SYSTEM_ENABLED': False, # Disabled to use encoders
     'CAMERA_LINE_FOLLOWING_ENABLED': True, 
     'POSITION_CORRECTION_ENABLED': False, # N/A for encoder-based tracking
@@ -131,9 +131,15 @@ class RobotController(CameraLineFollowingMixin):
         # Initialize audio feedback system
         self.audio_feedback = AudioFeedback()
 
+        # Initialize object detector for use in obstacle avoidance
+        if FEATURES['OBJECT_DETECTION_ENABLED']:
+            self.object_detector = ObjectDetector(model_path='yolo11n.pt')
+        else:
+            self.object_detector = None
+
         # Initialize obstacle avoidance for line blocking detection
         if FEATURES['OBSTACLE_AVOIDANCE_ENABLED']:
-            self.obstacle_avoidance = CameraObstacleAvoidance(debug=FEATURES['DEBUG_VISUALIZATION_ENABLED'])
+            self.obstacle_avoidance = CameraObstacleAvoidance(object_detector=self.object_detector, debug=FEATURES['DEBUG_VISUALIZATION_ENABLED'])
         else:
             self.obstacle_avoidance = None
 
@@ -146,7 +152,8 @@ class RobotController(CameraLineFollowingMixin):
             self.box_handler = None
 
         if FEATURES['OBJECT_DETECTION_ENABLED']:
-            self.object_detector = ObjectDetector()
+            # This is now initialized earlier for obstacle avoidance
+            pass
         else:
             self.object_detector = None
         
@@ -516,15 +523,15 @@ class RobotController(CameraLineFollowingMixin):
         # Feed camera results to position tracker for hybrid tracking
         self.position_tracker.set_camera_line_result(self.camera_line_result)
         
-        # Check for obstacles blocking the line (skip every other frame for performance)
-        if FEATURES['OBSTACLE_AVOIDANCE_ENABLED'] and self.obstacle_avoidance and self._frame_skip_counter % 2 == 0:
+        # Check for obstacles blocking the line (NO LONGER SKIPPING FRAMES for lower latency)
+        if FEATURES['OBSTACLE_AVOIDANCE_ENABLED'] and self.obstacle_avoidance:
             line_center_x = self.camera_line_result.get('line_center_x', frame.shape[1] // 2)
             obstacle_result = self.obstacle_avoidance.detect_line_blocking_obstacle(frame, line_center_x)
             
             if obstacle_result['is_blocking']:
                 action = obstacle_result['recommended_action']
                 
-                self.audio_feedback.speak("Obstacle blocking line, turning around")
+                self.audio_feedback.speak("Obstacle detected! Rerouting.")
                 
                 # MARK OBSTACLE IN GRID for future A* planning
                 current_cell = self.position_tracker.get_current_cell()

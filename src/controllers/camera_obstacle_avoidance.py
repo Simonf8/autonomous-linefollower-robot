@@ -6,14 +6,18 @@ import time
 from typing import Tuple, Optional, Dict, List
 from collections import deque
 
+# Import the object detector
+from object_detection import ObjectDetector
+
 class CameraObstacleAvoidance:
     """
     Camera-based obstacle avoidance and corner detection system.
     Uses computer vision to detect obstacles ahead and identify corners.
     """
     
-    def __init__(self, debug=False):
+    def __init__(self, object_detector: ObjectDetector, debug=False):
         self.debug = debug
+        self.object_detector = object_detector
         
         # Debug frame optimization
         self.debug_frame_counter = 0
@@ -62,8 +66,12 @@ class CameraObstacleAvoidance:
             - avoidance_action: str (recommended action)
             - processed_frame: frame with debug visualization (if debug=True)
         """
-        if frame is None:
+        if frame is None or self.object_detector is None:
             return self._empty_result()
+        
+        # Use YOLO detector for obstacles
+        detections = self.object_detector.detect_objects(frame)
+        obstacle_detected = detections['obstacle_detected']
         
         height, width = frame.shape[:2]
         self.frames_processed += 1
@@ -78,8 +86,8 @@ class CameraObstacleAvoidance:
         # Gaussian blur
         blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
         
-        # Detect obstacles in the upper portion of the frame
-        obstacle_result = self._detect_obstacles(blurred, width, height)
+        # Obstacle detection is now handled by YOLO, but we can extract info
+        obstacle_result = self._yolo_to_obstacle_result(detections, width)
         
         # Detect corners in the lower portion of the frame
         corner_result = self._detect_corners(blurred, width, height)
@@ -100,8 +108,10 @@ class CameraObstacleAvoidance:
         if self.debug:
             self.debug_frame_counter += 1
             if self.debug_frame_counter % (self.debug_frame_skip + 1) == 0:
+                # Use the YOLO detector's annotation method
+                annotated_frame = self.object_detector.draw_detections(frame, detections)
                 result['processed_frame'] = self._create_debug_frame(
-                    frame, enhanced, obstacle_result, corner_result, result
+                    annotated_frame, enhanced, obstacle_result, corner_result, result
                 )
             else:
                 result['processed_frame'] = frame
@@ -112,7 +122,7 @@ class CameraObstacleAvoidance:
     
     def detect_line_blocking_obstacle(self, frame: np.ndarray, line_center_x: int = None) -> Dict:
         """
-        Detect if there's an obstacle blocking the line path ahead.
+        Detect if there's an obstacle blocking the line path ahead using YOLO.
         
         Args:
             frame: Input camera frame (BGR)
@@ -125,98 +135,98 @@ class CameraObstacleAvoidance:
             - distance: float (0.0 to 1.0)
             - recommended_action: str ('continue', 'turn_around', 'stop')
         """
-        if frame is None:
+        if frame is None or self.object_detector is None:
             return {'is_blocking': False, 'obstacle_detected': False, 'distance': 1.0, 'recommended_action': 'continue'}
-        
+
         height, width = frame.shape[:2]
         
-        # Convert to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Use YOLO to detect all objects
+        detections = self.object_detector.detect_objects(frame)
         
-        # Focus on the area where the line should be (middle section of frame)
-        line_roi_start_y = int(height * 0.3)  # Start checking from 30% down
-        line_roi_end_y = int(height * 0.7)    # Stop at 70% down (before arm area)
-        
-        # Define line corridor width
-        line_corridor_width = width // 4  # 25% of frame width
-        
+        # Combine packages and obstacles into a single list of all detected objects
+        all_objects = detections.get('packages', []) + detections.get('obstacles', [])
+
+        if not all_objects:
+            return {'is_blocking': False, 'obstacle_detected': False, 'distance': 1.0, 'recommended_action': 'continue'}
+
+        # Define the projected path of the robot (the "line corridor")
         if line_center_x is None:
-            line_center_x = width // 2  # Default to center
+            line_center_x = width // 2
         
-        # Define line corridor boundaries
-        corridor_left = max(0, line_center_x - line_corridor_width // 2)
-        corridor_right = min(width, line_center_x + line_corridor_width // 2)
-        
-        # Extract the line corridor ROI
-        line_roi = gray[line_roi_start_y:line_roi_end_y, corridor_left:corridor_right]
-        
-        # Apply edge detection to find obstacles
-        edges = cv2.Canny(line_roi, 50, 150, apertureSize=3)
-        
-        # Morphological operations to connect edges
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-        
-        # Find contours (potential obstacles)
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+        # Corridor is a vertical strip around the line center
+        corridor_width = width // 4  # 25% of frame width, centered on the line
+        corridor_left = max(0, line_center_x - corridor_width // 2)
+        corridor_right = min(width, line_center_x + corridor_width // 2)
+
         is_blocking = False
-        obstacle_detected = False
-        distance = 1.0
-        largest_obstacle = None
-        
-        if contours:
-            # Filter contours by area
-            valid_obstacles = [c for c in contours if cv2.contourArea(c) >= self.min_obstacle_area]
+        closest_blocking_obstacle_dist = float('inf')
+
+        for obstacle in all_objects:
+            bbox = obstacle['bbox']
+            x1, y1, x2, y2 = bbox
             
-            if valid_obstacles:
-                # Find the largest obstacle
-                largest_obstacle = max(valid_obstacles, key=cv2.contourArea)
-                obstacle_area = cv2.contourArea(largest_obstacle)
+            # Check for overlap between obstacle bbox and the line corridor
+            if x1 < corridor_right and x2 > corridor_left:
+                # Obstacle is in our path. Check how close it is.
+                # A simple distance metric: closer obstacles are lower in the frame (larger y2)
+                # and larger in area.
+                distance = 1.0 - (y2 / height) # Normalize distance
                 
-                # Calculate what percentage of the line corridor is blocked
-                roi_area = line_roi.shape[0] * line_roi.shape[1]
-                blocking_ratio = obstacle_area / roi_area
-                
-                # Get obstacle position
-                x, y, w, h = cv2.boundingRect(largest_obstacle)
-                
-                # Estimate distance (objects lower in ROI are closer)
-                distance_factor = (line_roi.shape[0] - y) / line_roi.shape[0]
-                distance = 1.0 - distance_factor
-                
-                obstacle_detected = True
-                
-                # Consider it blocking if it's close and covers significant area
-                if distance < self.obstacle_distance_threshold and blocking_ratio > 0.1:
-                    is_blocking = True
-                
-                if self.debug:
-                    print(f"Obstacle detected: area={obstacle_area}, blocking_ratio={blocking_ratio:.2f}, distance={distance:.2f}")
-        
-        # Determine recommended action
+                # More sensitive threshold: consider any obstacle in the corridor as blocking
+                is_blocking = True
+                if distance < closest_blocking_obstacle_dist:
+                    closest_blocking_obstacle_dist = distance
+
         if is_blocking:
-            if distance < 0.2:  # Very close
-                recommended_action = 'turn_around'
-            elif distance < 0.3:  # Close
-                recommended_action = 'stop'
-            else:
-                recommended_action = 'turn_around'
+            print(f"YOLO OBSTACLE: Detected blocking obstacle at distance {closest_blocking_obstacle_dist:.2f}")
+            # Recommend action based on distance - MORE SENSITIVE
+            if closest_blocking_obstacle_dist < 0.5: # Very close (was 0.4)
+                action = 'turn_around'
+            elif closest_blocking_obstacle_dist < 0.7: # Moderately close (was 0.6)
+                action = 'stop'
+            else: # Farther away but still in the path
+                action = 'turn_around' # Be even more cautious
         else:
-            recommended_action = 'continue'
-        
+            action = 'continue'
+
         return {
             'is_blocking': is_blocking,
-            'obstacle_detected': obstacle_detected,
+            'obstacle_detected': is_blocking, # Only report true if something is actually blocking
+            'distance': closest_blocking_obstacle_dist,
+            'recommended_action': action
+        }
+
+    def _yolo_to_obstacle_result(self, detections: Dict, frame_width: int) -> Dict:
+        """Converts YOLO detections into the format expected by the legacy obstacle logic."""
+        if not detections['obstacle_detected']:
+            return {'detected': False, 'direction': None, 'distance': 1.0, 'contour': None}
+
+        # Find the most significant obstacle (e.g., largest or closest)
+        # For simplicity, we'll use the first one detected.
+        obstacle = detections['obstacles'][0]
+        
+        center_x = obstacle['center'][0]
+        direction = 'center'
+        if center_x < frame_width / 3:
+            direction = 'left'
+        elif center_x > frame_width * 2 / 3:
+            direction = 'right'
+            
+        # Use bounding box bottom edge as a proxy for distance
+        distance = 1.0 - (obstacle['bbox'][3] / self.latest_frame.shape[0])
+
+        return {
+            'detected': True,
+            'direction': direction,
             'distance': distance,
-            'recommended_action': recommended_action,
-            'contour': largest_obstacle,
-            'roi_bounds': (corridor_left, line_roi_start_y, corridor_right, line_roi_end_y)
+            'contour': np.array([[obstacle['bbox'][0], obstacle['bbox'][1]], [obstacle['bbox'][2], obstacle['bbox'][3]]])
         }
 
     def _detect_obstacles(self, gray_frame: np.ndarray, width: int, height: int) -> Dict:
         """
         Detect obstacles in the forward view using edge detection and contour analysis.
+        NOTE: This method is now DEPRECATED in favor of YOLO-based detection.
+        Kept for fallback or debugging purposes.
         """
         # Define ROI for obstacle detection (upper portion of frame)
         roi_height = int(height * self.obstacle_roi_height_ratio)
