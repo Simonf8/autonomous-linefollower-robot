@@ -28,7 +28,7 @@ from camera_obstacle_avoidance import CameraObstacleAvoidance
 # Enable/disable features for easy testing and debugging
 FEATURES = {
     'BOX_MISSION_ENABLED': True,
-    'OBJECT_DETECTION_ENABLED': True,
+    'OBJECT_DETECTION_ENABLED': False,
     'OBSTACLE_AVOIDANCE_ENABLED': False,  # Enabled for line blocking detection
     'VISION_SYSTEM_ENABLED': False, # Disabled to use encoders
     'CAMERA_LINE_FOLLOWING_ENABLED': True, 
@@ -37,338 +37,15 @@ FEATURES = {
     'DEBUG_VISUALIZATION_ENABLED': True,
     'SMOOTH_CORNERING_ENABLED': True,
     'ADAPTIVE_SPEED_ENABLED': True,
-}#!/usr/bin/env python3
-
-import time
-import math
-import numpy as np
-from typing import Dict, List, Tuple, Optional
-from collections import deque
-
-class LineMemoryBuffer:
-    """
-    Line Memory Buffer with Lookahead capability.
-    
-    Stores recent line positions and robot states to provide predicted navigation
-    when the camera temporarily loses the line (e.g., during corners, at endpoints).
-    
-    Features:
-    - Buffers recent line detections with timestamps
-    - Dead reckoning using encoder data and robot kinematics
-    - Time-based prediction for short-term line loss recovery
-    - Adaptive confidence based on buffer age and movement consistency
-    """
-    
-    def __init__(self, buffer_size=200, max_prediction_time=0.6, debug=False):
-        self.debug = debug
-        self.buffer_size = buffer_size
-        self.max_prediction_time = max_prediction_time  # Maximum time to predict without new line data
-        
-        # Line detection history buffer
-        self.line_history = deque(maxlen=self.buffer_size)
-        
-        # Robot state tracking for dead reckoning
-        self.last_robot_state = None
-        self.last_encoder_counts = None
-        self.prediction_start_time = None
-        self.is_predicting = False
-        
-        # Physical robot parameters (should match main robot config)
-        self.wheel_circumference_m = 0.204  # Match encoder_position_tracker.py
-        self.ticks_per_revolution = 960
-        self.meters_per_tick = self.wheel_circumference_m / self.ticks_per_revolution
-        
-        # Line prediction parameters
-        self.prediction_confidence = 1.0
-        self.confidence_decay_rate = 0.5  # How fast confidence decays during prediction
-        self.min_confidence_threshold = 0.3  # Minimum confidence to provide predictions
-        
-        # Movement smoothing
-        self.velocity_history = deque(maxlen=5)
-        self.angular_velocity_history = deque(maxlen=5)
-        
-    def update_line_detection(self, line_result: Dict, robot_state: Dict, encoder_counts: Dict = None):
-        """
-        Update the buffer with new line detection and robot state.
-        
-        Args:
-            line_result: Dictionary from camera line detection
-            robot_state: Current robot state (position, direction, speeds)
-            encoder_counts: Current encoder tick counts
-        """
-        current_time = time.time()
-        
-        # Check if we have a good line detection OR if we're severely off-line
-        line_detected = line_result.get('line_detected', False)
-        line_confidence = line_result.get('line_confidence', 0)
-        line_offset = abs(line_result.get('line_offset', 0))
-        
-        # Consider line "effectively lost" if severely off-center, even if detected
-        SEVERE_OFFSET_THRESHOLD = 0.4  # 40% offset considered "effectively lost"
-        effectively_lost = not line_detected or line_confidence < 0.5 or line_offset > SEVERE_OFFSET_THRESHOLD
-        
-        if line_detected and line_confidence > 0.5 and not effectively_lost:
-            # Good line detection - store it and reset prediction mode
-            self._store_line_detection(line_result, robot_state, current_time)
-            self._reset_prediction_mode()
-            
-            if self.debug and self.is_predicting:
-                print(f"LINE BUFFER: Line reacquired after {current_time - self.prediction_start_time:.1f}s of prediction")
-                
-        else:
-            # Line lost or severely off-center - enter or continue prediction mode
-            if not self.is_predicting:
-                self._enter_prediction_mode(current_time, robot_state, encoder_counts)
-                if self.debug:
-                    reason = "line lost" if not line_detected else f"severe offset ({line_offset:.2f})"
-                    print(f"LINE BUFFER: Entering prediction mode due to {reason}")
-            else:
-                self._update_prediction(current_time, robot_state, encoder_counts)
-    
-    def _store_line_detection(self, line_result: Dict, robot_state: Dict, timestamp: float):
-        """Store a good line detection in the history buffer."""
-        detection_entry = {
-            'timestamp': timestamp,
-            'line_center_x': line_result.get('line_center_x', 0),
-            'line_offset': line_result.get('line_offset', 0.0),
-            'line_confidence': line_result.get('line_confidence', 0.0),
-            'robot_position': robot_state.get('position', (0, 0)),
-            'robot_direction': robot_state.get('direction', 'N'),
-            'robot_speeds': robot_state.get('motor_speeds', {'left': 0, 'right': 0}),
-            'is_at_intersection': line_result.get('is_at_intersection', False)
-        }
-        
-        self.line_history.append(detection_entry)
-        
-        # Update velocity tracking for smoother predictions
-        if len(self.line_history) >= 2:
-            self._update_velocity_tracking()
-        
-        if self.debug and len(self.line_history) % 30 == 0:  # Only log every 30th detection to reduce spam
-            print(f"LINE BUFFER: Stored detection - offset: {line_result.get('line_offset', 0):.3f}, conf: {line_result.get('line_confidence', 0):.2f}")
-    
-    def _update_velocity_tracking(self):
-        """Update velocity estimates based on recent line detections."""
-        if len(self.line_history) < 2:
-            return
-            
-        recent = self.line_history[-1]
-        previous = self.line_history[-2]
-        
-        dt = recent['timestamp'] - previous['timestamp']
-        if dt <= 0:
-            return
-        
-        # Calculate linear velocity from robot speeds (simplified)
-        current_speeds = recent['robot_speeds']
-        avg_speed = (current_speeds.get('left', 0) + current_speeds.get('right', 0)) / 2
-        linear_velocity = avg_speed * 0.01  # Convert to approximate m/s
-        
-        # Calculate angular velocity from speed difference
-        speed_diff = current_speeds.get('right', 0) - current_speeds.get('left', 0)
-        angular_velocity = speed_diff * 0.01  # Simplified angular velocity
-        
-        self.velocity_history.append(linear_velocity)
-        self.angular_velocity_history.append(angular_velocity)
-    
-    def _enter_prediction_mode(self, current_time: float, robot_state: Dict, encoder_counts: Dict):
-        """Enter prediction mode when line is lost."""
-        if len(self.line_history) == 0:
-            if self.debug:
-                print("LINE BUFFER: Cannot enter prediction mode - no line history")
-            return
-            
-        self.is_predicting = True
-        self.prediction_start_time = current_time
-        self.prediction_confidence = 1.0
-        self.last_robot_state = robot_state.copy()
-        self.last_encoder_counts = encoder_counts.copy() if encoder_counts else None
-        
-        if self.debug:
-            print(f"LINE BUFFER: Entered prediction mode at time {current_time:.1f}")
-    
-    def _update_prediction(self, current_time: float, robot_state: Dict, encoder_counts: Dict):
-        """Update prediction based on dead reckoning and time-based extrapolation."""
-        if not self.is_predicting or self.prediction_start_time is None:
-            return
-            
-        prediction_duration = current_time - self.prediction_start_time
-        
-        # Check if we've exceeded maximum prediction time
-        if prediction_duration > self.max_prediction_time:
-            if self.debug:
-                print(f"LINE BUFFER: Prediction timeout after {prediction_duration:.1f}s")
-            self._reset_prediction_mode()
-            return
-        
-        # Decay confidence over time
-        self.prediction_confidence = max(
-            self.min_confidence_threshold,
-            1.0 * (self.confidence_decay_rate ** prediction_duration)
-        )
-        
-        # Update position tracking if we have encoder data
-        if encoder_counts and self.last_encoder_counts:
-            self._update_dead_reckoning(encoder_counts)
-    
-    def _update_dead_reckoning(self, current_encoder_counts: Dict):
-        """Update position estimate using encoder dead reckoning."""
-        if not self.last_encoder_counts:
-            return
-        
-        # Calculate movement since last update
-        left_delta = current_encoder_counts.get('left', 0) - self.last_encoder_counts.get('left', 0)
-        right_delta = current_encoder_counts.get('right', 0) - self.last_encoder_counts.get('right', 0)
-        
-        # Convert to distance (simplified for differential drive)
-        distance_moved = ((left_delta + right_delta) / 2) * self.meters_per_tick
-        
-        if self.debug and distance_moved > 0.001:  # Only log significant movement
-            print(f"LINE BUFFER: Dead reckoning - moved {distance_moved:.3f}m")
-        
-        # Update encoder counts for next iteration
-        self.last_encoder_counts = current_encoder_counts.copy()
-    
-    def _reset_prediction_mode(self):
-        """Reset prediction mode when line is reacquired."""
-        self.is_predicting = False
-        self.prediction_start_time = None
-        self.prediction_confidence = 1.0
-        self.last_robot_state = None
-        self.last_encoder_counts = None
-    
-    def get_predicted_line_state(self, frame_width: int = 320) -> Optional[Dict]:
-        """
-        Get predicted line state when actual line detection fails.
-        
-        Args:
-            frame_width: Camera frame width for offset calculation
-            
-        Returns:
-            Dictionary with predicted line state or None if prediction not available
-        """
-        if not self.is_predicting or len(self.line_history) == 0:
-            return None
-        
-        if self.prediction_confidence < self.min_confidence_threshold:
-            return None
-        
-        # Get the most recent good line detection
-        last_detection = self.line_history[-1]
-        current_time = time.time()
-        prediction_duration = current_time - self.prediction_start_time
-        
-        # Base prediction on last known line state
-        original_offset = last_detection['line_offset']
-        predicted_offset = original_offset
-        predicted_center_x = last_detection['line_center_x']
-        
-        # Check if this is a severe offset situation requiring corrective guidance
-        is_severe_offset = abs(original_offset) > 0.4
-        
-        # Apply movement-based correction if we have velocity data
-        if len(self.velocity_history) > 0 and len(self.angular_velocity_history) > 0:
-            avg_angular_vel = sum(self.angular_velocity_history) / len(self.angular_velocity_history)
-            
-            # Predict line offset change based on angular velocity
-            # Positive angular velocity (right turn) should increase line offset (line appears more left)
-            offset_change = avg_angular_vel * prediction_duration * 0.1  # Scale factor
-            predicted_offset = max(-1.0, min(1.0, predicted_offset + offset_change))
-        
-        # For severe offsets, provide aggressive corrective guidance
-        if is_severe_offset:
-            # Guide the robot back toward center (0.0 offset)
-            correction_strength = min(1.0, prediction_duration * 2.0)  # Increase over time
-            corrective_offset = -original_offset * correction_strength * 0.8  # Pull toward center
-            predicted_offset = max(-1.0, min(1.0, predicted_offset + corrective_offset))
-            
-            if self.debug:
-                print(f"LINE BUFFER: Applying corrective guidance - original: {original_offset:.3f}, corrected: {predicted_offset:.3f}")
-        
-        # Update predicted center position
-        predicted_center_x = int(frame_width // 2 + predicted_offset * (frame_width // 2))
-        
-        # Create predicted line result
-        predicted_result = {
-            'line_detected': True,
-            'line_center_x': predicted_center_x,
-            'line_offset': predicted_offset,
-            'line_confidence': self.prediction_confidence,
-            'status': 'predicted_from_memory',
-            'is_at_intersection': False,  # Conservative assumption during prediction
-            'prediction_duration': prediction_duration,
-            'buffer_size': len(self.line_history),
-            'last_real_detection_age': current_time - last_detection['timestamp']
-        }
-        
-        if self.debug:
-            print(f"LINE BUFFER: Providing prediction - offset: {predicted_offset:.3f}, conf: {self.prediction_confidence:.2f}, duration: {prediction_duration:.1f}s")
-        
-        return predicted_result
-    
-    def get_line_trend(self) -> Dict:
-        """
-        Analyze recent line detections to determine movement trends.
-        
-        Returns:
-            Dictionary with trend analysis (direction, consistency, etc.)
-        """
-        if len(self.line_history) < 3:
-            return {'trend': 'insufficient_data', 'consistency': 0.0}
-        
-        # Get recent offsets
-        recent_offsets = [entry['line_offset'] for entry in list(self.line_history)[-5:]]
-        
-        # Calculate trend direction
-        if len(recent_offsets) >= 2:
-            trend_direction = 'left' if recent_offsets[-1] < recent_offsets[0] else 'right'
-            if abs(recent_offsets[-1] - recent_offsets[0]) < 0.1:
-                trend_direction = 'straight'
-        else:
-            trend_direction = 'unknown'
-        
-        # Calculate consistency (how stable the line tracking has been)
-        offset_variance = np.var(recent_offsets) if len(recent_offsets) > 1 else 0
-        consistency = max(0.0, 1.0 - offset_variance * 5)  # Scale variance to 0-1
-        
-        return {
-            'trend': trend_direction,
-            'consistency': consistency,
-            'recent_offsets': recent_offsets,
-            'average_offset': np.mean(recent_offsets),
-            'offset_variance': offset_variance
-        }
-    
-    def get_buffer_status(self) -> Dict:
-        """Get current buffer status for debugging and monitoring."""
-        return {
-            'buffer_size': len(self.line_history),
-            'max_buffer_size': self.buffer_size,
-            'is_predicting': self.is_predicting,
-            'prediction_confidence': self.prediction_confidence,
-            'prediction_duration': time.time() - self.prediction_start_time if self.prediction_start_time else 0,
-            'last_detection_age': time.time() - self.line_history[-1]['timestamp'] if self.line_history else float('inf'),
-            'velocity_samples': len(self.velocity_history),
-            'angular_velocity_samples': len(self.angular_velocity_history)
-        }
-    
-    def clear_buffer(self):
-        """Clear all buffered data - useful for mission restart."""
-        self.line_history.clear()
-        self.velocity_history.clear()
-        self.angular_velocity_history.clear()
-        self._reset_prediction_mode()
-        
-        if self.debug:
-            print("LINE BUFFER: Buffer cleared") 
+}
 
 # ================================
 # ROBOT CONFIGURATION
 # ================================
 CELL_SIZE_M = 0.064
-BASE_SPEED = 60     # Reduced from 75 for better control
+BASE_SPEED = 50     # Reduced from 75 for better control
 TURN_SPEED = 40     # Reduced from 60 for more accurate turns
-CORNER_SPEED = 45   # Reduced from 55 for better corner navigation
+CORNER_SPEED = 35   # Reduced from 55 for better corner navigation
 
 # If corners are still too fast, you can further reduce these values:
 # TURN_SPEED = 30   # Even slower turning
@@ -746,20 +423,12 @@ class RobotController(CameraLineFollowingMixin):
                 # The final state transition is handled by the `current_cell == target_cell` check below
                 pass
 
-        # Check if robot with package is close to any dropoff location (within 1 cell)
+        # Check if robot with package is close to any dropoff location (within 2 cells)
         if FEATURES['BOX_MISSION_ENABLED'] and self.box_handler.has_package:
-            # Debug: Always show current position and distances to dropoffs when carrying a package
-            closest_dropoff_distance = float('inf')
-            closest_dropoff = None
-            
             for dropoff_location in self.box_handler.dropoff_locations:
                 distance_to_dropoff = abs(current_cell[0] - dropoff_location[0]) + abs(current_cell[1] - dropoff_location[1])
-                if distance_to_dropoff < closest_dropoff_distance:
-                    closest_dropoff_distance = distance_to_dropoff
-                    closest_dropoff = dropoff_location
-                
-                if distance_to_dropoff <= 1:  # Within 1 cell of dropoff (much closer)
-                    print(f"EARLY DROPOFF: Robot at {current_cell} is within 1 cell of dropoff {dropoff_location} (distance: {distance_to_dropoff})")
+                if distance_to_dropoff <= 2:  # Within 2 cells of dropoff
+                    print(f"EARLY DROPOFF: Robot at {current_cell} is within 2 cells of dropoff {dropoff_location} (distance: {distance_to_dropoff})")
                     print("EARLY DROPOFF: Deactivating electromagnet and dropping box")
                     self.audio_feedback.speak("Dropping box near target.")
                     
@@ -777,14 +446,6 @@ class RobotController(CameraLineFollowingMixin):
                     else:
                         self.state = "going_to_pickup"
                     return
-            
-            # Debug: Show closest dropoff distance every few seconds
-            if not hasattr(self, '_last_dropoff_debug_time'):
-                self._last_dropoff_debug_time = 0
-            
-            if time.time() - self._last_dropoff_debug_time > 2.0:  # Every 2 seconds
-                print(f"DROPOFF DEBUG: Robot at {current_cell} with package, closest dropoff {closest_dropoff} is {closest_dropoff_distance} cells away")
-                self._last_dropoff_debug_time = time.time()
 
         # Check for arrival at the final destination of the current path segment
         if current_cell == target_cell:
@@ -840,6 +501,33 @@ class RobotController(CameraLineFollowingMixin):
         self.position_tracker.set_camera_line_result(self.camera_line_result)
         
         # Check for obstacles blocking the line (skip every other frame for performance)
+        if FEATURES['OBSTACLE_AVOIDANCE_ENABLED'] and self.object_detector and self._frame_skip_counter % 2 == 0:
+            detection_result = self.object_detector.detect_objects(frame)
+            if detection_result and detection_result['obstacle_detected']:
+                # For now, any detected object other than a package is an obstacle
+                print("YOLO Obstacle Detected!")
+                self.audio_feedback.speak("Obstacle detected, finding new path.")
+
+                # Mark the cell ahead as an obstacle
+                current_cell = self.position_tracker.get_current_cell()
+                current_dir = self.position_tracker.current_direction
+                if current_dir == 'N': obstacle_cell = (current_cell[0], current_cell[1] - 1)
+                elif current_dir == 'S': obstacle_cell = (current_cell[0], current_cell[1] + 1)
+                elif current_dir == 'E': obstacle_cell = (current_cell[0] + 1, current_cell[1])
+                elif current_dir == 'W': obstacle_cell = (current_cell[0] - 1, current_cell[1])
+                else: obstacle_cell = current_cell
+
+                if 0 <= obstacle_cell[1] < len(self.maze) and 0 <= obstacle_cell[0] < len(self.maze[0]):
+                    print(f"Marking obstacle at {obstacle_cell}")
+                    self.pathfinder.update_obstacle(obstacle_cell[0], obstacle_cell[1], True)
+
+                    # Replan path from current position
+                    target_cell = self.path[-1]
+                    self.path = []
+                    self.current_target_index = 0
+                    self._plan_path_to_target(target_cell)
+                    return # Exit to start following the new path
+
         if FEATURES['OBSTACLE_AVOIDANCE_ENABLED'] and self.obstacle_avoidance and self._frame_skip_counter % 2 == 0:
             line_center_x = self.camera_line_result.get('line_center_x', frame.shape[1] // 2)
             obstacle_result = self.obstacle_avoidance.detect_line_blocking_obstacle(frame, line_center_x)
@@ -950,17 +638,26 @@ class RobotController(CameraLineFollowingMixin):
         
         # Check if the look-ahead system says we're ready for pickup
         if self.camera_line_result.get('ready_for_pickup', False):
-            print("Look-ahead system signals: Ready for pickup!")
-            self.audio_feedback.speak("Box in position. Grabbing.")
-            self._stop_motors()
+            current_cell = self.position_tracker.get_current_cell()
+            is_at_pickup_loc = self.box_handler and any(
+                abs(current_cell[0] - loc[0]) + abs(current_cell[1] - loc[1]) <= 1
+                for loc in self.box_handler.pickup_locations
+            )
+
+            if is_at_pickup_loc:
+                print("Look-ahead system signals: Ready for pickup at a valid location!")
+                self.audio_feedback.speak("Box in position. Grabbing.")
+                self._stop_motors()
             
-            # Ensure electromagnet is on before grabbing
-            if self.motor_controller and not self.box_handler.has_package:
-                print("Activating electromagnet for immediate pickup")
-                self.motor_controller.electromagnet_on()
+                # Ensure electromagnet is on before grabbing
+                if self.motor_controller and not self.box_handler.has_package:
+                    print("Activating electromagnet for immediate pickup")
+                    self.motor_controller.electromagnet_on()
             
-            self.state = 'grabbing_box'
-            return
+                self.state = 'grabbing_box'
+                return
+            else:
+                print(f"INFO: 'ready_for_pickup' signal ignored at non-pickup location {current_cell}")
         
         self._set_motor_speeds(fl, fr, bl, br)
 
@@ -1100,18 +797,6 @@ class RobotController(CameraLineFollowingMixin):
         """Run the robot's state machine."""
         # Update position from encoders at the start of each cycle.
         self.position_tracker.update_position()
-        current_cell = self.position_tracker.get_current_cell()
-
-        # Universal check for dropoff proximity when carrying a package
-        if self.state != "at_dropoff" and FEATURES['BOX_MISSION_ENABLED'] and self.box_handler and self.box_handler.has_package:
-            for dropoff_location in self.box_handler.dropoff_locations:
-                distance = abs(current_cell[0] - dropoff_location[0]) + abs(current_cell[1] - dropoff_location[1])
-                if distance <= 1:
-                    print(f"PROXIMITY DROP: Robot at {current_cell} is close to {dropoff_location}. Forcing dropoff.")
-                    self.audio_feedback.speak("Dropping box.")
-                    self._stop_motors()
-                    self.state = "at_dropoff"
-                    break  # Exit loop, the state will be handled on the next cycle
 
         if self.state == "idle":
             self._stop_motors()
@@ -1828,15 +1513,15 @@ class RobotController(CameraLineFollowingMixin):
         
         # Push forward firmly to ensure good contact with box
         print("GRABBING BOX: Making firm contact with box")
-        self._set_motor_speeds(38, 38, 38, 38)  # Slightly stronger to close that 2cm gap
-        time.sleep(0.9)  # Push a bit longer to ensure contact
+        self._set_motor_speeds(42, 42, 42, 42)  # Increased for a bit more push
+        time.sleep(1.0)  # Push a bit longer to ensure contact
         self._stop_motors()
         
         # Short pause then second push to close any remaining gap
         time.sleep(0.2)
         print("GRABBING BOX: Second push to close final gap")
-        self._set_motor_speeds(30, 30, 30, 30)  # Stronger second push to close the gap
-        time.sleep(0.6)  # Longer second push
+        self._set_motor_speeds(35, 35, 35, 35)  # Stronger second push to close the gap
+        time.sleep(0.7)  # Longer second push
         self._stop_motors()
         
         time.sleep(1.5) # Wait for electromagnet to securely engage with box
