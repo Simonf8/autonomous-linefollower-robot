@@ -423,12 +423,20 @@ class RobotController(CameraLineFollowingMixin):
                 # The final state transition is handled by the `current_cell == target_cell` check below
                 pass
 
-        # Check if robot with package is close to any dropoff location (within 2 cells)
+        # Check if robot with package is close to any dropoff location (within 1 cell)
         if FEATURES['BOX_MISSION_ENABLED'] and self.box_handler.has_package:
+            # Debug: Always show current position and distances to dropoffs when carrying a package
+            closest_dropoff_distance = float('inf')
+            closest_dropoff = None
+            
             for dropoff_location in self.box_handler.dropoff_locations:
                 distance_to_dropoff = abs(current_cell[0] - dropoff_location[0]) + abs(current_cell[1] - dropoff_location[1])
-                if distance_to_dropoff <= 2:  # Within 2 cells of dropoff
-                    print(f"EARLY DROPOFF: Robot at {current_cell} is within 2 cells of dropoff {dropoff_location} (distance: {distance_to_dropoff})")
+                if distance_to_dropoff < closest_dropoff_distance:
+                    closest_dropoff_distance = distance_to_dropoff
+                    closest_dropoff = dropoff_location
+                
+                if distance_to_dropoff <= 1:  # Within 1 cell of dropoff (much closer)
+                    print(f"EARLY DROPOFF: Robot at {current_cell} is within 1 cell of dropoff {dropoff_location} (distance: {distance_to_dropoff})")
                     print("EARLY DROPOFF: Deactivating electromagnet and dropping box")
                     self.audio_feedback.speak("Dropping box near target.")
                     
@@ -446,6 +454,14 @@ class RobotController(CameraLineFollowingMixin):
                     else:
                         self.state = "going_to_pickup"
                     return
+            
+            # Debug: Show closest dropoff distance every few seconds
+            if not hasattr(self, '_last_dropoff_debug_time'):
+                self._last_dropoff_debug_time = 0
+            
+            if time.time() - self._last_dropoff_debug_time > 2.0:  # Every 2 seconds
+                print(f"DROPOFF DEBUG: Robot at {current_cell} with package, closest dropoff {closest_dropoff} is {closest_dropoff_distance} cells away")
+                self._last_dropoff_debug_time = time.time()
 
         # Check for arrival at the final destination of the current path segment
         if current_cell == target_cell:
@@ -761,6 +777,18 @@ class RobotController(CameraLineFollowingMixin):
         """Run the robot's state machine."""
         # Update position from encoders at the start of each cycle.
         self.position_tracker.update_position()
+        current_cell = self.position_tracker.get_current_cell()
+
+        # Universal check for dropoff proximity when carrying a package
+        if self.state != "at_dropoff" and FEATURES['BOX_MISSION_ENABLED'] and self.box_handler and self.box_handler.has_package:
+            for dropoff_location in self.box_handler.dropoff_locations:
+                distance = abs(current_cell[0] - dropoff_location[0]) + abs(current_cell[1] - dropoff_location[1])
+                if distance <= 1:
+                    print(f"PROXIMITY DROP: Robot at {current_cell} is close to {dropoff_location}. Forcing dropoff.")
+                    self.audio_feedback.speak("Dropping box.")
+                    self._stop_motors()
+                    self.state = "at_dropoff"
+                    break  # Exit loop, the state will be handled on the next cycle
 
         if self.state == "idle":
             self._stop_motors()
