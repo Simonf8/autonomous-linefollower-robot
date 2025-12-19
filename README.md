@@ -1,4 +1,4 @@
-# Autonomous Line-Following Robot 🤖
+# Autonomous Line-Following Robot
 
 A sophisticated autonomous robot system featuring computer vision, A\* pathfinding, and hybrid localization. This project integrates high-level mission planning on a Raspberry Pi with low-level motor control on an ESP32 (or direct GPIO control).
 
