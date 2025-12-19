@@ -95,29 +95,20 @@ class BoxHandler:
         Returns:
             True if collection successful
         """
-        print(f"COLLECT_PACKAGE: Called with pickup_location={pickup_location}, tolerance={tolerance}")
-        print(f"COLLECT_PACKAGE: has_package={self.has_package}")
-        
         if self.has_package:
-            print("COLLECT_PACKAGE: Already have package, returning False")
             return False
         
         # Find which box this corresponds to - with tolerance
         box_id = None
-        print(f"COLLECT_PACKAGE: Searching through box_states with tolerance {tolerance}:")
         for bid, box_info in self.box_states.items():
             expected_location = box_info['pickup_location']
             distance = abs(pickup_location[0] - expected_location[0]) + abs(pickup_location[1] - expected_location[1])
-            print(f"COLLECT_PACKAGE: Box {bid} - expected={expected_location}, actual={pickup_location}, distance={distance}, state={box_info['state']}")
             
             if (distance <= tolerance and box_info['state'] == BoxState.AVAILABLE):
                 box_id = bid
-                print(f"COLLECT_PACKAGE: MATCH FOUND! Box {bid} within tolerance {tolerance}")
                 break
         
-        print(f"COLLECT_PACKAGE: Found box_id={box_id}")
         if not box_id:
-            print("COLLECT_PACKAGE: No matching box found within tolerance, returning False")
             # Try to find the nearest available box as fallback
             nearest_box = None
             min_distance = float('inf')
@@ -129,8 +120,7 @@ class BoxHandler:
                         min_distance = distance
                         nearest_box = bid
             
-            if nearest_box and min_distance <= 2:  # Allow up to 2 cells away as emergency fallback
-                print(f"COLLECT_PACKAGE: EMERGENCY FALLBACK - Using nearest box {nearest_box} at distance {min_distance}")
+            if nearest_box and min_distance <= 2:
                 box_id = nearest_box
             else:
                 return False

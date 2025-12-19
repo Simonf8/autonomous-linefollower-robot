@@ -1,14 +1,17 @@
 import time
 import math
-from typing import Tuple, Dict, Optional
+from config import *
 
 class EncoderPositionTracker:
     """Tracks the robot's position (grid cell) and orientation using wheel encoders with camera assistance."""
 
-    def __init__(self, maze: list, start_pos: Tuple[int, int], motor_controller,
-                 start_direction: str = 'N', cell_size_m: float = 0.11,
+    def __init__(self, maze: list = None, start_pos: Tuple[int, int] = START_CELL, motor_controller = None,
+                 start_direction: str = START_DIRECTION, cell_size_m: float = CELL_SIZE_M,
                  wheel_circumference_m: float = 0.204, ticks_per_revolution: int = 960,
                  debug: bool = False):
+        
+        if maze is None:
+            maze = MAZE_GRID
 
         self.maze = maze
         self.motor_controller = motor_controller

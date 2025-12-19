@@ -1,24 +1,21 @@
+# Computer Vision & ML
+ultralytics
+opencv-python
 numpy
 scipy
-opencv-python
+
+# Web Server
 Flask
-Pillow
-filterpy
-requests
+
+# Hardware & System
 RPi.GPIO
 picamera2
+Pillow
+requests
 
-# Enhanced TTS Audio Feedback Dependencies (optional)
-# Install with: pip install -r requirements.txt
-# For best results, also install system packages:
-# sudo apt-get install espeak espeak-data libespeak-dev ffmpeg
+# Navigation & Filtering
+filterpy
 
-# Microsoft Edge TTS (free, high quality, no API key needed)
+# Audio Feedback
 edge-tts>=6.1.0
-
-# Google Text-to-Speech (free, requires internet)
 gtts>=2.3.0
-
-# Additional audio players for better compatibility
-# Note: mpv and ffmpeg should be installed via system package manager:
-# sudo apt-get install mpv ffmpeg 

@@ -247,7 +247,3 @@ class PiMotorController:
         if self.electromagnet:
             return self.electromagnet.is_active
         return False
-
-    def move_forward(self, speed: int = 50):
-        """Move robot forward at specified speed."""
-        self.send_motor_speeds(speed, speed) 

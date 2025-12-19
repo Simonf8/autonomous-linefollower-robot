@@ -1,61 +1,33 @@
 #!/usr/bin/env python3
 
 import heapq
-import logging
-from typing import List, Tuple, Optional, Set, Dict
+from config import *
 
 class Pathfinder:
     """
     Dijkstra-based pathfinding for grid-based navigation with dynamic replanning.
     """
     
-    def __init__(self, grid: List[List[int]], cell_size_m: float = 0.025, turn_penalty: float = 3.0):
+    def __init__(self, grid: List[List[int]] = None, cell_size_m: float = CELL_SIZE_M, turn_penalty: float = 3.0):
         """
         Initialize pathfinder.
         
         Args:
-            grid: 2D grid where 0 = path, 1 = obstacle
+            grid: 2D grid where 0 = path, 1 = obstacle. Defaults to MAZE_GRID if None.
             cell_size_m: Width of each grid cell in meters
             turn_penalty: Cost penalty for each turn (higher = prefer straight lines more)
         """
+        if grid is None:
+            grid = MAZE_GRID
+            
         self.original_grid = [row[:] for row in grid]  
         self.grid = [row[:] for row in grid]
         self.cell_size_m = cell_size_m
-        
         self.height = len(grid)
         self.width = len(grid[0]) if grid else 0
-        
-        # Turn penalty - increase this to prefer straighter paths
-        # 0 = shortest path, 1-2 = slight preference, 3-5 = strong preference, >5 = very strong preference
         self.turn_penalty = turn_penalty
-        
-        # Cache for computed distances
         self._distance_cache = {}
         self._last_goal = None
-    
-    @staticmethod
-    def create_maze_grid() -> List[List[int]]:
-        """Creates the default maze grid layout."""
-     
-        maze = [
-            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1], # Row 0
-            [0,1,0,1,0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1], # Row 1
-            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], # Row 2
-            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 3
-            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 4
-            [0,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0], # Row 5
-            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 6
-            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], # Row 7
-            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 8
-            [0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,0], # Row 9
-            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 10
-            [0,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0], # Row 11
-            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], # Row 12
-            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0], # Row 13
-            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,1,0,1,0,1,0]  # Row 14
-        ]
-        # Return the maze as-is, no horizontal flip needed
-        return maze
     
     def get_grid(self) -> List[List[int]]:
         """Return the current grid."""

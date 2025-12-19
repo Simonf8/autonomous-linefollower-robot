@@ -9,7 +9,7 @@ from typing import List, Tuple, Optional, Dict
 class ObjectDetector:
     """Handles YOLO-based object detection for packages and obstacles."""
     
-    def __init__(self, model_path: str = 'yolo11n.pt', confidence_threshold: float = 0.5):
+    def __init__(self, model_path: str = 'models/yolo11n.pt', confidence_threshold: float = 0.5):
         """
         Initialize object detector.
         
